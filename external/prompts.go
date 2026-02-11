@@ -1,4 +1,4 @@
-// Prompts for external LLM providers (OpenAI, Anthropic).
+// Prompts for external LLM providers (OpenAI, Anthropic, Gemini).
 //
 // This file centralizes all prompts used for tool output compression.
 // Two modes are supported:
@@ -249,4 +249,102 @@ func ExtractAnthropicResponse(resp *AnthropicResponse) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("Anthropic response has no text content")
+}
+
+// =============================================================================
+// GEMINI TYPES
+// =============================================================================
+
+// GeminiPart represents a content part in Gemini format.
+type GeminiPart struct {
+	Text string `json:"text"`
+}
+
+// GeminiContent represents a content block in Gemini format.
+type GeminiContent struct {
+	Role  string       `json:"role,omitempty"`
+	Parts []GeminiPart `json:"parts"`
+}
+
+// GeminiGenerationConfig contains generation parameters.
+type GeminiGenerationConfig struct {
+	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	Temperature     float64 `json:"temperature"`
+}
+
+// GeminiRequest is the request body for Gemini generateContent API.
+type GeminiRequest struct {
+	SystemInstruction *GeminiContent          `json:"systemInstruction,omitempty"`
+	Contents          []GeminiContent         `json:"contents"`
+	GenerationConfig  *GeminiGenerationConfig `json:"generationConfig,omitempty"`
+}
+
+// GeminiResponse is the response from Gemini generateContent API.
+type GeminiResponse struct {
+	Candidates []struct {
+		Content struct {
+			Parts []GeminiPart `json:"parts"`
+		} `json:"content"`
+	} `json:"candidates"`
+	UsageMetadata struct {
+		PromptTokenCount     int `json:"promptTokenCount"`
+		CandidatesTokenCount int `json:"candidatesTokenCount"`
+		TotalTokenCount      int `json:"totalTokenCount"`
+	} `json:"usageMetadata"`
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Status  string `json:"status"`
+	} `json:"error,omitempty"`
+}
+
+// BuildGeminiRequest creates a Gemini generateContent request for compression.
+func BuildGeminiRequest(model, toolName, content, userQuery string, queryAgnostic bool, maxTokens int) *GeminiRequest {
+	var systemPrompt, userPrompt string
+
+	if queryAgnostic || userQuery == "" {
+		systemPrompt = SystemPromptQueryAgnostic
+		userPrompt = UserPromptQueryAgnostic(toolName, content)
+	} else {
+		systemPrompt = SystemPromptQuerySpecific
+		userPrompt = UserPromptQuerySpecific(userQuery, toolName, content)
+	}
+
+	if maxTokens == 0 {
+		maxTokens = len(content) / 8
+		if maxTokens < 256 {
+			maxTokens = 256
+		}
+		if maxTokens > 4096 {
+			maxTokens = 4096
+		}
+	}
+
+	return &GeminiRequest{
+		SystemInstruction: &GeminiContent{
+			Parts: []GeminiPart{{Text: systemPrompt}},
+		},
+		Contents: []GeminiContent{
+			{Role: "user", Parts: []GeminiPart{{Text: userPrompt}}},
+		},
+		GenerationConfig: &GeminiGenerationConfig{
+			MaxOutputTokens: maxTokens,
+			Temperature:     0.0,
+		},
+	}
+}
+
+// ExtractGeminiResponse extracts the compressed content from Gemini response.
+func ExtractGeminiResponse(resp *GeminiResponse) (string, error) {
+	if resp.Error != nil {
+		return "", fmt.Errorf("Gemini API error (%d): %s", resp.Error.Code, resp.Error.Message)
+	}
+	if len(resp.Candidates) == 0 {
+		return "", fmt.Errorf("Gemini response has no candidates")
+	}
+	parts := resp.Candidates[0].Content.Parts
+	if len(parts) == 0 {
+		return "", fmt.Errorf("Gemini response has no content parts")
+	}
+	return strings.TrimSpace(parts[0].Text), nil
 }

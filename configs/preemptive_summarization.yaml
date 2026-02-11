@@ -40,10 +40,25 @@ preemptive:
   compaction_log_path: "${SESSION_COMPACTION_LOG:-logs/compaction.jsonl}"
   
   summarizer:
-    # Haiku is fast and cheap - perfect for background summarization
+    # Provider is auto-detected from endpoint URL:
+    #   - api.anthropic.com → Anthropic
+    #   - generativelanguage.googleapis.com → Gemini
+    #   - anything else → OpenAI-compatible
+    #
+    # Anthropic (default):
     model: "claude-haiku-4-5"
     api_key: "${ANTHROPIC_API_KEY}"
     endpoint: "https://api.anthropic.com/v1/messages"
+    #
+    # Gemini example:
+    #   model: "gemini-2.0-flash"
+    #   api_key: "${GEMINI_API_KEY}"
+    #   endpoint: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    #
+    # OpenAI example:
+    #   model: "gpt-4o-mini"
+    #   api_key: "${OPENAI_API_KEY}"
+    #   endpoint: "https://api.openai.com/v1/chat/completions"
     
     max_tokens: 4096
     timeout: 60s

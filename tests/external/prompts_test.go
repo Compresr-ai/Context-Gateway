@@ -282,3 +282,125 @@ func TestExtractResponses(t *testing.T) {
 		assert.Equal(t, "actual result", content)
 	})
 }
+
+// TestBuildGeminiRequest tests Gemini request building.
+func TestBuildGeminiRequest(t *testing.T) {
+	t.Run("builds_query_specific_request", func(t *testing.T) {
+		req := external.BuildGeminiRequest(
+			"gemini-2.0-flash",
+			"bash",
+			"output content here",
+			"what files are there?",
+			false,
+			0,
+		)
+
+		require.NotNil(t, req.SystemInstruction)
+		assert.Len(t, req.SystemInstruction.Parts, 1)
+		assert.Contains(t, req.SystemInstruction.Parts[0].Text, "relevant to the user's question")
+		assert.Len(t, req.Contents, 1)
+		assert.Equal(t, "user", req.Contents[0].Role)
+		assert.Contains(t, req.Contents[0].Parts[0].Text, "what files are there?")
+		require.NotNil(t, req.GenerationConfig)
+		assert.Equal(t, 0.0, req.GenerationConfig.Temperature)
+	})
+
+	t.Run("builds_query_agnostic_request", func(t *testing.T) {
+		req := external.BuildGeminiRequest(
+			"gemini-2.0-flash",
+			"read_file",
+			"file content",
+			"user query",
+			true,
+			0,
+		)
+
+		assert.Contains(t, req.SystemInstruction.Parts[0].Text, "essential information structure")
+		assert.NotContains(t, req.Contents[0].Parts[0].Text, "User's Question:")
+	})
+
+	t.Run("auto_calculates_max_tokens", func(t *testing.T) {
+		req := external.BuildGeminiRequest("gemini-2.0-flash", "bash", "short", "", true, 0)
+		assert.Equal(t, 256, req.GenerationConfig.MaxOutputTokens)
+
+		largeContent := strings.Repeat("x", 10000)
+		req = external.BuildGeminiRequest("gemini-2.0-flash", "bash", largeContent, "", true, 0)
+		assert.Equal(t, 1250, req.GenerationConfig.MaxOutputTokens)
+
+		veryLarge := strings.Repeat("x", 100000)
+		req = external.BuildGeminiRequest("gemini-2.0-flash", "bash", veryLarge, "", true, 0)
+		assert.Equal(t, 4096, req.GenerationConfig.MaxOutputTokens)
+	})
+
+	t.Run("respects_explicit_max_tokens", func(t *testing.T) {
+		req := external.BuildGeminiRequest("gemini-2.0-flash", "bash", "content", "", true, 1000)
+		assert.Equal(t, 1000, req.GenerationConfig.MaxOutputTokens)
+	})
+}
+
+// TestExtractGeminiResponse tests Gemini response extraction.
+func TestExtractGeminiResponse(t *testing.T) {
+	t.Run("extracts_successful_response", func(t *testing.T) {
+		resp := &external.GeminiResponse{}
+		resp.Candidates = append(resp.Candidates, struct {
+			Content struct {
+				Parts []external.GeminiPart `json:"parts"`
+			} `json:"content"`
+		}{
+			Content: struct {
+				Parts []external.GeminiPart `json:"parts"`
+			}{
+				Parts: []external.GeminiPart{{Text: "  compressed content  "}},
+			},
+		})
+
+		content, err := external.ExtractGeminiResponse(resp)
+		require.NoError(t, err)
+		assert.Equal(t, "compressed content", content)
+	})
+
+	t.Run("handles_api_error", func(t *testing.T) {
+		resp := &external.GeminiResponse{
+			Error: &struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+				Status  string `json:"status"`
+			}{
+				Code:    429,
+				Message: "quota exceeded",
+				Status:  "RESOURCE_EXHAUSTED",
+			},
+		}
+
+		_, err := external.ExtractGeminiResponse(resp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "quota exceeded")
+		assert.Contains(t, err.Error(), "429")
+	})
+
+	t.Run("handles_no_candidates", func(t *testing.T) {
+		resp := &external.GeminiResponse{}
+		_, err := external.ExtractGeminiResponse(resp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no candidates")
+	})
+
+	t.Run("handles_no_parts", func(t *testing.T) {
+		resp := &external.GeminiResponse{}
+		resp.Candidates = append(resp.Candidates, struct {
+			Content struct {
+				Parts []external.GeminiPart `json:"parts"`
+			} `json:"content"`
+		}{
+			Content: struct {
+				Parts []external.GeminiPart `json:"parts"`
+			}{
+				Parts: []external.GeminiPart{},
+			},
+		})
+
+		_, err := external.ExtractGeminiResponse(resp)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no content parts")
+	})
+}

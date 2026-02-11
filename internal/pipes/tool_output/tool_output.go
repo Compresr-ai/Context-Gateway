@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -571,118 +570,55 @@ func (p *Pipe) compressViaAPI(query, content, toolName, provider string) (string
 	return result.Data.CompressedOutput, nil
 }
 
-// compressViaExternalProvider calls an external LLM provider (OpenAI/Anthropic) directly.
+// compressViaExternalProvider calls an external LLM provider directly.
 // Uses the api config (endpoint, api_key, model) from the config file.
-// Provider is inferred from the endpoint URL.
+// Provider is auto-detected from endpoint URL or can be set explicitly.
 func (p *Pipe) compressViaExternalProvider(query, content, toolName string) (string, error) {
-	// Infer provider from endpoint URL
-	sourceProvider := "openai"
-	if strings.Contains(p.apiEndpoint, "anthropic") {
-		sourceProvider = "anthropic"
-	}
-
-	var body []byte
-	var err error
-
-	// Build request based on source provider
-	if sourceProvider == "anthropic" {
-		req := external.BuildAnthropicRequest(
-			p.apiModel,
-			toolName,
-			content,
-			query,
-			p.apiQueryAgnostic,
-			0, // auto-calculate max tokens
-		)
-		body, err = json.Marshal(req)
+	var systemPrompt, userPrompt string
+	if p.apiQueryAgnostic || query == "" {
+		systemPrompt = external.SystemPromptQueryAgnostic
+		userPrompt = external.UserPromptQueryAgnostic(toolName, content)
 	} else {
-		// OpenAI format
-		req := external.BuildOpenAIRequest(
-			p.apiModel,
-			toolName,
-			content,
-			query,
-			p.apiQueryAgnostic,
-			0, // auto-calculate max tokens
-		)
-		body, err = json.Marshal(req)
+		systemPrompt = external.SystemPromptQuerySpecific
+		userPrompt = external.UserPromptQuerySpecific(query, toolName, content)
 	}
 
+	// Auto-calculate max tokens
+	maxTokens := len(content) / 8
+	if maxTokens < 256 {
+		maxTokens = 256
+	}
+	if maxTokens > 4096 {
+		maxTokens = 4096
+	}
+
+	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     p.apiEndpoint,
+		APIKey:       p.apiKey,
+		Model:        p.apiModel,
+		SystemPrompt: systemPrompt,
+		UserPrompt:   userPrompt,
+		MaxTokens:    maxTokens,
+		Timeout:      p.apiTimeout,
+	})
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal %s request: %w", sourceProvider, err)
-	}
-
-	// Make request to external provider
-	ctx, cancel := context.WithTimeout(context.Background(), p.apiTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.apiEndpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to create %s request: %w", sourceProvider, err)
-	}
-
-	// Set headers based on provider
-	req.Header.Set("Content-Type", "application/json")
-	if sourceProvider == "anthropic" {
-		req.Header.Set("x-api-key", p.apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-	} else {
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.apiKey))
-	}
-
-	// Make request
-	client := &http.Client{Timeout: p.apiTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("%s request failed: %w", sourceProvider, err)
-	}
-	defer resp.Body.Close()
-
-	// Read response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read %s response: %w", sourceProvider, err)
-	}
-
-	// Check HTTP status
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%s API returned status %d: %s", sourceProvider, resp.StatusCode, string(respBody))
-	}
-
-	// Parse response based on provider
-	var compressed string
-	if sourceProvider == "anthropic" {
-		var apiResp external.AnthropicResponse
-		if unmarshalErr := json.Unmarshal(respBody, &apiResp); unmarshalErr != nil {
-			return "", fmt.Errorf("failed to parse Anthropic response: %w", unmarshalErr)
-		}
-		compressed, err = external.ExtractAnthropicResponse(&apiResp)
-	} else {
-		var apiResp external.OpenAIChatResponse
-		if unmarshalErr := json.Unmarshal(respBody, &apiResp); unmarshalErr != nil {
-			return "", fmt.Errorf("failed to parse OpenAI response: %w", unmarshalErr)
-		}
-		compressed, err = external.ExtractOpenAIResponse(&apiResp)
-	}
-
-	if err != nil {
-		return "", fmt.Errorf("failed to extract %s response: %w", sourceProvider, err)
+		return "", err
 	}
 
 	// Validate compression reduced size
-	if len(compressed) >= len(content) {
+	if len(result.Content) >= len(content) {
 		return "", fmt.Errorf("external_provider compression ineffective: output (%d bytes) >= input (%d bytes)",
-			len(compressed), len(content))
+			len(result.Content), len(content))
 	}
 
 	log.Debug().
-		Str("provider", sourceProvider).
+		Str("provider", result.Provider).
 		Str("model", p.apiModel).
 		Bool("query_agnostic", p.apiQueryAgnostic).
 		Int("original_size", len(content)).
-		Int("compressed_size", len(compressed)).
-		Float64("ratio", float64(len(compressed))/float64(len(content))).
+		Int("compressed_size", len(result.Content)).
+		Float64("ratio", float64(len(result.Content))/float64(len(content))).
 		Msg("tool_output: external_provider compression completed")
 
-	return compressed, nil
+	return result.Content, nil
 }

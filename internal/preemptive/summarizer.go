@@ -2,28 +2,25 @@
 package preemptive
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/compresr/context-gateway/external"
 )
 
 // Summarizer generates conversation summaries.
 type Summarizer struct {
-	config     SummarizerConfig
-	httpClient *http.Client
+	config SummarizerConfig
 }
 
 // NewSummarizer creates a new summarizer.
 func NewSummarizer(cfg SummarizerConfig) *Summarizer {
 	return &Summarizer{
-		config:     cfg,
-		httpClient: &http.Client{Timeout: cfg.Timeout},
+		config: cfg,
 	}
 }
 
@@ -70,29 +67,19 @@ func (s *Summarizer) Summarize(ctx context.Context, input SummarizeInput) (*Summ
 	}
 
 	formatted := FormatMessages(toSummarize)
-	req := apiRequest{
-		Model:     s.config.Model,
-		MaxTokens: s.config.MaxTokens,
-		System:    prompt,
-		Messages: []apiMessage{{
-			Role:    "user",
-			Content: fmt.Sprintf("Please summarize the following conversation:\n\n%s", formatted),
-		}},
-	}
-
-	resp, err := s.callAPI(ctx, req)
+	result, err := s.callAPI(ctx, prompt, fmt.Sprintf("Please summarize the following conversation:\n\n%s", formatted))
 	if err != nil {
 		return nil, fmt.Errorf("API call failed: %w", err)
 	}
 
-	summary := extractResponseText(resp)
+	summary := result.Content
 	if summary == "" {
 		return nil, fmt.Errorf("empty summary returned")
 	}
 
 	tokens := len(summary) / 4
-	if resp.Usage.OutputTokens > 0 {
-		tokens = resp.Usage.OutputTokens
+	if result.OutputTokens > 0 {
+		tokens = result.OutputTokens
 	}
 
 	return &SummarizeOutput{
@@ -100,32 +87,9 @@ func (s *Summarizer) Summarize(ctx context.Context, input SummarizeInput) (*Summ
 		SummaryTokens:       tokens,
 		LastSummarizedIndex: lastIndex,
 		Duration:            time.Since(startTime),
-		InputTokens:         resp.Usage.InputTokens,
-		OutputTokens:        resp.Usage.OutputTokens,
+		InputTokens:         result.InputTokens,
+		OutputTokens:        result.OutputTokens,
 	}, nil
-}
-
-type apiRequest struct {
-	Model     string       `json:"model"`
-	MaxTokens int          `json:"max_tokens"`
-	System    string       `json:"system,omitempty"`
-	Messages  []apiMessage `json:"messages"`
-}
-
-type apiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type apiResponse struct {
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text,omitempty"`
-	} `json:"content"`
-	Usage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
 }
 
 func (s *Summarizer) findSummarizationCutoff(input SummarizeInput) (int, error) {
@@ -224,57 +188,21 @@ func (s *Summarizer) findCutoffByTokens(messages []json.RawMessage, keepTokens i
 	return cutoffIndex, nil
 }
 
-func (s *Summarizer) callAPI(ctx context.Context, req apiRequest) (*apiResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
+func (s *Summarizer) callAPI(ctx context.Context, systemPrompt, userContent string) (*external.CallLLMResult, error) {
+	log.Debug().Str("model", s.config.Model).Int("max_tokens", s.config.MaxTokens).Msg("Calling summarization API")
 
 	endpoint := s.config.Endpoint
 	if endpoint == "" {
 		endpoint = "https://api.anthropic.com/v1/messages"
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", s.config.APIKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	log.Debug().Str("model", req.Model).Int("max_tokens", req.MaxTokens).Msg("Calling summarization API")
-
-	resp, err := s.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var response apiResponse
-	if err := json.Unmarshal(respBody, &response); err != nil {
-		return nil, err
-	}
-
-	return &response, nil
-}
-
-// extractResponseText extracts text from the apiResponse (local type, stays here)
-func extractResponseText(resp *apiResponse) string {
-	for _, block := range resp.Content {
-		if block.Type == "text" {
-			return block.Text
-		}
-	}
-	return ""
+	return external.CallLLM(ctx, external.CallLLMParams{
+		Endpoint:     endpoint,
+		APIKey:       s.config.APIKey,
+		Model:        s.config.Model,
+		SystemPrompt: systemPrompt,
+		UserPrompt:   userContent,
+		MaxTokens:    s.config.MaxTokens,
+		Timeout:      s.config.Timeout,
+	})
 }
