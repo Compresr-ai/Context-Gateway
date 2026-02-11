@@ -1,0 +1,10 @@
+.git
+tests
+docs
+bin
+logs
+*.md
+.env*
+.gitignore
+.golangci.yml
+coverage.*

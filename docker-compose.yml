@@ -1,0 +1,18 @@
+services:
+  context-gateway:
+    image: ghcr.io/compresr-ai/context-gateway:latest
+    # build: .  # uncomment to build locally instead
+    restart: unless-stopped
+    ports:
+      - "18080:18080"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./logs:/app/logs
+      # - ./config.yaml:/app/config.yaml:ro  # optional: custom config
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:18080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
