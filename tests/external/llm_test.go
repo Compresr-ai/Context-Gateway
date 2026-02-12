@@ -370,3 +370,142 @@ func TestCallLLM_DefaultTimeout(t *testing.T) {
 	assert.Equal(t, 60*time.Second, external.DefaultTimeout)
 	_ = params // just verifying constant exists
 }
+
+// BEARER TOKEN AUTH
+func TestCallLLM_BearerToken_Anthropic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Bearer token should use Authorization header, not x-api-key
+		assert.Equal(t, "Bearer sk-ant-oat01-test-token", r.Header.Get("Authorization"))
+		assert.Empty(t, r.Header.Get("x-api-key"))
+		assert.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": "compressed"}},
+			"usage":   map[string]interface{}{"input_tokens": 50, "output_tokens": 10},
+		})
+	}))
+	defer server.Close()
+
+	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "anthropic",
+		BearerToken:  "sk-ant-oat01-test-token",
+		Model:        "claude-haiku-4-5-20251001",
+		MaxTokens:    500,
+		SystemPrompt: "compress",
+		UserPrompt:   "content",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "compressed", result.Content)
+	assert.Equal(t, "anthropic", result.Provider)
+}
+
+func TestCallLLM_BearerToken_Validation(t *testing.T) {
+	// BearerToken alone (without APIKey) should pass validation
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": "ok"}},
+			"usage":   map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
+		})
+	}))
+	defer server.Close()
+
+	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "anthropic",
+		BearerToken:  "token",
+		Model:        "model",
+		MaxTokens:    100,
+		SystemPrompt: "s",
+		UserPrompt:   "u",
+	})
+	assert.NoError(t, err)
+}
+
+func TestCallLLM_APIKey_Takes_Priority(t *testing.T) {
+	// When both APIKey and BearerToken are set, APIKey wins (x-api-key header)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "my-api-key", r.Header.Get("x-api-key"))
+		// BearerToken should NOT override APIKey
+		auth := r.Header.Get("Authorization")
+		assert.Empty(t, auth, "Authorization header should be empty when APIKey is set")
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": "ok"}},
+			"usage":   map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
+		})
+	}))
+	defer server.Close()
+
+	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "anthropic",
+		APIKey:       "my-api-key",
+		BearerToken:  "my-bearer-token",
+		Model:        "model",
+		MaxTokens:    100,
+		SystemPrompt: "s",
+		UserPrompt:   "u",
+	})
+	assert.NoError(t, err)
+}
+
+// EXTRA HEADERS
+func TestCallLLM_ExtraHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Extra headers should be applied
+		assert.Equal(t, "max-tokens-3-5-sonnet-2025-04-14", r.Header.Get("anthropic-beta"))
+		// Standard auth headers still present
+		assert.Equal(t, "Bearer oauth-token", r.Header.Get("Authorization"))
+		assert.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": "compressed"}},
+			"usage":   map[string]interface{}{"input_tokens": 50, "output_tokens": 10},
+		})
+	}))
+	defer server.Close()
+
+	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "anthropic",
+		BearerToken:  "oauth-token",
+		Model:        "claude-haiku-4-5-20251001",
+		MaxTokens:    500,
+		SystemPrompt: "compress",
+		UserPrompt:   "content",
+		ExtraHeaders: map[string]string{
+			"anthropic-beta": "max-tokens-3-5-sonnet-2025-04-14",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "compressed", result.Content)
+}
+
+func TestCallLLM_ExtraHeaders_Nil(t *testing.T) {
+	// nil ExtraHeaders should not cause a panic
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": "ok"}},
+			"usage":   map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
+		})
+	}))
+	defer server.Close()
+
+	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "anthropic",
+		APIKey:       "key",
+		Model:        "model",
+		MaxTokens:    100,
+		SystemPrompt: "s",
+		UserPrompt:   "u",
+		ExtraHeaders: nil,
+	})
+	assert.NoError(t, err)
+}

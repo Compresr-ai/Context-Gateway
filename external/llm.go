@@ -174,10 +174,10 @@ func DetectProvider(endpoint string) string {
 func setAuthHeaders(req *http.Request, provider, apiKey, bearerToken string) {
 	switch provider {
 	case "anthropic":
-		if bearerToken != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", bearerToken))
-		} else {
+		if apiKey != "" {
 			req.Header.Set("x-api-key", apiKey)
+		} else if bearerToken != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", bearerToken))
 		}
 		req.Header.Set("anthropic-version", anthropicVersion)
 	case "bedrock":
