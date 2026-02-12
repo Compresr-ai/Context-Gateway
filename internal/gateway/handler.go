@@ -693,7 +693,6 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 	log.Info().
 		Str("targetURL", targetURL).
 		Str("x-api-key", maskKey(r.Header.Get("x-api-key"))).
-		Str("anthropic-version", r.Header.Get("anthropic-version")).
 		Msg("forwarding request")
 
 	parsedURL, err := url.Parse(targetURL)
