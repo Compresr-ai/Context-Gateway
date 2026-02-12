@@ -35,6 +35,10 @@ type PipeContext struct {
 	ShadowRefs             map[string]string // ID -> original content for expand_context
 	ToolOutputCompressions []ToolOutputCompression
 
+	// Captured auth from incoming request (for OAuth/Max/Pro users without API key)
+	CapturedBearerToken string
+	CapturedBetaHeader  string // anthropic-beta header value from incoming request
+
 	// Flags set by pipes
 	OutputCompressed bool
 	ToolsFiltered    bool

@@ -50,6 +50,10 @@ type PipelineContext struct {
 	// Individual tool output compressions for detailed logging
 	ToolOutputCompressions []ToolOutputCompression
 
+	// Captured auth from incoming request (for compression with OAuth tokens)
+	CapturedBearerToken string
+	CapturedBetaHeader  string
+
 	// Preemptive summarization
 	PreemptiveHeaders map[string]string // Headers to add to response
 	IsCompaction      bool              // Whether this is a compaction request

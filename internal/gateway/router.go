@@ -175,6 +175,8 @@ func (r *Router) processPipe(ctx *PipelineContext, pipeType PipeType) ([]byte, e
 func (r *Router) toPipeContext(ctx *PipelineContext) *pipes.PipeContext {
 	pipeCtx := pipes.NewPipeContext(ctx.Adapter, ctx.OriginalRequest)
 	pipeCtx.CompressionThreshold = ctx.CompressionThreshold
+	pipeCtx.CapturedBearerToken = ctx.CapturedBearerToken
+	pipeCtx.CapturedBetaHeader = ctx.CapturedBetaHeader
 	return pipeCtx
 }
 

@@ -215,7 +215,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 
 	if len(tasks) > 0 {
 		// Process compressions with rate limiting (V2: C11)
-		compResults := p.compressBatch(query, provider, tasks)
+		compResults := p.compressBatch(query, provider, ctx.CapturedBearerToken, ctx.CapturedBetaHeader, tasks)
 
 		// Apply results
 		for result := range compResults {
@@ -323,7 +323,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 }
 
 // compressBatch processes compression tasks with rate limiting (V2: C11).
-func (p *Pipe) compressBatch(query, provider string, tasks []compressionTask) <-chan compressionResult {
+func (p *Pipe) compressBatch(query, provider, capturedBearerToken, capturedBetaHeader string, tasks []compressionTask) <-chan compressionResult {
 	results := make(chan compressionResult, len(tasks))
 
 	go func() {
@@ -362,7 +362,7 @@ func (p *Pipe) compressBatch(query, provider string, tasks []compressionTask) <-
 					}
 				}()
 
-				result := p.compressOne(query, provider, t)
+				result := p.compressOne(query, provider, capturedBearerToken, capturedBetaHeader, t)
 				results <- result
 			}(task)
 		}
@@ -376,7 +376,7 @@ func (p *Pipe) compressBatch(query, provider string, tasks []compressionTask) <-
 }
 
 // compressOne compresses a single tool output.
-func (p *Pipe) compressOne(query, provider string, t compressionTask) compressionResult {
+func (p *Pipe) compressOne(query, provider, capturedBearerToken, capturedBetaHeader string, t compressionTask) compressionResult {
 	var compressed string
 	var err error
 
@@ -384,7 +384,7 @@ func (p *Pipe) compressOne(query, provider string, t compressionTask) compressio
 	case config.StrategyAPI:
 		compressed, err = p.compressViaAPI(query, t.original, t.toolName, provider)
 	case config.StrategyExternalProvider:
-		compressed, err = p.compressViaExternalProvider(query, t.original, t.toolName)
+		compressed, err = p.compressViaExternalProvider(query, t.original, t.toolName, capturedBearerToken, capturedBetaHeader)
 	case "simple":
 		// TEMPORARY: Simple first-words compression for testing expand_context
 		compressed = p.CompressSimpleContent(t.original)
@@ -573,7 +573,7 @@ func (p *Pipe) compressViaAPI(query, content, toolName, provider string) (string
 // compressViaExternalProvider calls an external LLM provider directly.
 // Uses the api config (endpoint, api_key, model) from the config file.
 // Provider is auto-detected from endpoint URL or can be set explicitly.
-func (p *Pipe) compressViaExternalProvider(query, content, toolName string) (string, error) {
+func (p *Pipe) compressViaExternalProvider(query, content, toolName, capturedBearerToken, capturedBetaHeader string) (string, error) {
 	var systemPrompt, userPrompt string
 	if p.apiQueryAgnostic || query == "" {
 		systemPrompt = external.SystemPromptQueryAgnostic
@@ -592,7 +592,7 @@ func (p *Pipe) compressViaExternalProvider(query, content, toolName string) (str
 		maxTokens = 4096
 	}
 
-	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
+	params := external.CallLLMParams{
 		Endpoint:     p.apiEndpoint,
 		APIKey:       p.apiKey,
 		Model:        p.apiModel,
@@ -600,7 +600,18 @@ func (p *Pipe) compressViaExternalProvider(query, content, toolName string) (str
 		UserPrompt:   userPrompt,
 		MaxTokens:    maxTokens,
 		Timeout:      p.apiTimeout,
-	})
+	}
+
+	// OAuth fallback: reuse Bearer token captured from the incoming request.
+	// Claude Code OAuth tokens (sk-ant-oat*) require Bearer auth + anthropic-beta header.
+	if params.APIKey == "" && capturedBearerToken != "" {
+		params.BearerToken = capturedBearerToken
+		if capturedBetaHeader != "" {
+			params.ExtraHeaders = map[string]string{"anthropic-beta": capturedBetaHeader}
+		}
+	}
+
+	result, err := external.CallLLM(context.Background(), params)
 	if err != nil {
 		return "", err
 	}

@@ -60,7 +60,7 @@ func TestCallLLM_Validation(t *testing.T) {
 			Endpoint: "http://localhost", Model: "model",
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "api key required")
+		assert.Contains(t, err.Error(), "api key or bearer token required")
 	})
 
 	t.Run("missing_model", func(t *testing.T) {

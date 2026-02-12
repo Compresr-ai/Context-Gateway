@@ -47,12 +47,16 @@ type CallLLMParams struct {
 	Provider string
 
 	Endpoint     string
-	APIKey       string
+	APIKey       string // API key (x-api-key for Anthropic, x-goog-api-key for Gemini)
+	BearerToken  string // OAuth token (Authorization: Bearer). Takes precedence over APIKey for Anthropic.
 	Model        string
 	SystemPrompt string
 	UserPrompt   string
 	MaxTokens    int
 	Timeout      time.Duration
+
+	// ExtraHeaders are added to the request (e.g., anthropic-beta for OAuth support).
+	ExtraHeaders map[string]string
 
 	// HTTPClient overrides the default HTTP client (useful for testing and connection pooling).
 	// If nil, a default client is created with context-based timeout.
@@ -65,9 +69,10 @@ func (p *CallLLMParams) validate() error {
 	if p.Endpoint == "" {
 		return fmt.Errorf("endpoint required")
 	}
-	// Bedrock uses SigV4 signing via HTTPClient transport, not an API key
-	if p.APIKey == "" && p.Provider != "bedrock" {
-		return fmt.Errorf("api key required")
+	// Bedrock uses SigV4 signing via HTTPClient transport, not an API key.
+	// OAuth uses BearerToken instead of APIKey.
+	if p.APIKey == "" && p.BearerToken == "" && p.Provider != "bedrock" {
+		return fmt.Errorf("api key or bearer token required")
 	}
 	if p.Model == "" {
 		return fmt.Errorf("model required")
@@ -119,7 +124,10 @@ func CallLLM(ctx context.Context, params CallLLMParams) (*CallLLMResult, error) 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	setAuthHeaders(req, provider, params.APIKey)
+	setAuthHeaders(req, provider, params.APIKey, params.BearerToken)
+	for k, v := range params.ExtraHeaders {
+		req.Header.Set(k, v)
+	}
 
 	client := params.HTTPClient
 	if client == nil {
@@ -163,10 +171,14 @@ func DetectProvider(endpoint string) string {
 	}
 }
 
-func setAuthHeaders(req *http.Request, provider, apiKey string) {
+func setAuthHeaders(req *http.Request, provider, apiKey, bearerToken string) {
 	switch provider {
 	case "anthropic":
-		req.Header.Set("x-api-key", apiKey)
+		if bearerToken != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", bearerToken))
+		} else {
+			req.Header.Set("x-api-key", apiKey)
+		}
 		req.Header.Set("anthropic-version", anthropicVersion)
 	case "bedrock":
 		// Bedrock auth is handled by SigV4 signing transport in the HTTPClient.

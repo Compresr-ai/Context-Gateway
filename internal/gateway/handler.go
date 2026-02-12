@@ -191,6 +191,14 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	pipeCtx := NewPipelineContext(provider, adapter, body, r.URL.Path)
 	pipeCtx.CompressionThreshold = config.ParseCompressionThreshold(r.Header.Get(HeaderCompressionThreshold))
 
+	// Capture auth headers from incoming request for compression pipe (Max/Pro OAuth users)
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		pipeCtx.CapturedBearerToken = strings.TrimPrefix(auth, "Bearer ")
+	}
+	if beta := r.Header.Get("anthropic-beta"); beta != "" {
+		pipeCtx.CapturedBetaHeader = beta
+	}
+
 	// Extract model for preemptive summarization
 	model := adapter.ExtractModel(body)
 	pipeCtx.Model = model
