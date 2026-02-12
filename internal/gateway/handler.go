@@ -680,7 +680,12 @@ func (g *Gateway) processCompressionPipeline(body []byte, pipeCtx *PipelineConte
 // forwardPassthrough forwards the request body unchanged to upstream.
 func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body []byte) (*http.Response, error) {
 	targetURL := r.Header.Get(HeaderTargetURL)
-	if targetURL == "" {
+	if targetURL != "" {
+		// X-Target-URL provided - append request path if not already included
+		if !strings.HasSuffix(targetURL, r.URL.Path) {
+			targetURL = strings.TrimSuffix(targetURL, "/") + r.URL.Path
+		}
+	} else {
 		targetURL = g.autoDetectTargetURL(r)
 		if targetURL == "" {
 			return nil, fmt.Errorf("missing %s header", HeaderTargetURL)
