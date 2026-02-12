@@ -39,13 +39,18 @@ func (g *Gateway) autoDetectTargetURL(r *http.Request) string {
 		return Providers["anthropic"].BaseURL + path
 	}
 
-	// 3. Check Authorization header - distinguish Anthropic from OpenAI
+	// 3. Check Authorization header - distinguish providers by API key prefix
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		// Anthropic: Bearer sk-ant-xxx
 		if strings.HasPrefix(auth, "Bearer sk-ant-") {
 			return Providers["anthropic"].BaseURL + path
 		}
-		// OpenAI: Bearer sk-xxx (but not sk-ant-)
+		// OpenRouter: Bearer sk-or-xxx
+		if strings.HasPrefix(auth, "Bearer sk-or-") {
+			path = normalizeOpenAIPath(path)
+			return Providers["openrouter"].BaseURL + path
+		}
+		// OpenAI: Bearer sk-xxx (but not sk-ant- or sk-or-)
 		if strings.HasPrefix(auth, "Bearer sk-") {
 			path = normalizeOpenAIPath(path)
 			return Providers["openai"].BaseURL + path

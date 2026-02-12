@@ -51,6 +51,12 @@ var Providers = map[string]ProviderConfig{
 		DefaultPath: "/api/chat",
 		Paths:       []string{"/api/chat", "/api/generate"},
 	},
+	"openrouter": {
+		Name:        "openrouter",
+		BaseURL:     envOrDefault("OPENROUTER_PROVIDER_URL", "https://openrouter.ai/api"),
+		DefaultPath: "/v1/chat/completions",
+		Paths:       []string{}, // Uses OpenAI paths, detected by API key prefix
+	},
 }
 
 // GetProviderByPath returns the provider config that matches the path.
