@@ -54,15 +54,14 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 			errorMsg:    "model",
 		},
 		{
-			name: "missing api key",
+			name: "missing api key (optional - captured from requests)",
 			config: preemptive.SummarizerConfig{
 				Model:     "claude-haiku-4-5",
 				APIKey:    "",
 				MaxTokens: 4096,
 				Timeout:   60 * time.Second,
 			},
-			expectError: true,
-			errorMsg:    "api_key",
+			expectError: false,
 		},
 		{
 			name: "invalid max tokens",

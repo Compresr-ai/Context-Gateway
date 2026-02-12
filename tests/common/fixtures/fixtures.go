@@ -85,9 +85,6 @@ func SimpleCompressionConfig() *config.Config {
 				IncludeExpandHint:   true,
 				EnableExpandContext: true, // Key: enable expand_context
 			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
-			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,
 			},
@@ -127,9 +124,6 @@ func PassthroughConfig() *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            256,
 				EnableExpandContext: false,
-			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,

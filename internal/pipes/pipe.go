@@ -1,7 +1,6 @@
 // Package pipes defines the common Pipe interface for compression pipelines.
 //
-// DESIGN: Three independent pipe packages, each implementing this interface:
-//   - history/:        Compress old messages
+// DESIGN: Two independent pipe packages, each implementing this interface:
 //   - tool_discovery/: Filter irrelevant tools
 //   - tool_output/:    Compress tool results, enable expand_context
 //
@@ -37,9 +36,8 @@ type PipeContext struct {
 	ToolOutputCompressions []ToolOutputCompression
 
 	// Flags set by pipes
-	HistoryCompressed bool
-	OutputCompressed  bool
-	ToolsFiltered     bool
+	OutputCompressed bool
+	ToolsFiltered    bool
 }
 
 // ToolOutputCompression tracks individual tool output compression.

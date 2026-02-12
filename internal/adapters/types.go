@@ -1,8 +1,7 @@
 // Package adapters types - unified types for provider-specific request handling.
 //
-// DESIGN: Adapters provide 3×2 Apply/Extract pairs for the three pipe types:
+// DESIGN: Adapters provide 2×2 Apply/Extract pairs for the two pipe types:
 //   - ToolOutput:    Extract/Apply tool results for compression
-//   - History:       Extract/Apply conversation history for compression
 //   - ToolDiscovery: Extract/Apply tool definitions for filtering
 //
 // All types needed by adapters, pipes, and gateway are defined here.
@@ -63,12 +62,6 @@ type CompressedResult struct {
 // =============================================================================
 // EXTRACT OPTIONS - Configuration for extraction
 // =============================================================================
-
-// HistoryOptions provides additional context for history extraction.
-type HistoryOptions struct {
-	// KeepRecent is the number of recent messages to exclude from extraction
-	KeepRecent int
-}
 
 // ToolDiscoveryOptions provides context for tool filtering.
 type ToolDiscoveryOptions struct {

@@ -77,6 +77,21 @@ func InitCompactionLoggerWithPath(logPath string) error {
 	return initErr
 }
 
+// LogSessionConfig logs the configuration used for this gateway session.
+func LogSessionConfig(configName, configSource string, summarizerProvider, summarizerModel string) {
+	if l := GetCompactionLogger(); l != nil {
+		l.Log(CompactionEvent{
+			Event: "session_config",
+			Details: map[string]interface{}{
+				"config_name":         configName,
+				"config_source":       configSource,
+				"summarizer_provider": summarizerProvider,
+				"summarizer_model":    summarizerModel,
+			},
+		})
+	}
+}
+
 // GetCompactionLogger returns the global logger (nil if not initialized).
 func GetCompactionLogger() *CompactionLogger {
 	return compactionLogger
@@ -99,19 +114,23 @@ func (cl *CompactionLogger) Log(event CompactionEvent) {
 }
 
 // LogPreemptiveTrigger logs when background summarization starts.
-func (cl *CompactionLogger) LogPreemptiveTrigger(sessionID, model string, msgCount int, usage, threshold float64) {
+func (cl *CompactionLogger) LogPreemptiveTrigger(sessionID, model string, msgCount int, usage, threshold float64, summarizerProvider, summarizerModel string) {
 	cl.Log(CompactionEvent{
 		Event:        "preemptive_trigger",
 		SessionID:    sessionID,
 		Model:        model,
 		UsagePercent: usage,
 		Threshold:    threshold,
-		Details:      map[string]interface{}{"message_count": msgCount},
+		Details: map[string]interface{}{
+			"message_count":       msgCount,
+			"summarizer_provider": summarizerProvider,
+			"summarizer_model":    summarizerModel,
+		},
 	})
 }
 
 // LogPreemptiveComplete logs when background summarization finishes.
-func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsSummarized, tokens int, duration time.Duration) {
+func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsSummarized, tokens int, duration time.Duration, summarizerProvider, summarizerModel string) {
 	cl.Log(CompactionEvent{
 		Event:              "preemptive_complete",
 		SessionID:          sessionID,
@@ -119,6 +138,10 @@ func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsS
 		MessagesSummarized: msgsSummarized,
 		SummaryTokens:      tokens,
 		DurationMs:         duration.Milliseconds(),
+		Details: map[string]interface{}{
+			"summarizer_provider": summarizerProvider,
+			"summarizer_model":    summarizerModel,
+		},
 	})
 }
 
@@ -166,6 +189,19 @@ func (cl *CompactionLogger) LogError(sessionID, event string, err error, details
 		Event:     event + "_error",
 		SessionID: sessionID,
 		Error:     err.Error(),
+		Details:   details,
+	})
+}
+
+// LogSkip logs when summarization is skipped (not an error, just not enough content).
+func (cl *CompactionLogger) LogSkip(sessionID, event, reason string, details map[string]interface{}) {
+	if details == nil {
+		details = make(map[string]interface{})
+	}
+	details["reason"] = reason
+	cl.Log(CompactionEvent{
+		Event:     event + "_skip",
+		SessionID: sessionID,
 		Details:   details,
 	})
 }

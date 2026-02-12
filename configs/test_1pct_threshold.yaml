@@ -1,0 +1,91 @@
+# =============================================================================
+# Context Gateway - TEST Configuration (1% threshold)
+# =============================================================================
+# For testing auth capture and summarization with Max/Pro subscriptions.
+# Trigger threshold set to 1% so summarization triggers almost immediately.
+# =============================================================================
+
+metadata:
+  name: "Test - 1% Threshold"
+  description: "Test config for quick summarization trigger"
+  strategy: "passthrough"
+
+server:
+  port: ${GATEWAY_PORT:-18080}
+  read_timeout: 30s
+  write_timeout: 1000s
+
+urls:
+  gateway: "http://localhost:${GATEWAY_PORT:-18080}"
+
+# =============================================================================
+# PREEMPTIVE SUMMARIZATION - 1% THRESHOLD FOR TESTING
+# =============================================================================
+
+preemptive:
+  enabled: true
+  
+  # VERY LOW threshold - triggers almost immediately
+  trigger_threshold: 49.0
+  
+  # Add response headers for debugging
+  add_response_headers: true
+  
+  # Logging
+  log_dir: "${SESSION_DIR:-logs}"
+  compaction_log_path: "${SESSION_COMPACTION_LOG:-logs/compaction.jsonl}"
+  
+  summarizer:
+    model: "claude-haiku-4-5"
+    # NO API KEY - will be captured from incoming requests
+    api_key: ""
+    # NO ENDPOINT - will be captured from incoming requests (works with Max/Pro OAuth)
+    endpoint: ""
+    
+    max_tokens: 4096
+    timeout: 60s
+    token_estimate_ratio: 4
+  
+  session:
+    summary_ttl: 3h
+    hash_message_count: 3
+  
+  detectors:
+    claude_code:
+      enabled: true
+    codex:
+      enabled: true
+    generic:
+      enabled: true
+      header_name: "X-Request-Compaction"
+      header_value: "true"
+
+# =============================================================================
+# COMPRESSION PIPES - Disabled
+# =============================================================================
+
+pipes:
+  tool_output:
+    enabled: false
+  tool_discovery:
+    enabled: false
+
+# =============================================================================
+# STORE
+# =============================================================================
+
+store:
+  type: "memory"
+  ttl: 24h
+
+# =============================================================================
+# MONITORING
+# =============================================================================
+
+monitoring:
+  telemetry:
+    enabled: true
+    log_path: "${SESSION_TELEMETRY_LOG:-logs/telemetry.jsonl}"
+  compression:
+    enabled: true
+    log_path: "${SESSION_COMPRESSION_LOG:-logs/compression.jsonl}"

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -16,7 +17,11 @@ import (
 
 // Summarizer generates conversation summaries.
 type Summarizer struct {
-	config SummarizerConfig
+	config           SummarizerConfig
+	capturedAuth     string // Auth token captured from incoming requests
+	authHeaderIsXAPI bool   // true if captured from x-api-key header (use x-api-key), false = use Authorization: Bearer
+	capturedEndpoint string // Upstream endpoint captured from incoming requests
+	authMutex        sync.RWMutex
 }
 
 // NewSummarizer creates a new summarizer.
@@ -24,6 +29,67 @@ func NewSummarizer(cfg SummarizerConfig) *Summarizer {
 	return &Summarizer{
 		config: cfg,
 	}
+}
+
+// SetAuthToken stores an auth token captured from incoming requests.
+// Used when no API key is configured (e.g., Max/Pro subscription users).
+// isFromXAPIKeyHeader indicates if token came from x-api-key header (vs Authorization: Bearer).
+func (s *Summarizer) SetAuthToken(token string, isFromXAPIKeyHeader bool) {
+	if token == "" {
+		return
+	}
+	s.authMutex.Lock()
+	defer s.authMutex.Unlock()
+	s.capturedAuth = token
+	s.authHeaderIsXAPI = isFromXAPIKeyHeader
+}
+
+// SetEndpoint stores the upstream endpoint URL captured from incoming requests.
+func (s *Summarizer) SetEndpoint(endpoint string) {
+	if endpoint == "" {
+		return
+	}
+	s.authMutex.Lock()
+	defer s.authMutex.Unlock()
+	s.capturedEndpoint = endpoint
+}
+
+// getAuthToken returns the best available auth token and whether to use x-api-key header.
+func (s *Summarizer) getAuthToken() (string, bool) {
+	// Priority 1: Configured API key (always use x-api-key)
+	if s.config.APIKey != "" {
+		return s.config.APIKey, true
+	}
+	// Priority 2: Captured from request - mirror original header format
+	s.authMutex.RLock()
+	defer s.authMutex.RUnlock()
+	return s.capturedAuth, s.authHeaderIsXAPI
+}
+
+// getEndpoint returns the endpoint URL to use for API calls.
+func (s *Summarizer) getEndpoint() string {
+	// When using captured auth (no configured API key), prefer captured endpoint
+	// because OAuth tokens are only valid for the endpoint they were issued for
+	if s.config.APIKey == "" {
+		s.authMutex.RLock()
+		captured := s.capturedEndpoint
+		s.authMutex.RUnlock()
+		if captured != "" {
+			return captured
+		}
+	}
+	// Configured endpoint (for API key users)
+	if s.config.Endpoint != "" {
+		return s.config.Endpoint
+	}
+	// Captured from request (fallback for API key users too)
+	s.authMutex.RLock()
+	defer s.authMutex.RUnlock()
+	if s.capturedEndpoint != "" {
+		return s.capturedEndpoint
+	}
+	// Fallback
+	return "https://api.anthropic.com/v1/messages"
 }
 
 // SummarizeInput contains input for summarization.
@@ -193,15 +259,19 @@ func (s *Summarizer) findCutoffByTokens(messages []json.RawMessage, keepTokens i
 func (s *Summarizer) callAPI(ctx context.Context, systemPrompt, userContent string) (*external.CallLLMResult, error) {
 	log.Debug().Str("model", s.config.Model).Str("provider", s.config.Provider).Int("max_tokens", s.config.MaxTokens).Msg("Calling summarization API")
 
-	endpoint := s.config.Endpoint
-	if endpoint == "" {
-		endpoint = "https://api.anthropic.com/v1/messages"
+	endpoint := s.getEndpoint()
+	authToken, _ := s.getAuthToken()
+
+	// Use configured API key if available, otherwise use captured auth
+	apiKey := s.config.APIKey
+	if apiKey == "" {
+		apiKey = authToken
 	}
 
 	params := external.CallLLMParams{
 		Provider:     s.config.Provider,
 		Endpoint:     endpoint,
-		APIKey:       s.config.APIKey,
+		APIKey:       apiKey,
 		Model:        s.config.Model,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userContent,

@@ -712,7 +712,7 @@ func TestHardIntegration_RealWorld_DockerBuild(t *testing.T) {
 	for i := 1; i <= 15; i++ {
 		dockerOutput.WriteString(fmt.Sprintf(" => [%d/15] %s %.1fs\n", i,
 			[]string{
-				"FROM golang:1.21-alpine",
+				"FROM golang:1.23-alpine",
 				"WORKDIR /app",
 				"COPY go.mod go.sum ./",
 				"RUN go mod download",
@@ -1028,9 +1028,6 @@ func expandContextEnabledConfig() *config.Config {
 					Model:    "tool_output_openai",
 					Timeout:  30 * time.Second,
 				},
-			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,

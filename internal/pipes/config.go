@@ -3,8 +3,7 @@
 // STATUS: All compression pipes are disabled in current release.
 // Only preemptive summarization is enabled.
 //
-// DESIGN: Three independent pipes process requests:
-//   - History:       Compress conversation history
+// DESIGN: Two independent pipes process requests:
 //   - ToolOutput:    Compress tool results, store originals for expand_context
 //   - ToolDiscovery: Filter irrelevant tools
 //
@@ -89,54 +88,17 @@ func (t CompressionThreshold) TokenCount() int {
 
 // Config contains configuration for all compression pipes.
 type Config struct {
-	History       HistoryConfig       `yaml:"history"`        // Conversation history compression
 	ToolOutput    ToolOutputConfig    `yaml:"tool_output"`    // Tool output compression
 	ToolDiscovery ToolDiscoveryConfig `yaml:"tool_discovery"` // Tool filtering
 }
 
 // Validate validates pipe configurations.
 func (p *Config) Validate() error {
-	if err := p.History.Validate(); err != nil {
-		return err
-	}
 	if err := p.ToolOutput.Validate(); err != nil {
 		return err
 	}
 	if err := p.ToolDiscovery.Validate(); err != nil {
 		return err
-	}
-	return nil
-}
-
-// =============================================================================
-// HISTORY PIPE CONFIG
-// =============================================================================
-
-// HistoryConfig configures conversation history compression.
-type HistoryConfig struct {
-	Enabled          bool   `yaml:"enabled"`           // Enable this pipe
-	Strategy         string `yaml:"strategy"`          // passthrough | api
-	FallbackStrategy string `yaml:"fallback_strategy"` // Fallback when primary fails
-
-	// API strategy config (only needed when strategy=api)
-	API APIConfig `yaml:"api,omitempty"`
-
-	// Compression settings
-	DefaultThreshold string  `yaml:"default_threshold"` // Default threshold when header not provided
-	TargetRatio      float64 `yaml:"target_ratio"`      // Compress to this ratio (e.g., 0.5 = 50%)
-	KeepRecent       int     `yaml:"keep_recent"`       // Always keep last N messages uncompressed
-}
-
-// Validate validates history pipe config.
-func (h *HistoryConfig) Validate() error {
-	if !h.Enabled {
-		return nil // Disabled pipes don't need strategy
-	}
-	if h.Strategy == "" || h.Strategy == StrategyPassthrough {
-		return nil
-	}
-	if h.Strategy == StrategyAPI && h.API.Endpoint == "" {
-		return fmt.Errorf("history: api.endpoint required when strategy=api")
 	}
 	return nil
 }
@@ -151,7 +113,12 @@ type ToolOutputConfig struct {
 	Strategy         string `yaml:"strategy"`          // passthrough | api | external_provider
 	FallbackStrategy string `yaml:"fallback_strategy"` // Fallback when primary fails
 
+	// Provider reference (preferred over inline API config)
+	// References a provider defined in the top-level "providers" section.
+	Provider string `yaml:"provider,omitempty"`
+
 	// API strategy config (for strategy=api or strategy=external_provider)
+	// Can be overridden by Provider reference
 	API APIConfig `yaml:"api,omitempty"`
 
 	// Compression settings
@@ -176,14 +143,16 @@ func (t *ToolOutputConfig) Validate() error {
 		return nil
 	}
 	if t.Strategy == StrategyAPI {
-		if t.API.Endpoint == "" {
-			return fmt.Errorf("tool_output: api.endpoint required")
+		// Provider or API.Endpoint required
+		if t.Provider == "" && t.API.Endpoint == "" {
+			return fmt.Errorf("tool_output: provider or api.endpoint required when strategy=api")
 		}
 		return nil
 	}
 	if t.Strategy == StrategyExternalProvider {
-		if t.API.Endpoint == "" {
-			return fmt.Errorf("tool_output: api.endpoint required when strategy=external_provider")
+		// Provider or API.Endpoint required
+		if t.Provider == "" && t.API.Endpoint == "" {
+			return fmt.Errorf("tool_output: provider or api.endpoint required when strategy=external_provider")
 		}
 		return nil
 	}
@@ -199,6 +168,10 @@ type ToolDiscoveryConfig struct {
 	Enabled          bool   `yaml:"enabled"`           // Enable this pipe
 	Strategy         string `yaml:"strategy"`          // passthrough | api
 	FallbackStrategy string `yaml:"fallback_strategy"` // Fallback when primary fails
+
+	// Provider reference (preferred over inline API config)
+	// References a provider defined in the top-level "providers" section.
+	Provider string `yaml:"provider,omitempty"`
 
 	// API strategy config
 	API APIConfig `yaml:"api,omitempty"`
@@ -216,8 +189,11 @@ func (d *ToolDiscoveryConfig) Validate() error {
 	if d.Strategy == "" || d.Strategy == StrategyPassthrough {
 		return nil
 	}
-	if d.Strategy == StrategyAPI && d.API.Endpoint == "" {
-		return fmt.Errorf("tool_discovery: api.endpoint required when strategy=api")
+	if d.Strategy == StrategyAPI {
+		// Provider or API.Endpoint required
+		if d.Provider == "" && d.API.Endpoint == "" {
+			return fmt.Errorf("tool_discovery: provider or api.endpoint required when strategy=api")
+		}
 	}
 	return nil
 }

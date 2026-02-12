@@ -173,24 +173,6 @@ func (a *AnthropicAdapter) ApplyToolOutput(body []byte, results []CompressedResu
 }
 
 // =============================================================================
-// HISTORY - Extract/Apply
-// =============================================================================
-
-// ExtractHistory extracts conversation history for compression.
-// Should extract user/assistant messages excluding the most recent N messages.
-func (a *AnthropicAdapter) ExtractHistory(body []byte, opts *HistoryOptions) ([]ExtractedContent, error) {
-	// TODO: Implement when history pipe is ready
-	return nil, nil
-}
-
-// ApplyHistory applies compressed history back to the request.
-// Should replace old messages with compressed versions, maintaining user/assistant alternation.
-func (a *AnthropicAdapter) ApplyHistory(body []byte, results []CompressedResult) ([]byte, error) {
-	// TODO: Implement when history pipe is ready
-	return body, nil
-}
-
-// =============================================================================
 // TOOL DISCOVERY - Extract/Apply
 // =============================================================================
 

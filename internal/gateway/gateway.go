@@ -16,7 +16,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -40,12 +42,51 @@ const (
 )
 
 // allowedHosts contains the approved LLM provider domains for SSRF protection.
+// Additional hosts can be added via GATEWAY_ALLOWED_HOSTS env var (comma-separated).
 var allowedHosts = map[string]bool{
+	// Core providers
 	"api.openai.com":                    true,
 	"api.anthropic.com":                 true,
 	"generativelanguage.googleapis.com": true,
-	"localhost":                         true,
-	"127.0.0.1":                         true,
+
+	// OpenCode ecosystem
+	"opencode.ai":   true,
+	"openrouter.ai": true,
+
+	// Popular LLM providers
+	"api.together.ai":       true,
+	"api.groq.com":          true,
+	"api.fireworks.ai":      true,
+	"api.deepseek.com":      true,
+	"api.mistral.ai":        true,
+	"api.cohere.ai":         true,
+	"api.perplexity.ai":     true,
+	"inference.cerebras.ai": true,
+	"api.x.ai":              true,
+
+	// Cloud providers
+	"bedrock-runtime.amazonaws.com": true,
+	"aiplatform.googleapis.com":     true,
+	"cognitiveservices.azure.com":   true,
+	"openai.azure.com":              true,
+	"api-inference.huggingface.co":  true,
+	"ai-gateway.cloudflare.com":     true,
+
+	// Local/self-hosted
+	"localhost": true,
+	"127.0.0.1": true,
+}
+
+func init() {
+	// Allow additional hosts via environment variable
+	if extra := os.Getenv("GATEWAY_ALLOWED_HOSTS"); extra != "" {
+		for _, host := range strings.Split(extra, ",") {
+			host = strings.TrimSpace(strings.ToLower(host))
+			if host != "" {
+				allowedHosts[host] = true
+			}
+		}
+	}
 }
 
 // init registers Bedrock Runtime hosts for common AWS regions.
@@ -173,7 +214,7 @@ func New(cfg *config.Config) *Gateway {
 		expander:      tooloutput.NewExpander(st, tracker),
 		httpClient:    &http.Client{Timeout: clientTimeout, Transport: transport}, // 0 = no timeout
 		rateLimiter:   newRateLimiter(DefaultRateLimit),
-		preemptive:    preemptive.NewManager(cfg.Preemptive),
+		preemptive:    preemptive.NewManager(cfg.ResolvePreemptiveProvider()),
 		bedrockSigner: bedrockSigner,
 		logger:        logger,
 		requestLogger: requestLogger,

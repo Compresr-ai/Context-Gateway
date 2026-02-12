@@ -25,20 +25,24 @@ Context Gateway sits between your AI agent (Claude Code, Cursor, etc.) and the L
 
 ```bash
 # 1. Install (from GitHub)
-curl -fsSL https://compresr.ai/install_gateway_cli | sh
+curl -fsSL https://compresr.ai/api/download_cli | sh
 
-# 2. Add API key
-echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.config/context-gateway/.env
-
-# 3. Run (auto-detects config)
-context-gateway
+# 2. Select an agent (opens interactive TUI wizard)
+gateway agent
 ```
 
-Then point your agent to the gateway:
+The TUI wizard will help you:
+- Choose an agent (claude_code, cursor, openclaw, or custom)
+- Create/edit configuration: 
+  - Summarizer model and api key
+  - enable slack notifications if needed
+  - Set trigger threshold for compression (default: 75%)
 
-```bash
-export ANTHROPIC_API_URL=http://localhost:18080
-```
+Supported agents:
+- **claude_code**: Claude Code IDE integration
+- **cursor**: Cursor IDE integration  
+- **openclaw**: Open-source Claude Code alternative
+- **custom**: Bring your own agent configuration
 
 ## What you'll notice
 

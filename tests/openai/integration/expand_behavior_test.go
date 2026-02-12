@@ -937,9 +937,6 @@ func configWithExpandEnabledOpenAI(mockAPIURL string) *config.Config {
 					Timeout:  30 * time.Second,
 				},
 			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
-			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,
 			},
@@ -979,9 +976,6 @@ func configWithExpandDisabledOpenAI() *config.Config {
 					Model:    "tool_output_openai",
 					Timeout:  30 * time.Second,
 				},
-			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,

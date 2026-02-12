@@ -21,7 +21,6 @@ type PipeType string
 const (
 	PipeNone          PipeType = "none"
 	PipePassthrough   PipeType = "passthrough"
-	PipeHistory       PipeType = "history"
 	PipeToolOutput    PipeType = "tool_output"
 	PipeToolDiscovery PipeType = "tool_discovery"
 )

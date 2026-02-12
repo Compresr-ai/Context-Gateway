@@ -1136,7 +1136,7 @@ func TestE2E_ClaudeCode_JSONToolOutput(t *testing.T) {
   "name": "context-gateway",
   "version": "1.0.0",
   "dependencies": {
-    "go": "1.21",
+    "go": "1.23",
     "testify": "1.8.4"
   }
 }`
@@ -1549,9 +1549,6 @@ func passthroughConfig() *config.Config {
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled: false,
 			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
-			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,
 			},
@@ -1591,9 +1588,6 @@ func compressionConfigAnthropicDirect(apiKey string) *config.Config {
 					Model:    "tool_output_openai", // Use OpenAI model via API
 					Timeout:  30 * time.Second,
 				},
-			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,

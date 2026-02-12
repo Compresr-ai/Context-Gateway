@@ -1,0 +1,26 @@
+# OpenCode Agent Configuration
+# ============================
+# OpenCode AI coding assistant with gateway compression
+# https://github.com/opencode-ai/opencode
+
+agent:
+  name: "opencode"
+  display_name: "OpenCode"
+  description: "Open-source AI coding assistant (supports Anthropic, OpenAI)"
+
+  environment:
+    - name: "ANTHROPIC_BASE_URL"
+      value: "http://localhost:${GATEWAY_PORT}"
+    - name: "ANTHROPIC_API_KEY"
+      value: "${ANTHROPIC_API_KEY}"
+    - name: "OPENAI_BASE_URL"
+      value: "http://localhost:${GATEWAY_PORT}/v1"
+    - name: "OPENAI_API_KEY"
+      value: "${OPENAI_API_KEY}"
+
+  command:
+    check: "command -v opencode &> /dev/null"
+    run: "opencode"
+    args: []
+    install: "go install github.com/opencode-ai/opencode@latest"
+    fallback_message: "OpenCode not found. Install with: go install github.com/opencode-ai/opencode@latest"

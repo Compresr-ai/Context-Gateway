@@ -829,9 +829,6 @@ func hardCompressionConfigOpenAI() *config.Config {
 					Timeout:  30 * time.Second,
 				},
 			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
-			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,
 			},

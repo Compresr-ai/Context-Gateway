@@ -781,9 +781,6 @@ func passthroughConfigOpenAI() *config.Config {
 				Strategy:         "passthrough",
 				FallbackStrategy: "passthrough",
 			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
-			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,
 			},
@@ -823,9 +820,6 @@ func compressionConfigOpenAI() *config.Config {
 					Model:    "tool_output_openai",
 					Timeout:  30 * time.Second,
 				},
-			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,

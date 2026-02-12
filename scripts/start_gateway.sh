@@ -24,8 +24,8 @@ source "$SCRIPT_DIR/utils.sh"
 # Find binary - check multiple locations
 find_binary() {
     # 1. Check project bin directory (symlink or local build)
-    if [ -x "$PROJECT_DIR/bin/gateway" ]; then
-        echo "$PROJECT_DIR/bin/gateway"
+    if [ -x "$PROJECT_DIR/bin/context-gateway" ]; then
+        echo "$PROJECT_DIR/bin/context-gateway"
         return 0
     fi
     
@@ -132,7 +132,7 @@ if [ -z "$BINARY_PATH" ] || [ ! -x "$BINARY_PATH" ]; then
     # No binary found - try to build if source exists
     if [ -f "$PROJECT_DIR/cmd/main.go" ] && command -v go >/dev/null 2>&1; then
         mkdir -p "$PROJECT_DIR/bin"
-        BINARY_PATH="$PROJECT_DIR/bin/gateway"
+        BINARY_PATH="$PROJECT_DIR/bin/context-gateway"
         print_step "Building gateway..."
         cd "$PROJECT_DIR"
         if ! go build -o "$BINARY_PATH" ./cmd 2>&1; then

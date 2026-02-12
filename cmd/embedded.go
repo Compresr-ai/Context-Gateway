@@ -14,6 +14,9 @@ var configsFS embed.FS
 //go:embed agents/*.yaml
 var agentsFS embed.FS
 
+//go:embed hooks/*.sh
+var hooksFS embed.FS
+
 // getEmbeddedConfig returns the raw bytes of an embedded config file.
 // name can be with or without the .yaml extension.
 func getEmbeddedConfig(name string) ([]byte, error) {
@@ -64,4 +67,13 @@ func listEmbeddedAgents() ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// getEmbeddedHook returns the raw bytes of an embedded hook script.
+// name can be with or without the .sh extension.
+func getEmbeddedHook(name string) ([]byte, error) {
+	if !strings.HasSuffix(name, ".sh") {
+		name += ".sh"
+	}
+	return hooksFS.ReadFile(filepath.Join("hooks", name))
 }

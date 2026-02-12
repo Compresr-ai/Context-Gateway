@@ -207,7 +207,7 @@ type Metrics struct {
 // For each step, this shows: Client → Proxy → LLM → Proxy → Client
 type ProxyInteraction struct {
 	// Pipeline info
-	PipeType     string `json:"pipe_type"`               // Which pipe was used: passthrough, tool_output, history, tool_discovery
+	PipeType     string `json:"pipe_type"`               // Which pipe was used: passthrough, tool_output, tool_discovery
 	PipeStrategy string `json:"pipe_strategy,omitempty"` // How it was processed: passthrough, api, llm
 
 	// Request flow

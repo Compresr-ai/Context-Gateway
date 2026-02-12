@@ -2,10 +2,9 @@
 //
 // DESIGN: The gateway supports multiple LLM providers (OpenAI, Anthropic).
 // Each has different request formats. Adapters abstract the differences for
-// all three compression pipes using 3×2 Apply/Extract pairs:
+// compression pipes using 2×2 Apply/Extract pairs:
 //
 //   - ToolOutput:    ExtractToolOutput / ApplyToolOutput
-//   - History:       ExtractHistory / ApplyHistory
 //   - ToolDiscovery: ExtractToolDiscovery / ApplyToolDiscovery
 //
 // FLOW:
@@ -18,7 +17,7 @@
 package adapters
 
 // Adapter defines the unified interface for provider-specific request handling.
-// Each adapter implements 3×2 Apply/Extract pairs for the three pipe types.
+// Each adapter implements 2×2 Apply/Extract pairs for the two pipe types.
 // Adapters are stateless and thread-safe.
 type Adapter interface {
 	// Name returns the adapter identifier (e.g., "openai", "anthropic")
@@ -38,17 +37,6 @@ type Adapter interface {
 
 	// ApplyToolOutput patches compressed tool results back to the request.
 	ApplyToolOutput(body []byte, results []CompressedResult) ([]byte, error)
-
-	// =========================================================================
-	// HISTORY - Extract/Apply conversation history for compression
-	// =========================================================================
-
-	// ExtractHistory extracts conversation messages for compression.
-	// Excludes recent messages based on opts.KeepRecent.
-	ExtractHistory(body []byte, opts *HistoryOptions) ([]ExtractedContent, error)
-
-	// ApplyHistory patches compressed history back to the request.
-	ApplyHistory(body []byte, results []CompressedResult) ([]byte, error)
 
 	// =========================================================================
 	// TOOL DISCOVERY - Extract/Apply tool definitions for filtering

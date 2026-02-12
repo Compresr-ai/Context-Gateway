@@ -31,14 +31,12 @@ type StreamBuffer struct {
 	inToolUse       bool
 	currentToolName string
 	currentToolID   string
-	pendingChunks   [][]byte
 }
 
 // NewStreamBuffer creates a new stream buffer.
 func NewStreamBuffer() *StreamBuffer {
 	return &StreamBuffer{
 		suppressedCalls: make([]ExpandContextCall, 0),
-		pendingChunks:   make([][]byte, 0),
 	}
 }
 
@@ -244,7 +242,6 @@ func (sb *StreamBuffer) Reset() {
 	sb.inToolUse = false
 	sb.currentToolName = ""
 	sb.currentToolID = ""
-	sb.pendingChunks = sb.pendingChunks[:0]
 }
 
 // HasSuppressedCalls returns true if any expand_context calls were suppressed.

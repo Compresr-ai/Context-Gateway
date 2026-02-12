@@ -86,50 +86,6 @@ func TestAnthropic_ExtractToolOutput_ArrayContent(t *testing.T) {
 }
 
 // =============================================================================
-// ANTHROPIC HISTORY TESTS (Stub - Not Yet Implemented)
-// =============================================================================
-
-func TestAnthropic_ExtractHistory_Stub(t *testing.T) {
-	adapter := adapters.NewAnthropicAdapter()
-
-	body := []byte(`{
-		"model": "claude-3",
-		"messages": [
-			{"role": "user", "content": "Hello"},
-			{"role": "assistant", "content": "Hi there"},
-			{"role": "user", "content": "Current question"}
-		]
-	}`)
-
-	opts := &adapters.HistoryOptions{KeepRecent: 1}
-
-	extracted, err := adapter.ExtractHistory(body, opts)
-
-	require.NoError(t, err)
-	assert.Empty(t, extracted) // Stub: Not yet implemented
-}
-
-func TestAnthropic_ApplyHistory_Stub(t *testing.T) {
-	adapter := adapters.NewAnthropicAdapter()
-
-	body := []byte(`{
-		"model": "claude-3",
-		"messages": [
-			{"role": "user", "content": "Hello"}
-		]
-	}`)
-
-	results := []adapters.CompressedResult{
-		{ID: "msg_0", Compressed: "User greeted"},
-	}
-
-	modified, err := adapter.ApplyHistory(body, results)
-
-	require.NoError(t, err)
-	assert.Equal(t, body, modified) // Stub: returns unchanged
-}
-
-// =============================================================================
 // ANTHROPIC TOOL DISCOVERY TESTS (Stub - Not Yet Implemented)
 // =============================================================================
 

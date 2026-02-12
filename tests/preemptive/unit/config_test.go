@@ -87,9 +87,9 @@ func TestConfig_Validate_MissingAPIKey(t *testing.T) {
 	cfg := validConfig()
 	cfg.Summarizer.APIKey = ""
 
+	// API key is optional - can be captured from incoming requests (Max/Pro/Teams users)
 	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "api_key is required")
+	assert.NoError(t, err)
 }
 
 func TestConfig_Validate_InvalidMaxTokens(t *testing.T) {

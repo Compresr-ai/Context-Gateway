@@ -5,7 +5,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 ## Development Setup
 
 ### Prerequisites
-- Go 1.22+
+- Go 1.23+
 - golangci-lint (for linting)
 - Docker (optional, for container builds)
 

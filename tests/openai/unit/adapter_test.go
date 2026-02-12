@@ -116,38 +116,6 @@ func TestOpenAI_ApplyToolOutput_Multiple(t *testing.T) {
 }
 
 // =============================================================================
-// OPENAI HISTORY TESTS (Stub)
-// =============================================================================
-
-func TestOpenAI_ExtractHistory_Stub(t *testing.T) {
-	adapter := adapters.NewOpenAIAdapter()
-
-	body := []byte(`{
-		"model": "gpt-5",
-		"input": [
-			{"type": "message", "role": "user", "content": "Hello"},
-			{"type": "message", "role": "assistant", "content": "Hi"}
-		]
-	}`)
-
-	extracted, err := adapter.ExtractHistory(body, nil)
-
-	require.NoError(t, err)
-	assert.Empty(t, extracted)
-}
-
-func TestOpenAI_ApplyHistory_Stub(t *testing.T) {
-	adapter := adapters.NewOpenAIAdapter()
-
-	body := []byte(`{"model": "gpt-5", "input": []}`)
-
-	modified, err := adapter.ApplyHistory(body, nil)
-
-	require.NoError(t, err)
-	assert.Equal(t, body, modified)
-}
-
-// =============================================================================
 // OPENAI TOOL DISCOVERY TESTS (Stub)
 // =============================================================================
 

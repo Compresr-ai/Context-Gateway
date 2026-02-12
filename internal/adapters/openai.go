@@ -262,20 +262,6 @@ func extractStringContent(v any) string {
 }
 
 // =============================================================================
-// HISTORY - Extract/Apply
-// =============================================================================
-
-// ExtractHistory extracts conversation history for compression.
-func (a *OpenAIAdapter) ExtractHistory(body []byte, opts *HistoryOptions) ([]ExtractedContent, error) {
-	return nil, nil
-}
-
-// ApplyHistory applies compressed history back to the request.
-func (a *OpenAIAdapter) ApplyHistory(body []byte, results []CompressedResult) ([]byte, error) {
-	return body, nil
-}
-
-// =============================================================================
 // TOOL DISCOVERY - Extract/Apply
 // =============================================================================
 

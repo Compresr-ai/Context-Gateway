@@ -1,7 +1,7 @@
 .PHONY: build run test clean docker dev dev-debug embed-prep
 
 # Build variables
-BINARY_NAME=gateway
+BINARY_NAME=context-gateway
 BUILD_DIR=bin
 MAIN_PATH=./cmd
 DEFAULT_CONFIG=configs/preemptive_summarization.yaml
@@ -25,7 +25,8 @@ build:
 run:
 	$(GORUN) $(MAIN_PATH)
 
-# Run with config
+# Run with config (usage: make run-config CONFIG=configs/tool_output_passthrough.yaml)
+CONFIG ?= configs/tool_output_passthrough.yaml
 run-config:
 	$(GORUN) $(MAIN_PATH) serve --config configs/config.yaml
 

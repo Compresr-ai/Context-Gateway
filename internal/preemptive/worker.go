@@ -4,6 +4,7 @@ package preemptive
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -233,11 +234,17 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		job.Status = JobFailed
 		job.Error = err.Error()
 		job.CompletedAt = &now
-		log.Error().Err(err).Str("session_id", job.SessionID).Msg("Summarization job failed")
 		_ = w.sessions.Update(job.SessionID, func(s *Session) { s.State = StateIdle })
-		// Log error
+
+		// Log skip (not an error) for "not enough content" cases
 		if logger := GetCompactionLogger(); logger != nil {
-			logger.LogError(job.SessionID, "preemptive", err, map[string]interface{}{"model": job.Model})
+			if strings.Contains(err.Error(), "not enough content to summarize") {
+				log.Debug().Str("session_id", job.SessionID).Msg("Summarization skipped: not enough content")
+				logger.LogSkip(job.SessionID, "preemptive", err.Error(), map[string]interface{}{"model": job.Model})
+			} else {
+				log.Error().Err(err).Str("session_id", job.SessionID).Msg("Summarization job failed")
+				logger.LogError(job.SessionID, "preemptive", err, map[string]interface{}{"model": job.Model})
+			}
 		}
 	} else {
 		job.Status = JobCompleted
@@ -249,7 +256,7 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		_ = w.sessions.SetSummaryReady(job.SessionID, result.Summary, result.SummaryTokens, result.LastSummarizedIndex, job.MessageCount)
 		// Log preemptive complete
 		if logger := GetCompactionLogger(); logger != nil {
-			logger.LogPreemptiveComplete(job.SessionID, job.Model, result.LastSummarizedIndex+1, result.SummaryTokens, result.Duration)
+			logger.LogPreemptiveComplete(job.SessionID, job.Model, result.LastSummarizedIndex+1, result.SummaryTokens, result.Duration, w.summarizerCfg.Provider, w.summarizerCfg.Model)
 		}
 	}
 

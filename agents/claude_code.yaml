@@ -4,7 +4,7 @@
 
 agent:
   name: "claude_code"
-  display_name: "Claude Code (API)"
+  display_name: "Claude Code (CLI)"
   description: "Anthropic Claude via official CLI"
 
   environment:

@@ -3,7 +3,6 @@
 // DESIGN: Content-based routing (no thresholds - intercept ALL):
 //  1. Tool outputs (role: "tool") → ToolOutputPipe
 //  2. Tools present             → ToolDiscoveryPipe (stub)
-//  3. Conversation history      → HistoryPipe (stub)
 //
 // Uses worker pools for concurrent pipe execution.
 // Threshold logic (min bytes) is handled INSIDE each pipe.
@@ -15,7 +14,6 @@ import (
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/monitoring"
 	"github.com/compresr/context-gateway/internal/pipes"
-	"github.com/compresr/context-gateway/internal/pipes/history"
 	tooldiscovery "github.com/compresr/context-gateway/internal/pipes/tool_discovery"
 	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 	"github.com/compresr/context-gateway/internal/store"
@@ -27,7 +25,6 @@ type PipeType = monitoring.PipeType
 // Pipe type constants - re-exported from monitoring for convenience.
 const (
 	PipeNone          = monitoring.PipeNone
-	PipeHistory       = monitoring.PipeHistory
 	PipeToolOutput    = monitoring.PipeToolOutput
 	PipeToolDiscovery = monitoring.PipeToolDiscovery
 )
@@ -35,7 +32,6 @@ const (
 // Router routes requests to the appropriate pipe based on content analysis.
 type Router struct {
 	config            *config.Config
-	historyPool       *Pool
 	toolOutputPool    *Pool
 	toolDiscoveryPool *Pool
 }
@@ -63,9 +59,6 @@ func NewRouter(cfg *config.Config, st store.Store) *Router {
 
 	return &Router{
 		config: cfg,
-		historyPool: newPool(poolSize, func() pipes.Pipe {
-			return history.New(cfg)
-		}),
 		toolOutputPool: newPool(poolSize, func() pipes.Pipe {
 			return tooloutput.New(cfg, st)
 		}),
@@ -79,7 +72,6 @@ func NewRouter(cfg *config.Config, st store.Store) *Router {
 // Routes based on content detection (priority order) - NO THRESHOLDS:
 //  1. Any tool outputs (role: "tool" or Anthropic tool_result blocks) → ToolOutput pipe
 //  2. Any tools present → ToolDiscovery pipe
-//  3. Any conversation history → History pipe
 //
 // DESIGN: Router delegates ALL extraction logic to the adapter.
 // The adapter is responsible for provider-specific parsing (OpenAI vs Anthropic format).
@@ -108,15 +100,6 @@ func (r *Router) Route(ctx *PipelineContext) PipeType {
 		}
 	}
 
-	// Priority 3: ANY conversation history - intercept ALL
-	// Delegate extraction to adapter for provider-agnostic message parsing
-	if r.config.Pipes.History.Enabled {
-		contents, err := ctx.Adapter.ExtractHistory(ctx.OriginalRequest, nil)
-		if err == nil && len(contents) > 1 {
-			return PipeHistory
-		}
-	}
-
 	return PipeNone
 }
 
@@ -125,23 +108,6 @@ func (r *Router) Route(ctx *PipelineContext) PipeType {
 func (r *Router) Process(ctx *PipelineContext) ([]byte, error) {
 	pipeType := r.Route(ctx)
 	return r.processPipe(ctx, pipeType)
-}
-
-// ProcessHistory handles REQUEST-SIDE history compression.
-// Called BEFORE forwarding to LLM.
-// Returns modified request body on success, or original on failure.
-func (r *Router) ProcessHistory(ctx *PipelineContext) ([]byte, error) {
-	worker := r.historyPool.acquire()
-	defer r.historyPool.release(worker)
-
-	pipeCtx := r.toPipeContext(ctx)
-	modifiedBody, err := worker.Process(pipeCtx)
-	if err != nil {
-		log.Error().Err(err).Msg("history compression failed")
-		return ctx.OriginalRequest, err
-	}
-	r.copyPipeResults(pipeCtx, ctx)
-	return modifiedBody, nil
 }
 
 // ProcessResponse handles RESPONSE-SIDE compression for Tool Output and Tool Discovery.
@@ -183,8 +149,6 @@ func (r *Router) processPipe(ctx *PipelineContext, pipeType PipeType) ([]byte, e
 
 	var pool *Pool
 	switch pipeType {
-	case PipeHistory:
-		pool = r.historyPool
 	case PipeToolOutput:
 		pool = r.toolOutputPool
 	case PipeToolDiscovery:
@@ -216,7 +180,6 @@ func (r *Router) toPipeContext(ctx *PipelineContext) *pipes.PipeContext {
 
 // copyPipeResults copies results from pipes.PipeContext back to PipelineContext.
 func (r *Router) copyPipeResults(pipeCtx *pipes.PipeContext, ctx *PipelineContext) {
-	ctx.HistoryCompressed = pipeCtx.HistoryCompressed
 	ctx.OutputCompressed = pipeCtx.OutputCompressed
 	ctx.ToolsFiltered = pipeCtx.ToolsFiltered
 

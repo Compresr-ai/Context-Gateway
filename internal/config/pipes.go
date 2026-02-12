@@ -52,9 +52,6 @@ var ParseCompressionThreshold = pipes.ParseCompressionThreshold
 // PipesConfig is an alias for pipes.Config for use in main Config struct.
 type PipesConfig = pipes.Config
 
-// HistoryPipeConfig is an alias for pipes.HistoryConfig.
-type HistoryPipeConfig = pipes.HistoryConfig
-
 // ToolOutputPipeConfig is an alias for pipes.ToolOutputConfig.
 type ToolOutputPipeConfig = pipes.ToolOutputConfig
 

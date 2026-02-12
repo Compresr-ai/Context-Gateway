@@ -521,9 +521,6 @@ func passthroughConfig() *config.Config {
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled: false,
 			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
-			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,
 			},
@@ -564,9 +561,6 @@ func compressionConfig(compressionAPIURL string) *config.Config {
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,
 				},
-			},
-			History: config.HistoryPipeConfig{
-				Enabled: false,
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,

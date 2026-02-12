@@ -38,9 +38,8 @@ type PipelineContext struct {
 	CompressionThreshold config.CompressionThreshold
 
 	// Pipe processing results
-	HistoryCompressed bool
-	OutputCompressed  bool
-	ToolsFiltered     bool
+	OutputCompressed bool
+	ToolsFiltered    bool
 
 	// Shadow context references (for expand_context)
 	ShadowRefs map[string]string // ID -> stored content

@@ -491,7 +491,7 @@ func (t *TrajectoryTracker) TrackingStartTime() time.Time {
 // ProxyInteractionData contains data for recording a proxy interaction.
 type ProxyInteractionData struct {
 	// Pipeline info
-	PipeType     string // Which pipe was used: passthrough, tool_output, history, tool_discovery
+	PipeType     string // Which pipe was used: passthrough, tool_output, tool_discovery
 	PipeStrategy string // How it was processed: passthrough, api, llm
 
 	// Request messages

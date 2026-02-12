@@ -23,6 +23,7 @@ import (
 type Config struct {
 	Server     ServerConfig     `yaml:"server"`     // HTTP server settings
 	URLs       URLsConfig       `yaml:"urls"`       // Upstream URLs
+	Providers  ProvidersConfig  `yaml:"providers"`  // LLM provider configurations
 	Pipes      PipesConfig      `yaml:"pipes"`      // Compression pipelines
 	Store      StoreConfig      `yaml:"store"`      // Shadow context store
 	Monitoring MonitoringConfig `yaml:"monitoring"` // Telemetry and logging
@@ -171,6 +172,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("store.ttl is required")
 	}
 
+	// Providers validation (if defined)
+	if c.Providers != nil {
+		if err := c.Providers.Validate(); err != nil {
+			return err
+		}
+	}
+
 	// Pipe validations
 	if err := c.Pipes.Validate(); err != nil {
 		return err
@@ -178,6 +186,11 @@ func (c *Config) Validate() error {
 
 	// Preemptive summarization validation
 	if err := c.Preemptive.Validate(); err != nil {
+		return err
+	}
+
+	// Validate provider references
+	if err := c.ValidateUsedProviders(); err != nil {
 		return err
 	}
 

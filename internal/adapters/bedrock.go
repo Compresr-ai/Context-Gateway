@@ -46,20 +46,6 @@ func (a *BedrockAdapter) ApplyToolOutput(body []byte, results []CompressedResult
 }
 
 // =============================================================================
-// HISTORY - Delegate to Anthropic
-// =============================================================================
-
-// ExtractHistory extracts conversation history for compression.
-func (a *BedrockAdapter) ExtractHistory(body []byte, opts *HistoryOptions) ([]ExtractedContent, error) {
-	return a.anthropic.ExtractHistory(body, opts)
-}
-
-// ApplyHistory applies compressed history back to the request.
-func (a *BedrockAdapter) ApplyHistory(body []byte, results []CompressedResult) ([]byte, error) {
-	return a.anthropic.ApplyHistory(body, results)
-}
-
-// =============================================================================
 // TOOL DISCOVERY - Delegate to Anthropic
 // =============================================================================
 

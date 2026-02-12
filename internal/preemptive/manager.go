@@ -58,6 +58,23 @@ func (m *Manager) Stop() {
 	}
 }
 
+// SetAuthToken passes an auth token to the summarizer for use when no API key is configured.
+// This allows Max/Pro subscription users to use the gateway without a separate API key.
+// isFromXAPIKeyHeader indicates if token came from x-api-key header (vs Authorization: Bearer).
+func (m *Manager) SetAuthToken(token string, isFromXAPIKeyHeader bool) {
+	if m.summary != nil {
+		m.summary.SetAuthToken(token, isFromXAPIKeyHeader)
+	}
+}
+
+// SetEndpoint passes the upstream endpoint URL to the summarizer.
+// Used when no explicit endpoint is configured - uses same endpoint as user's requests.
+func (m *Manager) SetEndpoint(endpoint string) {
+	if m.summary != nil {
+		m.summary.SetEndpoint(endpoint)
+	}
+}
+
 // =============================================================================
 // REQUEST PROCESSING
 // =============================================================================
@@ -359,7 +376,7 @@ func (m *Manager) triggerIfNeeded(session *Session, req *request, usage float64)
 	}
 
 	log.Info().Str("session", req.sessionID).Float64("usage", usage).Int("messages", len(req.messages)).Msg("Triggering preemptive summarization")
-	logPreemptiveTrigger(req.sessionID, req.model, len(req.messages), usage, m.config.TriggerThreshold)
+	logPreemptiveTrigger(req.sessionID, req.model, len(req.messages), usage, m.config.TriggerThreshold, m.config.Summarizer.Provider, m.config.Summarizer.Model)
 	m.worker.Submit(req.sessionID, req.messages, req.model)
 }
 
@@ -442,9 +459,9 @@ func logCompactionFallback(sessionID, model string) {
 	}
 }
 
-func logPreemptiveTrigger(sessionID, model string, msgCount int, usage, threshold float64) {
+func logPreemptiveTrigger(sessionID, model string, msgCount int, usage, threshold float64, summarizerProvider, summarizerModel string) {
 	if l := GetCompactionLogger(); l != nil {
-		l.LogPreemptiveTrigger(sessionID, model, msgCount, usage, threshold)
+		l.LogPreemptiveTrigger(sessionID, model, msgCount, usage, threshold, summarizerProvider, summarizerModel)
 	}
 }
 
