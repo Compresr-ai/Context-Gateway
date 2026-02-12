@@ -47,9 +47,26 @@ func detectProvider(path string, headers http.Header) Provider {
 			return ProviderOpenAI
 		case "gemini":
 			return ProviderGemini
+		case "bedrock":
+			return ProviderBedrock
 		case "ollama":
 			return ProviderOllama
 		}
+	}
+
+	// 1b. Bedrock: URL path patterns (/model/xxx/invoke or /model/xxx/converse)
+	// Must check before anthropic-version since Bedrock requests may also set that header
+	if strings.Contains(path, "/model/") &&
+		(strings.HasSuffix(path, "/invoke") ||
+			strings.HasSuffix(path, "/invoke-with-response-stream") ||
+			strings.HasSuffix(path, "/converse") ||
+			strings.HasSuffix(path, "/converse-stream")) {
+		return ProviderBedrock
+	}
+
+	// 1c. Bedrock: X-Amz-Date header (SigV4 indicator from AWS SDK)
+	if headers.Get("X-Amz-Date") != "" {
+		return ProviderBedrock
 	}
 
 	// 2. anthropic-version header is definitive for Anthropic

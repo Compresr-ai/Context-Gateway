@@ -104,6 +104,7 @@ const (
 	ProviderAnthropic Provider = "anthropic"
 	ProviderOpenAI    Provider = "openai"
 	ProviderGemini    Provider = "gemini"
+	ProviderBedrock   Provider = "bedrock"
 	ProviderOllama    Provider = "ollama"
 	ProviderUnknown   Provider = "unknown"
 )
@@ -122,6 +123,8 @@ func ProviderFromString(s string) Provider {
 		return ProviderOpenAI
 	case "gemini":
 		return ProviderGemini
+	case "bedrock":
+		return ProviderBedrock
 	case "ollama":
 		return ProviderOllama
 	default:

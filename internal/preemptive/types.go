@@ -53,6 +53,7 @@ type Config struct {
 
 // SummarizerConfig configures the summarization service.
 type SummarizerConfig struct {
+	Provider           string        `yaml:"provider,omitempty"`   // "anthropic", "openai", "gemini", "bedrock" — auto-detected from endpoint if empty
 	Model              string        `yaml:"model"`
 	APIKey             string        `yaml:"api_key"`
 	Endpoint           string        `yaml:"endpoint"`
@@ -108,7 +109,8 @@ func (c *Config) Validate() error {
 	if c.Summarizer.Model == "" {
 		return fmt.Errorf("summarizer.model is required")
 	}
-	if c.Summarizer.APIKey == "" {
+	// Bedrock uses SigV4 signing (no API key needed); other providers require an API key
+	if c.Summarizer.APIKey == "" && c.Summarizer.Provider != "bedrock" {
 		return fmt.Errorf("summarizer.api_key is required: ANTHROPIC_API_KEY is not set. Please export it or add it to ~/.config/context-gateway/.env")
 	}
 	if c.Summarizer.MaxTokens <= 0 {

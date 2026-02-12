@@ -29,6 +29,11 @@ func normalizeOpenAIPath(path string) string {
 func (g *Gateway) autoDetectTargetURL(r *http.Request) string {
 	path := r.URL.Path
 
+	// 0. Bedrock: path-based detection (/model/xxx/invoke or /model/xxx/converse)
+	if g.isBedrockRequest(path) && g.bedrockSigner != nil && g.bedrockSigner.IsConfigured() {
+		return g.bedrockSigner.BuildTargetURL(path)
+	}
+
 	// 1. Anthropic: anthropic-version header is definitive
 	if r.Header.Get("anthropic-version") != "" {
 		return Providers["anthropic"].BaseURL + path

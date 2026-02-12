@@ -123,12 +123,14 @@ type AnthropicMessage struct {
 }
 
 // AnthropicRequest is the request body for Anthropic messages API.
+// Also used for Bedrock with Anthropic models (set AnthropicVersion to "bedrock-2023-05-31").
 type AnthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
 	System      string             `json:"system,omitempty"`
 	Messages    []AnthropicMessage `json:"messages"`
 	Temperature float64            `json:"temperature,omitempty"`
+	AnthropicVersion string        `json:"anthropic_version,omitempty"`
 }
 
 // AnthropicResponse is the response from Anthropic messages API.

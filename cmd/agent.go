@@ -92,15 +92,37 @@ func runAgentCommand(args []string) {
 
 	printBanner()
 
-	// Require ANTHROPIC_API_KEY - users must provide their own key
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
-		fmt.Fprintf(os.Stderr, "\n  \033[1;31mError:\033[0m ANTHROPIC_API_KEY is not set.\n\n")
-		fmt.Fprintf(os.Stderr, "  You must provide your own Anthropic API key to use Context Gateway.\n\n")
-		fmt.Fprintf(os.Stderr, "  Option 1: Export it directly\n")
+	// Require either ANTHROPIC_API_KEY or AWS credentials for Bedrock
+	hasAnthropicKey := os.Getenv("ANTHROPIC_API_KEY") != ""
+	hasAwsCredentials := os.Getenv("AWS_ACCESS_KEY_ID") != "" && os.Getenv("AWS_SECRET_ACCESS_KEY") != ""
+	hasAwsProfile := os.Getenv("AWS_PROFILE") != ""
+	hasAwsBearerToken := os.Getenv("AWS_BEARER_TOKEN_BEDROCK") != ""
+	hasAwsAuth := hasAwsCredentials || hasAwsProfile || hasAwsBearerToken
+	if !hasAnthropicKey && !hasAwsAuth {
+		fmt.Fprintf(os.Stderr, "\n  \033[1;31mError:\033[0m No API credentials configured.\n\n")
+		fmt.Fprintf(os.Stderr, "  Context Gateway requires either Anthropic or AWS Bedrock credentials.\n\n")
+		fmt.Fprintf(os.Stderr, "  Option 1: Anthropic API key\n")
 		fmt.Fprintf(os.Stderr, "    export ANTHROPIC_API_KEY=sk-ant-...\n\n")
-		fmt.Fprintf(os.Stderr, "  Option 2: Add it to your .env file\n")
-		fmt.Fprintf(os.Stderr, "    echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.config/context-gateway/.env\n\n")
+		fmt.Fprintf(os.Stderr, "  Option 2: AWS credentials (for Bedrock)\n")
+		fmt.Fprintf(os.Stderr, "    export AWS_ACCESS_KEY_ID=AKIA...\n")
+		fmt.Fprintf(os.Stderr, "    export AWS_SECRET_ACCESS_KEY=...\n")
+		fmt.Fprintf(os.Stderr, "    export AWS_REGION=us-east-1\n\n")
+		fmt.Fprintf(os.Stderr, "  Option 3: AWS profile\n")
+		fmt.Fprintf(os.Stderr, "    export AWS_PROFILE=my-profile\n\n")
+		fmt.Fprintf(os.Stderr, "  Add to .env file: ~/.config/context-gateway/.env\n\n")
 		os.Exit(1)
+	}
+
+	// Log available providers
+	if hasAnthropicKey {
+		fmt.Fprintf(os.Stderr, "  ✓ Anthropic API key configured\n")
+	}
+	if hasAwsAuth {
+		authMethod := "credentials"
+		if hasAwsProfile {
+			authMethod = "profile (" + os.Getenv("AWS_PROFILE") + ")"
+		}
+		fmt.Fprintf(os.Stderr, "  ✓ AWS %s configured (Bedrock)\n", authMethod)
 	}
 
 	// List mode

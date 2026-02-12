@@ -42,7 +42,7 @@ const (
 
 // CallLLMParams contains parameters for calling an LLM provider.
 type CallLLMParams struct {
-	// Provider overrides auto-detection. One of: "anthropic", "openai", "gemini".
+	// Provider overrides auto-detection. One of: "anthropic", "openai", "gemini", "bedrock".
 	// If empty, provider is detected from the Endpoint URL.
 	Provider string
 
@@ -56,6 +56,7 @@ type CallLLMParams struct {
 
 	// HTTPClient overrides the default HTTP client (useful for testing and connection pooling).
 	// If nil, a default client is created with context-based timeout.
+	// For Bedrock, an HTTPClient with a SigV4 signing transport should be provided.
 	HTTPClient *http.Client
 }
 
@@ -64,7 +65,8 @@ func (p *CallLLMParams) validate() error {
 	if p.Endpoint == "" {
 		return fmt.Errorf("endpoint required")
 	}
-	if p.APIKey == "" {
+	// Bedrock uses SigV4 signing via HTTPClient transport, not an API key
+	if p.APIKey == "" && p.Provider != "bedrock" {
 		return fmt.Errorf("api key required")
 	}
 	if p.Model == "" {
@@ -150,6 +152,8 @@ func CallLLM(ctx context.Context, params CallLLMParams) (*CallLLMResult, error) 
 // Exported for testing. For production use, prefer setting Provider explicitly.
 func DetectProvider(endpoint string) string {
 	switch {
+	case strings.Contains(endpoint, "bedrock-runtime") || strings.Contains(endpoint, "bedrock"):
+		return "bedrock"
 	case strings.Contains(endpoint, "anthropic"):
 		return "anthropic"
 	case strings.Contains(endpoint, "generativelanguage.googleapis.com"):
@@ -164,6 +168,9 @@ func setAuthHeaders(req *http.Request, provider, apiKey string) {
 	case "anthropic":
 		req.Header.Set("x-api-key", apiKey)
 		req.Header.Set("anthropic-version", anthropicVersion)
+	case "bedrock":
+		// Bedrock auth is handled by SigV4 signing transport in the HTTPClient.
+		// No API key headers needed; the transport signs the request automatically.
 	case "gemini":
 		req.Header.Set("x-goog-api-key", apiKey)
 	default: // openai
@@ -175,14 +182,20 @@ func setAuthHeaders(req *http.Request, provider, apiKey string) {
 // Exception: OpenAI o-series models (o1, o3) reject the temperature field — omitted for OpenAI.
 func buildRequestBody(provider string, params CallLLMParams) ([]byte, error) {
 	switch provider {
-	case "anthropic":
-		return json.Marshal(&AnthropicRequest{
+	case "anthropic", "bedrock":
+		// Bedrock with Anthropic models uses the same Messages API format.
+		// The anthropic_version field uses bedrock-2023-05-31 for Bedrock.
+		req := &AnthropicRequest{
 			Model:       params.Model,
 			MaxTokens:   params.MaxTokens,
 			System:      params.SystemPrompt,
 			Messages:    []AnthropicMessage{{Role: "user", Content: params.UserPrompt}},
 			Temperature: 0.0,
-		})
+		}
+		if provider == "bedrock" {
+			req.AnthropicVersion = "bedrock-2023-05-31"
+		}
+		return json.Marshal(req)
 	case "gemini":
 		return json.Marshal(&GeminiRequest{
 			SystemInstruction: &GeminiContent{
@@ -212,7 +225,8 @@ func parseResponse(provider string, body []byte) (*CallLLMResult, error) {
 	result := &CallLLMResult{Provider: provider}
 
 	switch provider {
-	case "anthropic":
+	case "anthropic", "bedrock":
+		// Bedrock with Anthropic models returns the same response format
 		var resp AnthropicResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
 			return nil, fmt.Errorf("failed to parse %s response: %w", provider, err)

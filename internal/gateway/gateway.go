@@ -48,6 +48,19 @@ var allowedHosts = map[string]bool{
 	"127.0.0.1":                         true,
 }
 
+// init registers Bedrock Runtime hosts for common AWS regions.
+func init() {
+	bedrockRegions := []string{
+		"us-east-1", "us-east-2", "us-west-1", "us-west-2",
+		"eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-north-1",
+		"ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "ap-northeast-2", "ap-south-1",
+		"ca-central-1", "sa-east-1",
+	}
+	for _, region := range bedrockRegions {
+		allowedHosts[fmt.Sprintf("bedrock-runtime.%s.amazonaws.com", region)] = true
+	}
+}
+
 // Gateway is the main context compression gateway.
 type Gateway struct {
 	config      *config.Config
@@ -63,6 +76,9 @@ type Gateway struct {
 
 	// Preemptive summarization
 	preemptive *preemptive.Manager
+
+	// AWS Bedrock support
+	bedrockSigner *BedrockSigner
 
 	// Logging components
 	logger        *monitoring.Logger
@@ -144,6 +160,9 @@ func New(cfg *config.Config) *Gateway {
 		ResponseHeaderTimeout: headerTimeout, // 0 = no timeout (safe for LLM with extended thinking)
 	}
 
+	// Initialize AWS Bedrock signer (non-blocking, logs if credentials unavailable)
+	bedrockSigner := NewBedrockSigner()
+
 	g := &Gateway{
 		config:        cfg,
 		registry:      registry,
@@ -155,6 +174,7 @@ func New(cfg *config.Config) *Gateway {
 		httpClient:    &http.Client{Timeout: clientTimeout, Transport: transport}, // 0 = no timeout
 		rateLimiter:   newRateLimiter(DefaultRateLimit),
 		preemptive:    preemptive.NewManager(cfg.Preemptive),
+		bedrockSigner: bedrockSigner,
 		logger:        logger,
 		requestLogger: requestLogger,
 		metrics:       metrics,

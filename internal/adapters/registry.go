@@ -23,6 +23,7 @@ func NewRegistry() *Registry {
 	// Register built-in adapters
 	r.Register(NewAnthropicAdapter())
 	r.Register(NewOpenAIAdapter())
+	r.Register(NewBedrockAdapter())
 
 	return r
 }

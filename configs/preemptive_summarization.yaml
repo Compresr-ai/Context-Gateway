@@ -59,6 +59,12 @@ preemptive:
     #   model: "gpt-4o-mini"
     #   api_key: "${OPENAI_API_KEY}"
     #   endpoint: "https://api.openai.com/v1/chat/completions"
+    #
+    # AWS Bedrock example (uses AWS credentials from environment):
+    #   provider: "bedrock"
+    #   model: "anthropic.claude-haiku-4-5-20250620-v1:0"
+    #   api_key: "unused"  # auth handled by SigV4 signing
+    #   endpoint: "https://bedrock-runtime.${AWS_REGION:-us-east-1}.amazonaws.com/model/anthropic.claude-haiku-4-5-20250620-v1:0/invoke"
     
     max_tokens: 4096
     timeout: 60s

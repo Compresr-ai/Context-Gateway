@@ -45,6 +45,12 @@ var Providers = map[string]ProviderConfig{
 		DefaultPath: "",
 		Paths:       []string{},
 	},
+	"bedrock": {
+		Name:        "bedrock",
+		BaseURL:     envOrDefault("BEDROCK_PROVIDER_URL", "https://bedrock-runtime."+envOrDefault("AWS_REGION", envOrDefault("AWS_DEFAULT_REGION", "us-east-1"))+".amazonaws.com"),
+		DefaultPath: "/model/anthropic.claude-sonnet-4-20250514-v1:0/invoke",
+		Paths:       []string{"/model/"},
+	},
 	"ollama": {
 		Name:        "ollama",
 		BaseURL:     envOrDefault("OLLAMA_PROVIDER_URL", "http://localhost:11434"),

@@ -687,11 +687,18 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 		}
 	}
 
+	// Detect if this is a Bedrock request
+	isBedrock := g.isBedrockRequest(r.URL.Path)
+
 	// Sanitize model name (strip provider prefix like "anthropic/", "openai/")
-	body = sanitizeModelName(body)
+	// Skip for Bedrock since model ID format is different (e.g., "anthropic.claude-3-5-sonnet")
+	if !isBedrock {
+		body = sanitizeModelName(body)
+	}
 
 	log.Info().
 		Str("targetURL", targetURL).
+		Bool("bedrock", isBedrock).
 		Str("x-api-key", maskKey(r.Header.Get("x-api-key"))).
 		Str("anthropic-version", r.Header.Get("anthropic-version")).
 		Msg("forwarding request")
@@ -709,13 +716,22 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 		return nil, err
 	}
 
-	// Forward relevant headers
-	for _, h := range []string{
-		"Content-Type", "Authorization", "x-api-key", "x-goog-api-key",
-		"api-key", "anthropic-version", "anthropic-beta",
-	} {
-		if v := r.Header.Get(h); v != "" {
-			httpReq.Header.Set(h, v)
+	if isBedrock && g.bedrockSigner != nil && g.bedrockSigner.IsConfigured() {
+		// Bedrock: use AWS SigV4 signing instead of forwarding API key headers
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		if err := g.bedrockSigner.SignRequest(ctx, httpReq, body); err != nil {
+			return nil, fmt.Errorf("failed to sign Bedrock request: %w", err)
+		}
+	} else {
+		// Non-Bedrock: forward relevant headers
+		for _, h := range []string{
+			"Content-Type", "Authorization", "x-api-key", "x-goog-api-key",
+			"api-key", "anthropic-version", "anthropic-beta",
+		} {
+			if v := r.Header.Get(h); v != "" {
+				httpReq.Header.Set(h, v)
+			}
 		}
 	}
 
@@ -738,6 +754,15 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 	}
 
 	return resp, nil
+}
+
+// isBedrockRequest checks if the request path matches Bedrock URL patterns.
+func (g *Gateway) isBedrockRequest(path string) bool {
+	return strings.Contains(path, "/model/") &&
+		(strings.HasSuffix(path, "/invoke") ||
+			strings.HasSuffix(path, "/invoke-with-response-stream") ||
+			strings.HasSuffix(path, "/converse") ||
+			strings.HasSuffix(path, "/converse-stream"))
 }
 
 // isStreamingRequest checks if the request has "stream": true.
