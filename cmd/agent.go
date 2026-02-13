@@ -30,19 +30,21 @@ import (
 func runAgentCommand(args []string) {
 	// Parse flags
 	var (
-		configFlag string
-		debugFlag  bool
-		portFlag   string
-		proxyMode  string
-		logDir     string
-		listFlag   bool
-		agentArg   string
+		configFlag      string
+		debugFlag       bool
+		portFlag        string
+		proxyMode       string
+		logDir          string
+		listFlag        bool
+		agentArg        string
+		passthroughArgs []string
 	)
 
 	portFlag = "" // Empty = auto-find available port
 	proxyMode = "auto"
 
 	i := 0
+parseLoop:
 	for i < len(args) {
 		switch args[i] {
 		case "-h", "--help":
@@ -78,6 +80,9 @@ func runAgentCommand(args []string) {
 				fmt.Fprintln(os.Stderr, "Error: --proxy requires a value")
 				os.Exit(1)
 			}
+		case "--":
+			passthroughArgs = args[i+1:]
+			break parseLoop
 		default:
 			if strings.HasPrefix(args[i], "-") {
 				fmt.Fprintf(os.Stderr, "Error: unknown option: %s\n", args[i])
@@ -494,10 +499,13 @@ mainSelectionLoop:
 		}
 	}
 
-	// Build agent command
+	// Build agent command (all args shell-quoted for bash -c safety)
 	agentCmd := ac.Agent.Command.Run
-	if len(ac.Agent.Command.Args) > 0 {
-		agentCmd += " " + strings.Join(ac.Agent.Command.Args, " ")
+	for _, arg := range ac.Agent.Command.Args {
+		agentCmd += " " + shellQuote(arg)
+	}
+	for _, arg := range passthroughArgs {
+		agentCmd += " " + shellQuote(arg)
 	}
 
 	// Launch agent as child process
@@ -1800,7 +1808,7 @@ func printStep(msg string) {
 func printAgentHelp() {
 	fmt.Println("Start Agent with Gateway Proxy")
 	fmt.Println()
-	fmt.Println("Usage: context-gateway [AGENT] [OPTIONS]")
+	fmt.Println("Usage: context-gateway [AGENT] [OPTIONS] [-- AGENT_ARGS...]")
 	fmt.Println()
 	fmt.Println("Options:")
 	fmt.Println("  -c, --config FILE    Gateway config (optional - shows menu if not specified)")
@@ -1810,11 +1818,24 @@ func printAgentHelp() {
 	fmt.Println("  -l, --list           List available agents")
 	fmt.Println("  -h, --help           Show this help")
 	fmt.Println()
+	fmt.Println("Pass-through Arguments:")
+	fmt.Println("  Everything after -- is forwarded directly to the agent command.")
+	fmt.Println("  This is useful for passing flags that conflict with gateway options")
+	fmt.Println("  (e.g., -p is used by the gateway for --port).")
+	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  context-gateway                                  Interactive mode")
 	fmt.Println("  context-gateway claude_code                      Interactive config selection")
 	fmt.Println("  context-gateway claude_code -c preemptive_summarization")
 	fmt.Println("  context-gateway -l                               List agents")
+	fmt.Println("  context-gateway claude_code -- -p \"fix the bug\"  Pass -p to Claude Code")
+	fmt.Println("  context-gateway claude_code -d -- --verbose      Debug gateway, --verbose to agent")
+}
+
+// shellQuote returns a shell-safe single-quoted version of arg.
+// Used to safely embed user-provided pass-through arguments into a bash -c command string.
+func shellQuote(arg string) string {
+	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
 }
 
 // sortedKeys returns the sorted keys of a map.

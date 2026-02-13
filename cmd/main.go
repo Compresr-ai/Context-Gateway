@@ -270,6 +270,8 @@ func printHelp() {
 	fmt.Println("  context-gateway -d                 Launch with debug logging")
 	fmt.Println("  context-gateway serve              Start gateway server only")
 	fmt.Println("  context-gateway update             Update to latest version")
+	fmt.Println("  context-gateway claude_code -- -p \"fix the bug\"")
+	fmt.Println("                                     Pass -p flag through to Claude Code")
 	fmt.Println()
 	fmt.Println("Documentation: https://docs.compresr.ai/gateway")
 }
