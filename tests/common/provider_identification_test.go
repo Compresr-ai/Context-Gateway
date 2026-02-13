@@ -31,9 +31,9 @@ func TestProviderIdentification_ExplicitHeader(t *testing.T) {
 			expectedName: "openai",
 		},
 		{
-			name:         "X-Provider: gemini (falls back to openai - not implemented)",
+			name:         "X-Provider: gemini",
 			headerValue:  "gemini",
-			expectedName: "openai", // Falls back to OpenAI
+			expectedName: "gemini",
 		},
 		{
 			name:         "X-Provider: unknown (falls back to openai)",

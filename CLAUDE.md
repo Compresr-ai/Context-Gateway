@@ -145,7 +145,6 @@ See `docs/slack-setup.md` for manual setup.
 ## Unimplemented (Stubs)
 
 - `internal/pipes/tool_discovery/tool_discovery.go` — Tool filtering pipe (returns original unchanged)
-- Gemini adapter — Not implemented
 
 ## Logging
 
