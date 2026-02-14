@@ -28,6 +28,7 @@ const (
 	StrategyAPI              = "api"               // Call compresr platform API
 	StrategySimple           = "simple"            // Simple compression (first N words)
 	StrategyExternalProvider = "external_provider" // Call external LLM provider (OpenAI/Anthropic) directly
+	StrategyRelevance        = "relevance"         // Local relevance-based tool filtering (no external API)
 )
 
 // =============================================================================
@@ -169,7 +170,7 @@ func (t *ToolOutputConfig) Validate() error {
 // ToolDiscoveryConfig configures tool filtering.
 type ToolDiscoveryConfig struct {
 	Enabled          bool   `yaml:"enabled"`           // Enable this pipe
-	Strategy         string `yaml:"strategy"`          // passthrough | api
+	Strategy         string `yaml:"strategy"`          // passthrough | api | relevance
 	FallbackStrategy string `yaml:"fallback_strategy"` // Fallback when primary fails
 
 	// Provider reference (preferred over inline API config)
@@ -180,8 +181,10 @@ type ToolDiscoveryConfig struct {
 	API APIConfig `yaml:"api,omitempty"`
 
 	// Filtering settings
-	MinTools    int     `yaml:"min_tools"`    // Below this count, no filtering
-	TargetRatio float64 `yaml:"target_ratio"` // Keep this ratio of tools
+	MinTools    int      `yaml:"min_tools"`    // Below this count, no filtering (default: 5)
+	MaxTools    int      `yaml:"max_tools"`    // Keep at most this many tools (default: 25)
+	TargetRatio float64  `yaml:"target_ratio"` // Keep this ratio of tools (e.g., 0.8 = 80%)
+	AlwaysKeep  []string `yaml:"always_keep"`  // Tool names to never filter out
 }
 
 // Validate validates tool discovery pipe config.
@@ -192,13 +195,17 @@ func (d *ToolDiscoveryConfig) Validate() error {
 	if d.Strategy == "" || d.Strategy == StrategyPassthrough {
 		return nil
 	}
+	if d.Strategy == StrategyRelevance {
+		return nil // No external dependencies needed
+	}
 	if d.Strategy == StrategyAPI {
 		// Provider or API.Endpoint required
 		if d.Provider == "" && d.API.Endpoint == "" {
 			return fmt.Errorf("tool_discovery: provider or api.endpoint required when strategy=api")
 		}
+		return nil
 	}
-	return nil
+	return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', or 'api'", d.Strategy)
 }
 
 // =============================================================================

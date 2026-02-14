@@ -266,13 +266,89 @@ func extractStringContent(v any) string {
 // =============================================================================
 
 // ExtractToolDiscovery extracts tool definitions for filtering.
+// OpenAI format: tools: [{type: "function", function: {name, description, parameters}}]
 func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
-	return nil, nil
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse request: %w", err)
+	}
+
+	tools, ok := req["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		return nil, nil
+	}
+
+	extracted := make([]ExtractedContent, 0, len(tools))
+	for i, toolAny := range tools {
+		tool, ok := toolAny.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		name := getString(fn, "name")
+		if name == "" {
+			continue
+		}
+		description := getString(fn, "description")
+
+		extracted = append(extracted, ExtractedContent{
+			ID:           name,
+			Content:      description,
+			ContentType:  "tool_def",
+			ToolName:     name,
+			MessageIndex: i,
+		})
+	}
+
+	return extracted, nil
 }
 
-// ApplyToolDiscovery applies filtered tools back to the request.
+// ApplyToolDiscovery filters tools based on Keep flag in results.
 func (a *OpenAIAdapter) ApplyToolDiscovery(body []byte, results []CompressedResult) ([]byte, error) {
-	return body, nil
+	if len(results) == 0 {
+		return body, nil
+	}
+
+	keepSet := make(map[string]bool)
+	for _, r := range results {
+		if r.Keep {
+			keepSet[r.ID] = true
+		}
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse request: %w", err)
+	}
+
+	tools, ok := req["tools"].([]any)
+	if !ok {
+		return body, nil
+	}
+
+	filtered := make([]any, 0, len(keepSet))
+	for _, toolAny := range tools {
+		tool, ok := toolAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		name := getString(fn, "name")
+		if keepSet[name] {
+			filtered = append(filtered, toolAny)
+		}
+	}
+
+	req["tools"] = filtered
+	return json.Marshal(req)
 }
 
 // =============================================================================
