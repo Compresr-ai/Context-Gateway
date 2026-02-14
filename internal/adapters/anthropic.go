@@ -177,17 +177,80 @@ func (a *AnthropicAdapter) ApplyToolOutput(body []byte, results []CompressedResu
 // =============================================================================
 
 // ExtractToolDiscovery extracts tool definitions for filtering.
-// Should extract tools[] array with name, description, and input_schema.
+// Anthropic format: tools: [{name, description, input_schema}]
 func (a *AnthropicAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
-	// TODO: Implement when tool discovery pipe is ready
-	return nil, nil
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse request: %w", err)
+	}
+
+	tools, ok := req["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		return nil, nil
+	}
+
+	extracted := make([]ExtractedContent, 0, len(tools))
+	for i, toolAny := range tools {
+		tool, ok := toolAny.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		description, _ := tool["description"].(string)
+
+		extracted = append(extracted, ExtractedContent{
+			ID:           name,
+			Content:      description,
+			ContentType:  "tool_def",
+			ToolName:     name,
+			MessageIndex: i,
+		})
+	}
+
+	return extracted, nil
 }
 
-// ApplyToolDiscovery applies filtered tools back to the request.
-// Should filter tools[] array based on Keep flag in results.
+// ApplyToolDiscovery filters tools based on Keep flag in results.
 func (a *AnthropicAdapter) ApplyToolDiscovery(body []byte, results []CompressedResult) ([]byte, error) {
-	// TODO: Implement when tool discovery pipe is ready
-	return body, nil
+	if len(results) == 0 {
+		return body, nil
+	}
+
+	keepSet := make(map[string]bool)
+	for _, r := range results {
+		if r.Keep {
+			keepSet[r.ID] = true
+		}
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse request: %w", err)
+	}
+
+	tools, ok := req["tools"].([]any)
+	if !ok {
+		return body, nil
+	}
+
+	filtered := make([]any, 0, len(keepSet))
+	for _, toolAny := range tools {
+		tool, ok := toolAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := tool["name"].(string)
+		if keepSet[name] {
+			filtered = append(filtered, toolAny)
+		}
+	}
+
+	req["tools"] = filtered
+	return json.Marshal(req)
 }
 
 // =============================================================================

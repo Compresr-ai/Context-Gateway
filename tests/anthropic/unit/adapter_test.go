@@ -89,7 +89,7 @@ func TestAnthropic_ExtractToolOutput_ArrayContent(t *testing.T) {
 // ANTHROPIC TOOL DISCOVERY TESTS (Stub - Not Yet Implemented)
 // =============================================================================
 
-func TestAnthropic_ExtractToolDiscovery_Stub(t *testing.T) {
+func TestAnthropic_ExtractToolDiscovery(t *testing.T) {
 	adapter := adapters.NewAnthropicAdapter()
 
 	body := []byte(`{
@@ -103,10 +103,13 @@ func TestAnthropic_ExtractToolDiscovery_Stub(t *testing.T) {
 	extracted, err := adapter.ExtractToolDiscovery(body, nil)
 
 	require.NoError(t, err)
-	assert.Empty(t, extracted) // Stub: Not yet implemented
+	require.Len(t, extracted, 1)
+	assert.Equal(t, "read_file", extracted[0].ID)
+	assert.Equal(t, "Read a file", extracted[0].Content)
+	assert.Equal(t, "tool_def", extracted[0].ContentType)
 }
 
-func TestAnthropic_ApplyToolDiscovery_Stub(t *testing.T) {
+func TestAnthropic_ApplyToolDiscovery(t *testing.T) {
 	adapter := adapters.NewAnthropicAdapter()
 
 	body := []byte(`{
@@ -124,7 +127,12 @@ func TestAnthropic_ApplyToolDiscovery_Stub(t *testing.T) {
 	modified, err := adapter.ApplyToolDiscovery(body, results)
 
 	require.NoError(t, err)
-	assert.Equal(t, body, modified) // Stub: returns unchanged
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(modified, &req))
+	tools := req["tools"].([]any)
+	require.Len(t, tools, 1)
+	assert.Equal(t, "read_file", tools[0].(map[string]any)["name"])
 }
 
 // =============================================================================

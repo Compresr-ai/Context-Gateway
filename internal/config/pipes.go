@@ -17,6 +17,7 @@ const (
 	StrategyPassthrough      = pipes.StrategyPassthrough
 	StrategyAPI              = pipes.StrategyAPI
 	StrategyExternalProvider = pipes.StrategyExternalProvider
+	StrategyRelevance        = pipes.StrategyRelevance
 )
 
 // CompressionThreshold type alias - re-exported from pipes package.

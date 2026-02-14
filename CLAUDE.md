@@ -95,7 +95,7 @@ Client → Gateway:8080
 
 **Adapter** (`internal/adapters/adapter.go`): Provider-specific Extract/Apply pairs for each pipe type. Pipes never contain provider logic — they delegate to adapters. All provider detection goes through `IdentifyAndGetAdapter()` in `provider_identification.go`.
 
-**Pipe** (`internal/pipes/pipe.go`): `Process(*PipeContext) ([]byte, error)` — receives request body, returns modified body. Only tool_output is fully implemented.
+**Pipe** (`internal/pipes/pipe.go`): `Process(*PipeContext) ([]byte, error)` — receives request body, returns modified body. Both tool_output (compression) and tool_discovery (relevance filtering) are implemented.
 
 **Store** (`internal/store/store.go`): Dual-TTL shadow context storage. Original content: 5 min TTL (for expand_context). Compressed content: 24h TTL (for KV-cache reuse).
 
@@ -144,7 +144,7 @@ See `docs/slack-setup.md` for manual setup.
 
 ## Unimplemented (Stubs)
 
-- `internal/pipes/tool_discovery/tool_discovery.go` — Tool filtering pipe (returns original unchanged)
+(None — all adapters and pipes are implemented)
 
 ## Logging
 
