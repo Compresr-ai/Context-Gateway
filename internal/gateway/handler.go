@@ -240,6 +240,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// If we have a synthetic response (SDK compaction with cached summary),
 		// return it immediately without forwarding to Anthropic
 		if len(syntheticResponse) > 0 {
+			g.metrics.RecordPreemptiveCacheHit()
 			log.Info().
 				Str("request_id", requestID).
 				Int("response_size", len(syntheticResponse)).
@@ -400,6 +401,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	// Write response
 	copyHeaders(w, result.Response.Header)
 	addPreemptiveHeaders(w, pipeCtx.PreemptiveHeaders)
+	addSavingsHeaders(w, pipeCtx, originalTokens)
 	w.WriteHeader(result.Response.StatusCode)
 	w.Write(responseBody)
 }
@@ -443,6 +445,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		defer resp.Body.Close()
 		copyHeaders(w, resp.Header)
 		addPreemptiveHeaders(w, pipeCtx.PreemptiveHeaders)
+		addSavingsHeaders(w, pipeCtx, originalTokens)
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
@@ -500,7 +503,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			log.Error().Err(err).Msg("streaming: failed to rewrite history")
 			// Fall back to flushing original response
-			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks)
+			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, pipeCtx, originalTokens, bufferedChunks)
 			return
 		}
 
@@ -511,7 +514,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		retryResp, err := g.forwardPassthrough(r.Context(), r, rewrittenBody)
 		if err != nil {
 			log.Error().Err(err).Msg("streaming: failed to re-send after expansion")
-			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks)
+			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, pipeCtx, originalTokens, bufferedChunks)
 			return
 		}
 		defer retryResp.Body.Close()
@@ -519,6 +522,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		// Stream the retry response (filter expand_context if present)
 		copyHeaders(w, retryResp.Header)
 		addPreemptiveHeaders(w, pipeCtx.PreemptiveHeaders)
+		addSavingsHeaders(w, pipeCtx, originalTokens)
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
@@ -541,7 +545,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			Msg("streaming: expansion complete")
 	} else {
 		// No expand_context detected - flush buffered response
-		g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks)
+		g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, pipeCtx, originalTokens, bufferedChunks)
 
 		g.recordRequestTelemetry(telemetryParams{
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
@@ -559,9 +563,10 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 }
 
 // flushBufferedResponse writes buffered chunks to the response writer.
-func (g *Gateway) flushBufferedResponse(w http.ResponseWriter, headers http.Header, preemptiveHeaders map[string]string, chunks [][]byte) {
+func (g *Gateway) flushBufferedResponse(w http.ResponseWriter, headers http.Header, preemptiveHeaders map[string]string, pipeCtx *PipelineContext, originalTokens int, chunks [][]byte) {
 	copyHeaders(w, headers)
 	addPreemptiveHeaders(w, preemptiveHeaders)
+	addSavingsHeaders(w, pipeCtx, originalTokens)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -694,6 +699,11 @@ func (g *Gateway) processCompressionPipeline(body []byte, pipeCtx *PipelineConte
 		} else {
 			g.metrics.RecordCacheMiss()
 		}
+	}
+
+	// Record tool discovery metrics
+	if pipeCtx.ToolsFiltered {
+		g.metrics.RecordToolsFiltered(pipeCtx.FilteredToolCount, pipeCtx.OriginalToolCount-pipeCtx.FilteredToolCount)
 	}
 
 	return forwardBody, pipeType, pipeStrategy, compressionUsed, compressLatency
@@ -903,6 +913,12 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 		OutputTokens:         usage.OutputTokens,
 		TotalTokens:          usage.TotalTokens,
 	})
+
+	// Record token savings and API usage to metrics collector
+	g.metrics.RecordTokenSavings(m.originalTokens, m.compressedTokens, m.tokensSaved)
+	if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+		g.metrics.RecordAPIUsage(usage.InputTokens, usage.OutputTokens)
+	}
 
 	// Record trajectory if enabled (ATIF format)
 	g.recordTrajectory(params, model, usage)
@@ -1276,5 +1292,35 @@ func addPreemptiveHeaders(w http.ResponseWriter, headers map[string]string) {
 	}
 	for k, v := range headers {
 		w.Header().Set(k, v)
+	}
+}
+
+// addSavingsHeaders adds per-request token savings headers to the response.
+func addSavingsHeaders(w http.ResponseWriter, pipeCtx *PipelineContext, originalTokens int) {
+	if pipeCtx == nil {
+		return
+	}
+
+	var totalOriginal, totalCompressed int
+	for _, tc := range pipeCtx.ToolOutputCompressions {
+		totalOriginal += tc.OriginalBytes
+		totalCompressed += tc.CompressedBytes
+	}
+
+	if saved := totalOriginal - totalCompressed; saved > 0 {
+		tokensSaved := saved / 4
+		if tokensSaved > originalTokens {
+			tokensSaved = originalTokens
+		}
+		w.Header().Set("X-Tokens-Saved", fmt.Sprintf("%d", tokensSaved))
+
+		if totalOriginal > 0 {
+			ratio := float64(totalCompressed) / float64(totalOriginal)
+			w.Header().Set("X-Compression-Ratio", fmt.Sprintf("%.2f", ratio))
+		}
+	}
+
+	if pipeCtx.ToolsFiltered {
+		w.Header().Set("X-Tools-Filtered", "true")
 	}
 }

@@ -45,6 +45,8 @@ type PipeContext struct {
 	// Flags set by pipes
 	OutputCompressed bool
 	ToolsFiltered    bool
+	ToolsSent        int // Tools kept after filtering
+	ToolsRemoved     int // Tools removed by filtering
 }
 
 // ToolOutputCompression tracks individual tool output compression.

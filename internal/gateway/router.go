@@ -185,6 +185,8 @@ func (r *Router) toPipeContext(ctx *PipelineContext) *pipes.PipeContext {
 func (r *Router) copyPipeResults(pipeCtx *pipes.PipeContext, ctx *PipelineContext) {
 	ctx.OutputCompressed = pipeCtx.OutputCompressed
 	ctx.ToolsFiltered = pipeCtx.ToolsFiltered
+	ctx.FilteredToolCount = pipeCtx.ToolsSent
+	ctx.OriginalToolCount = pipeCtx.ToolsSent + pipeCtx.ToolsRemoved
 
 	// Merge shadow refs
 	for k, v := range pipeCtx.ShadowRefs {

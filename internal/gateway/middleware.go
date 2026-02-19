@@ -226,6 +226,7 @@ func (g *Gateway) security(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Target-URL, X-Provider, X-Request-ID, x-api-key")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Tokens-Saved, X-Compression-Ratio, X-Tools-Filtered, X-Synthetic-Response, X-Request-ID")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 		}
 
