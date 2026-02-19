@@ -254,6 +254,7 @@ func New(cfg *config.Config) *Gateway {
 // setupRoutes configures the HTTP routes for the gateway.
 func (g *Gateway) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", g.handleHealth)
+	mux.HandleFunc("/stats", g.handleStats)
 	mux.HandleFunc("/expand", g.handleExpand)
 	mux.HandleFunc("/", g.handleProxy)
 }

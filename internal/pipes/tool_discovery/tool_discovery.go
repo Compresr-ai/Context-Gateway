@@ -197,6 +197,8 @@ func (p *Pipe) filterByRelevance(ctx *pipes.PipeContext) ([]byte, error) {
 	}
 
 	ctx.ToolsFiltered = true
+	ctx.ToolsSent = kept
+	ctx.ToolsRemoved = totalTools - kept
 
 	log.Info().
 		Int("total", totalTools).
