@@ -239,10 +239,10 @@ func ExtractOpenAIResponse(resp *OpenAIChatResponse) (string, error) {
 // ExtractAnthropicResponse extracts the compressed content from Anthropic response.
 func ExtractAnthropicResponse(resp *AnthropicResponse) (string, error) {
 	if resp.Error != nil {
-		return "", fmt.Errorf("Anthropic API error: %s", resp.Error.Message)
+		return "", fmt.Errorf("anthropic API error: %s", resp.Error.Message)
 	}
 	if len(resp.Content) == 0 {
-		return "", fmt.Errorf("Anthropic response has no content")
+		return "", fmt.Errorf("anthropic response has no content")
 	}
 	// Find text content
 	for _, block := range resp.Content {
@@ -250,7 +250,7 @@ func ExtractAnthropicResponse(resp *AnthropicResponse) (string, error) {
 			return strings.TrimSpace(block.Text), nil
 		}
 	}
-	return "", fmt.Errorf("Anthropic response has no text content")
+	return "", fmt.Errorf("anthropic response has no text content")
 }
 
 // =============================================================================
@@ -339,14 +339,14 @@ func BuildGeminiRequest(model, toolName, content, userQuery string, queryAgnosti
 // ExtractGeminiResponse extracts the compressed content from Gemini response.
 func ExtractGeminiResponse(resp *GeminiResponse) (string, error) {
 	if resp.Error != nil {
-		return "", fmt.Errorf("Gemini API error (%d): %s", resp.Error.Code, resp.Error.Message)
+		return "", fmt.Errorf("gemini API error (%d): %s", resp.Error.Code, resp.Error.Message)
 	}
 	if len(resp.Candidates) == 0 {
-		return "", fmt.Errorf("Gemini response has no candidates")
+		return "", fmt.Errorf("gemini response has no candidates")
 	}
 	parts := resp.Candidates[0].Content.Parts
 	if len(parts) == 0 {
-		return "", fmt.Errorf("Gemini response has no content parts")
+		return "", fmt.Errorf("gemini response has no content parts")
 	}
 	return strings.TrimSpace(parts[0].Text), nil
 }

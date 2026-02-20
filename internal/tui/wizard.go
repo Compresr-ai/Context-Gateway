@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 
 	"golang.org/x/term"
 )
@@ -59,17 +60,15 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 		return nil, fmt.Errorf("all fields skipped")
 	}
 
-	// Check if we're in a TTY
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !term.IsTerminal(syscall.Stdin) {
 		return runWizardFallback(title, activeFields)
 	}
 
-	// Save terminal state and set raw mode
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	oldState, err := term.MakeRaw(syscall.Stdin)
 	if err != nil {
 		return runWizardFallback(title, activeFields)
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	defer func() { _ = term.Restore(syscall.Stdin, oldState) }()
 
 	current := 0 // Current field index
 	editing := false
@@ -285,15 +284,14 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 					editSelected = f.ValueIndex
 					renderEditOptions(f.Options, editSelected)
 				case FieldTypeText, FieldTypePassword:
-					// Switch to text input mode
-					fmt.Print("\033[?25h") // Show cursor
-					term.Restore(int(os.Stdin.Fd()), oldState)
+					fmt.Print("\033[?25h")
+					_ = term.Restore(syscall.Stdin, oldState)
 
 					prompt := fmt.Sprintf("\n  %s: ", f.Label)
 					var val string
 					if f.Type == FieldTypePassword {
 						fmt.Print(prompt)
-						password, _ := term.ReadPassword(int(os.Stdin.Fd()))
+						password, _ := term.ReadPassword(syscall.Stdin)
 						val = strings.TrimSpace(string(password))
 						fmt.Println()
 					} else {
@@ -305,7 +303,7 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 					f.Value = val
 
 					// Re-enter raw mode
-					oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
+					oldState, _ = term.MakeRaw(syscall.Stdin)
 					fmt.Print("\033[?25l") // Hide cursor
 					if current < len(activeFields)-1 {
 						current++
@@ -374,8 +372,8 @@ func runWizardFallback(title string, fields []WizardField) (*WizardResult, error
 				result.Values[f.ID] = 0
 			}
 		case FieldTypePassword:
-			if term.IsTerminal(int(os.Stdin.Fd())) {
-				password, _ := term.ReadPassword(int(os.Stdin.Fd()))
+			if term.IsTerminal(syscall.Stdin) {
+				password, _ := term.ReadPassword(syscall.Stdin)
 				result.Values[f.ID] = strings.TrimSpace(string(password))
 				fmt.Println()
 			} else {

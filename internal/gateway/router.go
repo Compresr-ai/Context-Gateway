@@ -178,6 +178,9 @@ func (r *Router) toPipeContext(ctx *PipelineContext) *pipes.PipeContext {
 	pipeCtx.CapturedBearerToken = ctx.CapturedBearerToken
 	pipeCtx.CapturedBetaHeader = ctx.CapturedBetaHeader
 	pipeCtx.Provider = ctx.Provider
+	// Pass tool session state for hybrid tool discovery
+	pipeCtx.ToolSessionID = ctx.ToolSessionID
+	pipeCtx.ExpandedTools = ctx.ExpandedTools
 	return pipeCtx
 }
 
@@ -185,6 +188,9 @@ func (r *Router) toPipeContext(ctx *PipelineContext) *pipes.PipeContext {
 func (r *Router) copyPipeResults(pipeCtx *pipes.PipeContext, ctx *PipelineContext) {
 	ctx.OutputCompressed = pipeCtx.OutputCompressed
 	ctx.ToolsFiltered = pipeCtx.ToolsFiltered
+
+	// Copy deferred tools from pipe for session storage
+	ctx.DeferredTools = pipeCtx.DeferredTools
 
 	// Merge shadow refs
 	for k, v := range pipeCtx.ShadowRefs {

@@ -184,8 +184,8 @@ func (cfg *Config) ResolvePreemptiveProvider() PreemptiveConfig {
 	if resolved.Summarizer.Model == "" {
 		resolved.Summarizer.Model = provider.Model
 	}
-	if resolved.Summarizer.APIKey == "" {
-		resolved.Summarizer.APIKey = provider.APIKey
+	if resolved.Summarizer.APISecret == "" {
+		resolved.Summarizer.APISecret = provider.APIKey
 	}
 	if resolved.Summarizer.Endpoint == "" {
 		resolved.Summarizer.Endpoint = provider.GetEndpoint(resolved.Summarizer.Provider)

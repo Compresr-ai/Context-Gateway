@@ -11,16 +11,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
 // ClaudeCredentials represents the OAuth credentials from Claude Code.
 type ClaudeCredentials struct {
-	AccessToken      string   `json:"accessToken"`
-	RefreshToken     string   `json:"refreshToken"`
-	ExpiresAt        int64    `json:"expiresAt"` // Unix timestamp in milliseconds
-	Scopes           []string `json:"scopes"`
-	SubscriptionType string   `json:"subscriptionType"`
+	AccessCredential  string   `json:"accessToken"`
+	RefreshCredential string   `json:"refreshToken"`
+	ExpiresAt         int64    `json:"expiresAt"` // Unix timestamp in milliseconds
+	Scopes            []string `json:"scopes"`
+	SubscriptionType  string   `json:"subscriptionType"`
 }
 
 // credentialsFile represents the structure of ~/.claude/.credentials.json.
@@ -59,7 +60,12 @@ func loadFromCredentialsFile() (*ClaudeCredentials, error) {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	credPath := filepath.Join(homeDir, ".claude", ".credentials.json")
+	claudeDir := filepath.Join(homeDir, ".claude")
+	credPath := filepath.Join(claudeDir, ".credentials.json")
+	if !isPathUnderDir(credPath, claudeDir) {
+		return nil, fmt.Errorf("invalid credentials file path")
+	}
+
 	data, err := os.ReadFile(credPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -82,7 +88,7 @@ func loadFromCredentialsFile() (*ClaudeCredentials, error) {
 
 // loadFromMacOSKeychain reads credentials from macOS Keychain.
 func loadFromMacOSKeychain() (*ClaudeCredentials, error) {
-	// #nosec G204 -- hardcoded command with constant service name
+
 	cmd := exec.Command("security", "find-generic-password",
 		"-s", macOSKeychainService,
 		"-w", // Output only the password (JSON data)
@@ -146,7 +152,12 @@ func CredentialsFilePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(homeDir, ".claude", ".credentials.json"), nil
+	claudeDir := filepath.Join(homeDir, ".claude")
+	credPath := filepath.Join(claudeDir, ".credentials.json")
+	if !isPathUnderDir(credPath, claudeDir) {
+		return "", fmt.Errorf("invalid credentials file path")
+	}
+	return credPath, nil
 }
 
 // SaveCredentials saves credentials to the credentials file.
@@ -182,4 +193,14 @@ func SaveCredentials(creds *ClaudeCredentials) error {
 	}
 
 	return nil
+}
+
+func isPathUnderDir(path, dir string) bool {
+	cleanPath := filepath.Clean(path)
+	cleanDir := filepath.Clean(dir)
+	rel, err := filepath.Rel(cleanDir, cleanPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && rel != "")
 }

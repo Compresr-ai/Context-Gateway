@@ -19,7 +19,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/gateway"
+	"github.com/compresr/context-gateway/internal/monitoring"
 )
 
 // =============================================================================
@@ -105,6 +109,202 @@ func TestGateway_Passthrough_ForwardsRequestUnchanged(t *testing.T) {
 	assert.Equal(t, "claude-3-sonnet", upstreamReq["model"])
 	assert.Equal(t, float64(100), upstreamReq["max_tokens"])
 	assert.NotEmpty(t, receivedHeaders.Get("X-Api-Key"))
+}
+
+func TestGateway_SubscriptionFallback_RetriesWithAPIKey(t *testing.T) {
+	var callCount int32
+	authByCall := make(map[int]string)
+	xAPIByCall := make(map[int]string)
+
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := int(atomic.AddInt32(&callCount, 1))
+		authByCall[call] = r.Header.Get("Authorization")
+		xAPIByCall[call] = r.Header.Get("x-api-key")
+
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"subscription rate limit exceeded"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_retry_ok","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer mockLLM.Close()
+
+	cfg := passthroughConfig()
+	cfg.Providers = config.ProvidersConfig{
+		"anthropic": {
+			APIKey: "sk-ant-api03-fallback-key",
+			Model:  "claude-3-5-sonnet-latest",
+		},
+	}
+
+	gw := gateway.New(cfg)
+	gwServer := httptest.NewServer(gw.Handler())
+	defer gwServer.Close()
+
+	requestBody := `{
+		"model":"claude-3-5-sonnet-latest",
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"hello"}]
+	}`
+	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-subscription-token")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("X-Target-URL", mockLLM.URL+"/v1/messages")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount), "should retry once with api key")
+	assert.NotEmpty(t, authByCall[1], "first call should use subscription bearer token")
+	assert.Empty(t, xAPIByCall[1], "first call should not use x-api-key")
+	assert.Empty(t, authByCall[2], "retry should drop Authorization header")
+	assert.Equal(t, "sk-ant-api03-fallback-key", xAPIByCall[2], "retry should use configured fallback api key")
+}
+
+func TestGateway_SubscriptionFallback_StickyPerSession(t *testing.T) {
+	var callCount int32
+	authByCall := make(map[int]string)
+	xAPIByCall := make(map[int]string)
+
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := int(atomic.AddInt32(&callCount, 1))
+		authByCall[call] = r.Header.Get("Authorization")
+		xAPIByCall[call] = r.Header.Get("x-api-key")
+
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"subscription quota exceeded"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer mockLLM.Close()
+
+	cfg := passthroughConfig()
+	cfg.Providers = config.ProvidersConfig{
+		"anthropic": {
+			APIKey: "sk-ant-api03-fallback-key",
+			Model:  "claude-3-5-sonnet-latest",
+		},
+	}
+
+	gw := gateway.New(cfg)
+	gwServer := httptest.NewServer(gw.Handler())
+	defer gwServer.Close()
+
+	requestBody := `{
+		"model":"claude-3-5-sonnet-latest",
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"same session message"}]
+	}`
+
+	send := func() *http.Response {
+		req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", strings.NewReader(requestBody))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer sk-ant-oat01-subscription-token")
+		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("X-Target-URL", mockLLM.URL+"/v1/messages")
+		resp, doErr := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		require.NoError(t, doErr)
+		return resp
+	}
+
+	resp1 := send()
+	assert.Equal(t, http.StatusOK, resp1.StatusCode)
+	resp1.Body.Close()
+
+	resp2 := send()
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	resp2.Body.Close()
+
+	assert.Equal(t, int32(3), atomic.LoadInt32(&callCount), "first request should retry; second should directly use api key")
+	assert.NotEmpty(t, authByCall[1])
+	assert.Empty(t, xAPIByCall[1])
+	assert.Empty(t, authByCall[2])
+	assert.Equal(t, "sk-ant-api03-fallback-key", xAPIByCall[2])
+	assert.Empty(t, authByCall[3], "session should remain in api key mode")
+	assert.Equal(t, "sk-ant-api03-fallback-key", xAPIByCall[3])
+}
+
+func TestGateway_AuthFallback_TelemetryAndInitLogs(t *testing.T) {
+	var callCount int32
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"subscription quota exceeded"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer mockLLM.Close()
+
+	tempDir := t.TempDir()
+	telemetryPath := filepath.Join(tempDir, "telemetry.jsonl")
+
+	cfg := passthroughConfig()
+	cfg.Monitoring.TelemetryEnabled = true
+	cfg.Monitoring.TelemetryPath = telemetryPath
+	cfg.Providers = config.ProvidersConfig{
+		"anthropic": {
+			APIKey: "sk-ant-api03-fallback-key",
+			Model:  "claude-3-5-sonnet-latest",
+		},
+	}
+	cfg.AgentFlags = config.NewAgentFlags("claude_code", []string{"--dangerously-skip-permissions"})
+
+	gw := gateway.New(cfg)
+	gwServer := httptest.NewServer(gw.Handler())
+	defer gwServer.Close()
+
+	requestBody := `{
+		"model":"claude-3-5-sonnet-latest",
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"telemetry auth test"}]
+	}`
+	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-subscription-token")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("X-Target-URL", mockLLM.URL+"/v1/messages")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	telemetryBytes, err := os.ReadFile(telemetryPath)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(telemetryBytes)), "\n")
+	require.NotEmpty(t, lines)
+
+	var reqEvent monitoring.RequestEvent
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &reqEvent))
+	assert.Equal(t, "subscription", reqEvent.AuthModeInitial)
+	assert.Equal(t, "api_key", reqEvent.AuthModeEffective)
+	assert.True(t, reqEvent.AuthFallbackUsed)
+
+	initPath := filepath.Join(tempDir, "init.jsonl")
+	initBytes, err := os.ReadFile(initPath)
+	require.NoError(t, err)
+	initLines := strings.Split(strings.TrimSpace(string(initBytes)), "\n")
+	require.NotEmpty(t, initLines)
+
+	var initEvent monitoring.InitEvent
+	require.NoError(t, json.Unmarshal([]byte(initLines[len(initLines)-1]), &initEvent))
+	assert.Equal(t, "gateway_init", initEvent.Event)
+	assert.Equal(t, "claude_code", initEvent.AgentName)
+	assert.True(t, initEvent.AutoApproveMode)
 }
 
 // =============================================================================

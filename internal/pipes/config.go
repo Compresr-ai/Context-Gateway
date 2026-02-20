@@ -185,6 +185,11 @@ type ToolDiscoveryConfig struct {
 	MaxTools    int      `yaml:"max_tools"`    // Keep at most this many tools (default: 25)
 	TargetRatio float64  `yaml:"target_ratio"` // Keep this ratio of tools (e.g., 0.8 = 80%)
 	AlwaysKeep  []string `yaml:"always_keep"`  // Tool names to never filter out
+
+	// Hybrid search fallback (allows LLM to request filtered-out tools)
+	EnableSearchFallback bool   `yaml:"enable_search_fallback"` // Inject gateway_search_tools (default: true when filtering)
+	SearchToolName       string `yaml:"search_tool_name"`       // Name of the search tool (default: "gateway_search_tools")
+	MaxSearchResults     int    `yaml:"max_search_results"`     // Max tools returned by search (default: 5)
 }
 
 // Validate validates tool discovery pipe config.
@@ -216,7 +221,7 @@ func (d *ToolDiscoveryConfig) Validate() error {
 // Not used in current release - tool output compression is disabled.
 type APIConfig struct {
 	Endpoint      string        `yaml:"endpoint"`       // API endpoint URL
-	APIKey        string        `yaml:"api_key"`        // API authentication key
+	APISecret     string        `yaml:"api_key"`        // API authentication key
 	Model         string        `yaml:"model"`          // Compression model to use
 	Timeout       time.Duration `yaml:"timeout"`        // Request timeout
 	QueryAgnostic bool          `yaml:"query_agnostic"` // If true, compression is context-agnostic

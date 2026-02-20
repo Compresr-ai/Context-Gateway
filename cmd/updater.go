@@ -71,12 +71,11 @@ func getLatestVersion() (string, error) {
 	repo := getRepo()
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 
-	// #nosec G107 - URL is constructed from trusted repo constant
-	resp, err := http.Get(url)
+	resp, err := http.Get(url) // #nosec G107 -- URL is constructed from trusted constants
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
@@ -157,12 +156,12 @@ func DoUpdate() error {
 	fmt.Printf("  Downloading from: %s\n", downloadURL)
 
 	// Download new binary
-	// #nosec G107 - URL is from trusted GitHub releases API
-	resp, err := http.Get(downloadURL)
+
+	resp, err := http.Get(downloadURL) // #nosec G107 -- URL is constructed from trusted constants
 	if err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
@@ -170,32 +169,32 @@ func DoUpdate() error {
 
 	// Write to temp file
 	tmpFile := execPath + ".new"
-	// #nosec G304 -- execPath is from os.Executable(), tmpFile is derived locally
+
 	out, err := os.Create(tmpFile)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 
 	_, err = io.Copy(out, resp.Body)
-	_ = out.Close() // #nosec G104 -- best-effort close
+	_ = out.Close()
 	if err != nil {
-		_ = os.Remove(tmpFile) // #nosec G104 -- cleanup on error
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("failed to write binary: %w", err)
 	}
 
 	// Make executable
-	// #nosec G302 - Binary executables require 0755 permissions to be executable
+
 	if err := os.Chmod(tmpFile, 0755); err != nil {
-		_ = os.Remove(tmpFile) // #nosec G104 -- cleanup on error
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("failed to chmod: %w", err)
 	}
 
 	// Replace old binary
 	oldFile := execPath + ".old"
-	_ = os.Remove(oldFile) // #nosec G104 -- best-effort cleanup
+	_ = os.Remove(oldFile)
 
 	if err := os.Rename(execPath, oldFile); err != nil {
-		_ = os.Remove(tmpFile) // #nosec G104 -- cleanup on error
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("failed to backup old binary: %w", err)
 	}
 
@@ -208,7 +207,7 @@ func DoUpdate() error {
 	}
 
 	// Remove old binary
-	_ = os.Remove(oldFile) // #nosec G104 -- best-effort cleanup
+	_ = os.Remove(oldFile)
 
 	// Print success
 	fmt.Printf("\n")
@@ -260,12 +259,12 @@ func DoUninstall() error {
 	// Remove symlink
 	compresr := filepath.Join(installDir, "compresr")
 	if _, err := os.Lstat(compresr); err == nil {
-		_ = os.Remove(compresr) // #nosec G104 -- best-effort cleanup
+		_ = os.Remove(compresr)
 		fmt.Printf("%s[✓]%s Removed %s\n", colorGreen, colorReset, compresr)
 	}
 
 	// Remove version file
-	_ = os.Remove(getVersionFile()) // #nosec G104 -- best-effort cleanup
+	_ = os.Remove(getVersionFile())
 
 	// Remove binary (self-delete)
 	// On Unix, we can delete ourselves while running

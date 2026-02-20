@@ -79,9 +79,12 @@ store:
 # =============================================================================
 
 monitoring:
-  log_level: "info"
+  # Off by default. Set to "info" or "debug" to enable logs.
+  log_level: "off"
   log_format: "console"
   log_output: "stdout"
-  telemetry_enabled: true
+  # Telemetry is opt-in. Set to true to enable JSONL telemetry logs.
+  telemetry_enabled: false
   telemetry_path: "${SESSION_TELEMETRY_LOG:-logs/telemetry.jsonl}"
   compression_log_path: "${SESSION_COMPRESSION_LOG:-logs/compression.jsonl}"
+  tool_discovery_log_path: "${SESSION_TOOL_DISCOVERY_LOG:-logs/tool_discovery.jsonl}"

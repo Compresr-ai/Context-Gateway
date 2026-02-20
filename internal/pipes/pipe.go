@@ -45,6 +45,11 @@ type PipeContext struct {
 	// Flags set by pipes
 	OutputCompressed bool
 	ToolsFiltered    bool
+
+	// Tool discovery session state (for hybrid search fallback)
+	ToolSessionID string                      // Session ID for tool filtering
+	ExpandedTools map[string]bool             // Tools previously found via search (force-keep)
+	DeferredTools []adapters.ExtractedContent // Tools filtered out (stored for search)
 }
 
 // ToolOutputCompression tracks individual tool output compression.

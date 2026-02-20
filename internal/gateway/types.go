@@ -54,9 +54,17 @@ type PipelineContext struct {
 	CapturedBearerToken string
 	CapturedBetaHeader  string
 
+	// Cost control
+	CostSessionID string // Session ID for cost tracking
+
 	// Preemptive summarization
 	PreemptiveHeaders map[string]string // Headers to add to response
 	IsCompaction      bool              // Whether this is a compaction request
+
+	// Hybrid tool discovery
+	ToolSessionID string                      // Session ID for tool filtering
+	ExpandedTools map[string]bool             // Tools found via search (force-keep on subsequent requests)
+	DeferredTools []adapters.ExtractedContent // Tools filtered out (available for search)
 
 	// Metrics
 	OriginalTokenCount   int

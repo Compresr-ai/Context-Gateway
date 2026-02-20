@@ -47,8 +47,8 @@ type CallLLMParams struct {
 	Provider string
 
 	Endpoint     string
-	APIKey       string // API key (x-api-key for Anthropic, x-goog-api-key for Gemini)
-	BearerToken  string // OAuth token (Authorization: Bearer). Takes precedence over APIKey for Anthropic.
+	APISecret    string // API key (x-api-key for Anthropic, x-goog-api-key for Gemini)
+	BearerAuth   string // OAuth token (Authorization: Bearer). Takes precedence over APISecret for Anthropic.
 	Model        string
 	SystemPrompt string
 	UserPrompt   string
@@ -71,7 +71,7 @@ func (p *CallLLMParams) validate() error {
 	}
 	// Bedrock uses SigV4 signing via HTTPClient transport, not an API key.
 	// OAuth uses BearerToken instead of APIKey.
-	if p.APIKey == "" && p.BearerToken == "" && p.Provider != "bedrock" {
+	if p.APISecret == "" && p.BearerAuth == "" && p.Provider != "bedrock" {
 		return fmt.Errorf("api key or bearer token required")
 	}
 	if p.Model == "" {
@@ -124,7 +124,7 @@ func CallLLM(ctx context.Context, params CallLLMParams) (*CallLLMResult, error) 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	setAuthHeaders(req, provider, params.APIKey, params.BearerToken)
+	setAuthHeaders(req, provider, params.APISecret, params.BearerAuth)
 	for k, v := range params.ExtraHeaders {
 		req.Header.Set(k, v)
 	}
@@ -138,7 +138,7 @@ func CallLLM(ctx context.Context, params CallLLMParams) (*CallLLMResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("%s request failed: %w", provider, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {

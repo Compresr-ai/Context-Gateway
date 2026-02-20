@@ -85,7 +85,7 @@ parseLoop:
 			break parseLoop
 		default:
 			if strings.HasPrefix(args[i], "-") {
-				fmt.Fprintf(os.Stderr, "Error: unknown option: %s\n", args[i])
+				fmt.Fprintf(os.Stderr, "Error: unknown option: %s\n", args[i]) //nolint:errcheck // CLI stderr output
 				os.Exit(1)
 			}
 			agentArg = args[i]
@@ -107,7 +107,7 @@ parseLoop:
 		var err error
 		gatewayPort, err = strconv.Atoi(portFlag)
 		if err != nil || gatewayPort <= 0 || gatewayPort > 65535 {
-			fmt.Fprintf(os.Stderr, "Error: invalid port '%s'\n", portFlag)
+			fmt.Fprintf(os.Stderr, "Error: invalid port '%s'\n", portFlag) //nolint:errcheck // CLI stderr output
 			os.Exit(1)
 		}
 	} else {
@@ -122,7 +122,7 @@ parseLoop:
 	}
 
 	// Set GATEWAY_PORT env for variable expansion in configs/agents
-	os.Setenv("GATEWAY_PORT", strconv.Itoa(gatewayPort))
+	_ = os.Setenv("GATEWAY_PORT", strconv.Itoa(gatewayPort))
 
 	printBanner()
 
@@ -335,7 +335,7 @@ mainSelectionLoop:
 		// gatewayPort was already found early (before agent config loading)
 		// Verify it's still available (unlikely to change but be safe)
 		if isPortInUse(gatewayPort) {
-			fmt.Fprintf(os.Stderr, "Error: port %d is no longer available\n", gatewayPort)
+			fmt.Fprintf(os.Stderr, "Error: port %d is no longer available\n", gatewayPort) //nolint:errcheck // CLI stderr output
 			os.Exit(1)
 		}
 
@@ -347,20 +347,28 @@ mainSelectionLoop:
 		sessionDir = createSessionDir(logsBase)
 
 		// Export session log paths for this agent
-		os.Setenv("SESSION_DIR", sessionDir)
-		os.Setenv("SESSION_TELEMETRY_LOG", filepath.Join(sessionDir, "telemetry.jsonl"))
-		os.Setenv("SESSION_COMPRESSION_LOG", filepath.Join(sessionDir, "compression.jsonl"))
-		os.Setenv("SESSION_COMPACTION_LOG", filepath.Join(sessionDir, "compaction.jsonl"))
-		os.Setenv("SESSION_TRAJECTORY_LOG", filepath.Join(sessionDir, "trajectory.json"))
-		os.Setenv("SESSION_GATEWAY_LOG", filepath.Join(sessionDir, "gateway.log"))
+		_ = os.Setenv("SESSION_DIR", sessionDir)
+		sessionTelemetryLog := filepath.Join(sessionDir, "telemetry.jsonl")
+		sessionCompressionLog := filepath.Join(sessionDir, "compression.jsonl")
+		sessionToolDiscoveryLog := filepath.Join(sessionDir, "tool_discovery.jsonl")
+		sessionCompactionLog := filepath.Join(sessionDir, "compaction.jsonl")
+		sessionTrajectoryLog := filepath.Join(sessionDir, "trajectory.json")
+		sessionGatewayLog := filepath.Join(sessionDir, "gateway.log")
+		_ = os.Setenv("SESSION_TELEMETRY_LOG", sessionTelemetryLog)
+		_ = os.Setenv("SESSION_COMPRESSION_LOG", sessionCompressionLog)
+		_ = os.Setenv("SESSION_TOOL_DISCOVERY_LOG", sessionToolDiscoveryLog)
+		_ = os.Setenv("SESSION_COMPACTION_LOG", sessionCompactionLog)
+		_ = os.Setenv("SESSION_TRAJECTORY_LOG", sessionTrajectoryLog)
+		_ = os.Setenv("SESSION_GATEWAY_LOG", sessionGatewayLog)
 
 		printSuccess("Agent Session: " + filepath.Base(sessionDir))
 		printInfo(fmt.Sprintf("Gateway port: %d", gatewayPort))
+		printInfo(fmt.Sprintf("Cost dashboard: http://localhost:%d/costs", gatewayPort))
 
 		// Save a copy of the config used for this session (do this regardless of gateway reuse)
 		if sessionDir != "" && len(configData) > 0 {
 			configCopy := filepath.Join(sessionDir, "config.yaml")
-			if err := os.WriteFile(configCopy, configData, 0600); err == nil {
+			if err := os.WriteFile(configCopy, configData, 0600); err == nil { // #nosec G306 -- config file permissions
 				printInfo("Config saved to: " + filepath.Base(sessionDir) + "/config.yaml")
 			}
 		}
@@ -372,11 +380,11 @@ mainSelectionLoop:
 		// This prevents any zerolog output from polluting the agent's terminal.
 		var gatewayLogFile *os.File
 		gatewayLogOutput := os.DevNull
-		if gwLogPath := os.Getenv("SESSION_GATEWAY_LOG"); gwLogPath != "" {
-			if f, err := os.OpenFile(gwLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+		if sessionGatewayLog != "" {
+			if f, err := os.OpenFile(sessionGatewayLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
 				gatewayLogFile = f
-				gatewayLogOutput = gwLogPath
-				defer f.Close()
+				gatewayLogOutput = sessionGatewayLog
+				defer func() { _ = f.Close() }()
 			}
 		}
 		// If we can't open a log file, discard all gateway logs
@@ -384,7 +392,7 @@ mainSelectionLoop:
 			devNull, err := os.Open(os.DevNull)
 			if err == nil {
 				gatewayLogFile = devNull
-				defer devNull.Close()
+				defer func() { _ = devNull.Close() }()
 			}
 		}
 		setupLogging(debugFlag, gatewayLogFile)
@@ -397,9 +405,13 @@ mainSelectionLoop:
 
 		cfg, err := config.LoadFromBytes(configData)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading config '%s': %v\n", configSource, err)
+			fmt.Fprintf(os.Stderr, "Error loading config '%s': %v\n", configSource, err) //nolint:errcheck // CLI stderr output
 			os.Exit(1)
 		}
+
+		// Propagate agent flags to gateway config
+		// This allows the proxy to know about flags like --dangerously-skip-permissions
+		cfg.AgentFlags = config.NewAgentFlags(ac.Agent.Name, passthroughArgs)
 
 		// Override port with the dynamically allocated port for this terminal
 		cfg.Server.Port = gatewayPort
@@ -499,18 +511,10 @@ mainSelectionLoop:
 		}
 	}
 
-	// Build agent command (all args shell-quoted for bash -c safety)
-	agentCmd := ac.Agent.Command.Run
-	for _, arg := range ac.Agent.Command.Args {
-		agentCmd += " " + shellQuote(arg)
-	}
-	for _, arg := range passthroughArgs {
-		agentCmd += " " + shellQuote(arg)
-	}
-
 	// Launch agent as child process
-	// #nosec G204 -- agentCmd comes from validated agent YAML config
-	cmd := exec.Command("bash", "-c", agentCmd)
+	agentArgs := append([]string{}, ac.Agent.Command.Args...)
+	agentArgs = append(agentArgs, passthroughArgs...)
+	cmd := exec.Command(ac.Agent.Command.Run, agentArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -558,15 +562,23 @@ mainSelectionLoop:
 // =============================================================================
 
 // ConfigState holds the current config being edited
+// #nosec G101 -- APIKey field holds config template, not actual secret
 type ConfigState struct {
-	Name             string
-	Provider         tui.ProviderInfo
-	Model            string
-	APIKey           string
-	UseSubscription  bool
-	SlackEnabled     bool
-	SlackConfigured  bool    // True if Slack credentials exist
-	TriggerThreshold float64 // Context usage % to trigger summarization (1-99)
+	Name                        string
+	Provider                    tui.ProviderInfo
+	Model                       string
+	APIKey                      string //nolint:gosec // config template placeholder, not a secret
+	UseSubscription             bool
+	SlackEnabled                bool
+	SlackConfigured             bool    // True if Slack credentials exist
+	TriggerThreshold            float64 // Context usage % to trigger summarization (1-99)
+	CostCap                     float64 // USD aggregate spend cap. 0 = unlimited (disabled).
+	ToolDiscoveryEnabled        bool
+	ToolDiscoveryStrategy       string
+	ToolDiscoveryMinTools       int
+	ToolDiscoveryMaxTools       int
+	ToolDiscoveryTargetRatio    float64
+	ToolDiscoverySearchFallback bool
 }
 
 // runConfigCreationWizard runs the config creation with summary editor.
@@ -580,6 +592,12 @@ func runConfigCreationWizard(agentName string, ac *AgentConfig) string {
 	state.UseSubscription = true
 	state.APIKey = "${ANTHROPIC_API_KEY:-}"
 	state.TriggerThreshold = 85.0 // Trigger at 85% context usage
+	state.ToolDiscoveryEnabled = false
+	state.ToolDiscoveryStrategy = "relevance"
+	state.ToolDiscoveryMinTools = 5
+	state.ToolDiscoveryMaxTools = 25
+	state.ToolDiscoveryTargetRatio = 0.8
+	state.ToolDiscoverySearchFallback = true
 
 	// Check if Slack is already configured
 	state.SlackConfigured = os.Getenv("SLACK_BOT_TOKEN") != "" && os.Getenv("SLACK_CHANNEL_ID") != "" && isSlackHookInstalled()
@@ -604,9 +622,16 @@ func runConfigEditor(state *ConfigState, agentName string) string {
 		summarizerDesc := fmt.Sprintf("%s / %s / %s", state.Provider.DisplayName, state.Model, authType)
 		triggerDesc := fmt.Sprintf("%.0f", state.TriggerThreshold)
 
+		costCapDesc := "unlimited"
+		if state.CostCap > 0 {
+			costCapDesc = fmt.Sprintf("$%.2f", state.CostCap)
+		}
+
 		items := []tui.MenuItem{
 			{Label: "Summarizer", Description: summarizerDesc, Value: "edit_summarizer"},
 			{Label: "Trigger %", Description: triggerDesc, Value: "edit_trigger", Editable: true},
+			{Label: "Tool Discovery", Description: toolDiscoverySummary(state), Value: "edit_tool_discovery"},
+			{Label: "Cost Cap $", Description: costCapDesc, Value: "edit_cost_cap", Editable: true},
 		}
 
 		// Slack toggle (only for claude_code)
@@ -671,6 +696,18 @@ func runConfigEditor(state *ConfigState, agentName string) string {
 					}
 				}
 			}
+			if item.Value == "edit_cost_cap" && item.Editable {
+				desc := strings.TrimSpace(item.Description)
+				if desc == "" || desc == "unlimited" || desc == "0" {
+					state.CostCap = 0
+				} else {
+					// Strip leading $ if present
+					desc = strings.TrimPrefix(desc, "$")
+					if v, err := strconv.ParseFloat(desc, 64); err == nil && v >= 0 {
+						state.CostCap = v
+					}
+				}
+			}
 		}
 
 		switch items[idx].Value {
@@ -680,6 +717,9 @@ func runConfigEditor(state *ConfigState, agentName string) string {
 
 		case "edit_summarizer":
 			editSummarizer(state, agentName)
+
+		case "edit_tool_discovery":
+			editToolDiscovery(state)
 
 		case "toggle_slack":
 			if !state.SlackEnabled {
@@ -715,6 +755,126 @@ func runConfigEditor(state *ConfigState, agentName string) string {
 			return "__back__"
 		}
 	}
+}
+
+func toolDiscoverySummary(state *ConfigState) string {
+	if !state.ToolDiscoveryEnabled {
+		return "○ Disabled"
+	}
+	return fmt.Sprintf("● %s (min=%d max=%d ratio=%.2f)", state.ToolDiscoveryStrategy, state.ToolDiscoveryMinTools, state.ToolDiscoveryMaxTools, state.ToolDiscoveryTargetRatio)
+}
+
+// editToolDiscovery opens tool discovery settings submenu.
+func editToolDiscovery(state *ConfigState) {
+	for {
+		enabledDesc := "○ Disabled"
+		if state.ToolDiscoveryEnabled {
+			enabledDesc = "● Enabled"
+		}
+
+		items := []tui.MenuItem{
+			{Label: "Enabled", Description: enabledDesc, Value: "toggle_enabled"},
+		}
+
+		if state.ToolDiscoveryEnabled {
+			searchFallbackDesc := "○ Disabled"
+			if state.ToolDiscoverySearchFallback {
+				searchFallbackDesc = "● Enabled"
+			}
+
+			items = append(items,
+				tui.MenuItem{Label: "Strategy", Description: state.ToolDiscoveryStrategy, Value: "strategy"},
+				tui.MenuItem{Label: "Min Tools", Description: strconv.Itoa(state.ToolDiscoveryMinTools), Value: "min_tools", Editable: true},
+				tui.MenuItem{Label: "Max Tools", Description: strconv.Itoa(state.ToolDiscoveryMaxTools), Value: "max_tools", Editable: true},
+				tui.MenuItem{Label: "Target Ratio", Description: fmt.Sprintf("%.2f", state.ToolDiscoveryTargetRatio), Value: "target_ratio", Editable: true},
+				tui.MenuItem{Label: "Search Fallback", Description: searchFallbackDesc, Value: "toggle_search_fallback"},
+			)
+		}
+
+		items = append(items, tui.MenuItem{Label: "← Back", Value: "back"})
+
+		idx, err := tui.SelectMenu("Tool Discovery Settings", items)
+		if err != nil || items[idx].Value == "back" {
+			return
+		}
+
+		minToolsInvalid := false
+		maxToolsInvalid := false
+		targetRatioInvalid := false
+		for _, item := range items {
+			switch item.Value {
+			case "min_tools":
+				expected := strconv.Itoa(state.ToolDiscoveryMinTools)
+				if item.Editable && item.Description != expected {
+					if v, parseErr := strconv.Atoi(strings.TrimSpace(item.Description)); parseErr == nil && v >= 1 {
+						state.ToolDiscoveryMinTools = v
+					} else {
+						minToolsInvalid = true
+					}
+				}
+			case "max_tools":
+				expected := strconv.Itoa(state.ToolDiscoveryMaxTools)
+				if item.Editable && item.Description != expected {
+					if v, parseErr := strconv.Atoi(strings.TrimSpace(item.Description)); parseErr == nil && v >= 1 {
+						state.ToolDiscoveryMaxTools = v
+					} else {
+						maxToolsInvalid = true
+					}
+				}
+			case "target_ratio":
+				expected := fmt.Sprintf("%.2f", state.ToolDiscoveryTargetRatio)
+				if item.Editable && item.Description != expected {
+					if v, parseErr := strconv.ParseFloat(strings.TrimSpace(item.Description), 64); parseErr == nil && v > 0 && v <= 1 {
+						state.ToolDiscoveryTargetRatio = v
+					} else {
+						targetRatioInvalid = true
+					}
+				}
+			}
+		}
+
+		if minToolsInvalid {
+			fmt.Printf("%s⚠%s Min Tools must be a whole number >= 1.\n", tui.ColorYellow, tui.ColorReset)
+			continue
+		}
+		if maxToolsInvalid {
+			fmt.Printf("%s⚠%s Max Tools must be a whole number >= 1.\n", tui.ColorYellow, tui.ColorReset)
+			continue
+		}
+		if targetRatioInvalid {
+			fmt.Printf("%s⚠%s Target Ratio must be a number between 0 and 1.\n", tui.ColorYellow, tui.ColorReset)
+			continue
+		}
+		if state.ToolDiscoveryMaxTools < state.ToolDiscoveryMinTools {
+			fmt.Printf("%s⚠%s Max Tools must be >= Min Tools.\n", tui.ColorYellow, tui.ColorReset)
+			continue
+		}
+
+		switch items[idx].Value {
+		case "toggle_enabled":
+			state.ToolDiscoveryEnabled = !state.ToolDiscoveryEnabled
+		case "strategy":
+			selectToolDiscoveryStrategy(state)
+		case "toggle_search_fallback":
+			state.ToolDiscoverySearchFallback = !state.ToolDiscoverySearchFallback
+		}
+	}
+}
+
+func selectToolDiscoveryStrategy(state *ConfigState) {
+	items := []tui.MenuItem{
+		{Label: "api", Description: "gateway search + API selector", Value: "api"},
+		{Label: "relevance", Description: "local filtering", Value: "relevance"},
+		{Label: "passthrough", Description: "no filtering", Value: "passthrough"},
+		{Label: "← Back", Value: "back"},
+	}
+
+	idx, err := tui.SelectMenu("Tool Discovery Strategy", items)
+	if err != nil || items[idx].Value == "back" {
+		return
+	}
+
+	state.ToolDiscoveryStrategy = items[idx].Value
 }
 
 // editTriggerThreshold prompts user for trigger threshold (1-99%)
@@ -869,7 +1029,7 @@ func promptAndSetAPIKey(state *ConfigState) {
 		fmt.Printf("%s⚠%s Key format looks unusual\n", tui.ColorYellow, tui.ColorReset)
 	}
 
-	os.Setenv(state.Provider.EnvVar, enteredKey)
+	_ = os.Setenv(state.Provider.EnvVar, enteredKey)
 
 	items := []tui.MenuItem{
 		{Label: "Yes, save permanently", Value: "yes"},
@@ -885,29 +1045,69 @@ func promptAndSetAPIKey(state *ConfigState) {
 
 // saveConfig saves the config to disk and returns its name
 func saveConfig(state *ConfigState) string {
-	configContent := generateCustomConfigYAML(state.Name, state.Provider.Name, state.Model, state.APIKey, state.SlackEnabled, state.TriggerThreshold)
+	configContent := generateCustomConfigYAML(
+		state.Name,
+		state.Provider.Name,
+		state.Model,
+		state.APIKey,
+		state.SlackEnabled,
+		state.TriggerThreshold,
+		state.CostCap,
+		state.ToolDiscoveryEnabled,
+		state.ToolDiscoveryStrategy,
+		state.ToolDiscoveryMinTools,
+		state.ToolDiscoveryMaxTools,
+		state.ToolDiscoveryTargetRatio,
+		state.ToolDiscoverySearchFallback,
+	)
 
-	configDir := filepath.Join(os.Getenv("HOME"), ".config", "context-gateway", "configs")
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		printError("Failed to resolve user home directory")
+		return ""
+	}
+	configDir := filepath.Join(homeDir, ".config", "context-gateway", "configs")
+	// #nosec G301 -- config directory permissions
 	if err := os.MkdirAll(configDir, 0750); err != nil {
 		printError(fmt.Sprintf("Failed to create config directory: %v", err))
 		return ""
 	}
 
 	configPath := filepath.Join(configDir, state.Name+".yaml")
+	// #nosec G306 -- config file permissions
 	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		printError(fmt.Sprintf("Failed to write config: %v", err))
 		return ""
 	}
 
 	fmt.Printf("\n%s✓%s Config saved: %s\n", tui.ColorGreen, tui.ColorReset, configPath)
+	if state.CostCap > 0 {
+		fmt.Printf("  %sCost dashboard will be available at http://localhost:<port>/costs%s\n", tui.ColorCyan, tui.ColorReset)
+	}
 	return state.Name
 }
 
 // generateCustomConfigYAML generates a gateway config YAML.
-func generateCustomConfigYAML(name, provider, model, apiKey string, enableSlack bool, triggerThreshold float64) string {
+func generateCustomConfigYAML(
+	name, provider, model, apiKey string,
+	enableSlack bool,
+	triggerThreshold float64,
+	costCap float64,
+	toolDiscoveryEnabled bool,
+	toolDiscoveryStrategy string,
+	toolDiscoveryMinTools int,
+	toolDiscoveryMaxTools int,
+	toolDiscoveryTargetRatio float64,
+	toolDiscoverySearchFallback bool,
+) string {
 	slackEnabled := "false"
 	if enableSlack {
 		slackEnabled = "true"
+	}
+
+	costCapEnabled := "false"
+	if costCap > 0 {
+		costCapEnabled = "true"
 	}
 
 	// Get provider endpoint
@@ -940,6 +1140,7 @@ server:
 
 urls:
   gateway: "http://localhost:${GATEWAY_PORT:-18080}"
+  compresr: "${COMPRESR_BASE_URL:-https://api.compresr.com}"
 
 providers:
   %s:
@@ -964,11 +1165,25 @@ preemptive:
     summary_ttl: 3h
     hash_message_count: 3
 
+cost_control:
+  enabled: %s
+  session_cap: 0
+  global_cap: %.2f
+
 pipes:
   tool_output:
     enabled: false
   tool_discovery:
-    enabled: false
+    enabled: %t
+    strategy: "%s"
+    api:
+      endpoint: "${COMPRESR_BASE_URL:-https://api.compresr.com}/v1/tool-discovery/search"
+      api_key: "${COMPRESR_API_KEY:-}"
+      timeout: 10s
+    min_tools: %d
+    max_tools: %d
+    target_ratio: %.2f
+    enable_search_fallback: %t
 
 store:
   type: "memory"
@@ -979,13 +1194,18 @@ notifications:
     enabled: %s
 
 monitoring:
-  log_level: "info"
+  # Off by default. Set to "info" or "debug" to enable logs.
+  log_level: "off"
   log_format: "console"
   log_output: "stdout"
-  telemetry_enabled: true
+  # Telemetry is opt-in. Set to true to enable JSONL telemetry logs.
+  telemetry_enabled: false
   telemetry_path: "${SESSION_TELEMETRY_LOG:-logs/telemetry.jsonl}"
   compression_log_path: "${SESSION_COMPRESSION_LOG:-logs/compression.jsonl}"
-`, name, name, provider, apiKey, model, triggerThreshold, provider, endpoint, slackEnabled)
+  tool_discovery_log_path: "${SESSION_TOOL_DISCOVERY_LOG:-logs/tool_discovery.jsonl}"
+`, name, name, provider, apiKey, model, triggerThreshold, provider, endpoint, costCapEnabled, costCap,
+		toolDiscoveryEnabled, toolDiscoveryStrategy, toolDiscoveryMinTools, toolDiscoveryMaxTools,
+		toolDiscoveryTargetRatio, toolDiscoverySearchFallback, slackEnabled)
 }
 
 // Helper functions for config wizard
@@ -1038,11 +1258,12 @@ func selectFromList(prompt string, items []string) (int, error) {
 // checkGatewayRunning checks if a gateway is already running on the port.
 func checkGatewayRunning(port int) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
+	// #nosec G107 -- localhost-only health check, port from internal config
 	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/health", port))
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -1060,19 +1281,20 @@ func findAvailablePort(basePort, maxPorts int) (int, bool) {
 
 // isPortInUse checks if a port is in use (by any process, not just our gateway).
 func isPortInUse(port int) bool {
+	// #nosec G102 -- localhost-only TCP check for port availability
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 500*time.Millisecond)
 	if err != nil {
-		return false // Port is free
+		return false
 	}
-	conn.Close()
-	return true // Port is in use
+	_ = conn.Close()
+	return true
 }
 
 // stopGateway stops a running gateway by finding and killing the process.
 // nolint:unused // Reserved for future terminal cleanup functionality
 func stopGateway(port int) bool {
 	// Find process using the port and kill it
-	// #nosec G204 -- port is an integer, not user input
+	// #nosec G204 -- port is from internal config, not user input
 	cmd := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port))
 	output, err := cmd.Output()
 	if err != nil {
@@ -1081,7 +1303,7 @@ func stopGateway(port int) bool {
 
 	pids := strings.Fields(strings.TrimSpace(string(output)))
 	for _, pid := range pids {
-		// #nosec G204 -- pid comes from lsof output
+		// #nosec G204 -- pid is from lsof output, killing gateway process
 		killCmd := exec.Command("kill", "-9", pid)
 		_ = killCmd.Run()
 	}
@@ -1115,6 +1337,7 @@ func waitForGateway(port int, timeout time.Duration) bool {
 // If the file is empty, malformed, or the PID doesn't exist, consider it stale.
 func isLockFileStale(lockPath string) bool {
 	// Read lock file content
+	// #nosec G304 -- lockPath is constructed internally from known directories
 	content, err := os.ReadFile(lockPath)
 	if err != nil {
 		// Can't read file, consider it stale
@@ -1150,12 +1373,10 @@ func isLockFileStale(lockPath string) bool {
 
 // validateAgent checks if the agent binary is available and offers to install.
 func validateAgent(ac *AgentConfig) error {
-	if ac.Agent.Command.Check == "" {
+	if len(ac.Agent.Command.CheckCmd) == 0 {
 		return nil
 	}
-
-	// #nosec G204 -- check command comes from agent YAML config
-	checkCmd := exec.Command("bash", "-c", ac.Agent.Command.Check)
+	checkCmd := exec.Command(ac.Agent.Command.CheckCmd[0], ac.Agent.Command.CheckCmd[1:]...)
 	if err := checkCmd.Run(); err == nil {
 		return nil // Agent is available
 	}
@@ -1172,9 +1393,9 @@ func validateAgent(ac *AgentConfig) error {
 	}
 	fmt.Println()
 
-	if ac.Agent.Command.Install != "" {
+	if len(ac.Agent.Command.InstallCmd) > 0 {
 		fmt.Printf("Would you like to install it now? [Y/n]\n")
-		fmt.Printf("  \033[2mCommand: %s\033[0m\n\n", ac.Agent.Command.Install)
+		fmt.Printf("  \033[2mCommand: %s\033[0m\n\n", strings.Join(ac.Agent.Command.InstallCmd, " "))
 
 		reader := bufio.NewReader(os.Stdin)
 		resp, _ := reader.ReadString('\n')
@@ -1188,9 +1409,7 @@ func validateAgent(ac *AgentConfig) error {
 		fmt.Println()
 		printStep(fmt.Sprintf("Installing %s...", displayName))
 		fmt.Println()
-
-		// #nosec G204 -- install command comes from agent YAML config
-		installCmd := exec.Command("bash", "-c", ac.Agent.Command.Install)
+		installCmd := exec.Command(ac.Agent.Command.InstallCmd[0], ac.Agent.Command.InstallCmd[1:]...)
 		installCmd.Stdin = os.Stdin
 		installCmd.Stdout = os.Stdout
 		installCmd.Stderr = os.Stderr
@@ -1198,7 +1417,7 @@ func validateAgent(ac *AgentConfig) error {
 		if err := installCmd.Run(); err != nil {
 			fmt.Println()
 			printError("Installation failed")
-			fmt.Printf("  \033[1;33mYou can try manually: %s\033[0m\n", ac.Agent.Command.Install)
+			fmt.Printf("  \033[1;33mYou can try manually: %s\033[0m\n", strings.Join(ac.Agent.Command.InstallCmd, " "))
 			return fmt.Errorf("installation failed")
 		}
 
@@ -1237,6 +1456,7 @@ func discoverAgents() map[string][]byte {
 			if _, exists := agents[name]; exists {
 				continue // first match wins (user config takes priority)
 			}
+			// #nosec G304 -- reading from trusted config directories
 			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 			if err == nil {
 				agents[name] = data
@@ -1266,6 +1486,7 @@ func discoverAgents() map[string][]byte {
 func resolveConfig(userConfig string) ([]byte, string, error) {
 	// If it looks like a file path, try reading it directly
 	if strings.Contains(userConfig, "/") || strings.Contains(userConfig, "\\") {
+		// #nosec G304 -- userConfig path provided by CLI user (intentional)
 		data, err := os.ReadFile(userConfig)
 		if err != nil {
 			return nil, "", fmt.Errorf("config file not found: %s", userConfig)
@@ -1622,8 +1843,7 @@ func createSessionDir(baseDir string) string {
 // exportAgentEnv sets environment variables defined in the agent config.
 func exportAgentEnv(ac *AgentConfig) {
 	for _, env := range ac.Agent.Environment {
-		// Values are already expanded by parseAgentConfig
-		os.Setenv(env.Name, env.Value)
+		_ = os.Setenv(env.Name, env.Value)
 		printInfo(fmt.Sprintf("Exported: %s", env.Name))
 	}
 }
@@ -1760,13 +1980,13 @@ func createOpenClawConfigDirect(model string) {
 // startOpenClawGateway starts the OpenClaw TUI gateway subprocess.
 func startOpenClawGateway() *exec.Cmd {
 	// Stop any existing gateway
-	// #nosec G204 -- hardcoded command
+
 	_ = exec.Command("openclaw", "gateway", "stop").Run()
 	time.Sleep(1 * time.Second)
 
 	// Start fresh gateway
 	printInfo("Starting OpenClaw gateway...")
-	// #nosec G204 -- hardcoded command
+
 	cmd := exec.Command("openclaw", "gateway", "--port", "18789", "--allow-unconfigured", "--token", "localdev", "--force")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -1830,12 +2050,6 @@ func printAgentHelp() {
 	fmt.Println("  context-gateway -l                               List agents")
 	fmt.Println("  context-gateway claude_code -- -p \"fix the bug\"  Pass -p to Claude Code")
 	fmt.Println("  context-gateway claude_code -d -- --verbose      Debug gateway, --verbose to agent")
-}
-
-// shellQuote returns a shell-safe single-quoted version of arg.
-// Used to safely embed user-provided pass-through arguments into a bash -c command string.
-func shellQuote(arg string) string {
-	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
 }
 
 // sortedKeys returns the sorted keys of a map.

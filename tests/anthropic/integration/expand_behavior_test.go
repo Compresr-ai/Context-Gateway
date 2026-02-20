@@ -878,10 +878,10 @@ func configWithExpandEnabled(mockAPIURL string) *config.Config {
 				IncludeExpandHint:   true,
 				EnableExpandContext: true, // ENABLED
 				API: config.APIConfig{
-					Endpoint: apiEndpoint,
-					APIKey:   os.Getenv("COMPRESR_API_KEY"),
-					Model:    "tool_output_openai",
-					Timeout:  30 * time.Second,
+					Endpoint:  apiEndpoint,
+					APISecret: os.Getenv("COMPRESR_API_KEY"),
+					Model:     "tool_output_openai",
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
@@ -910,7 +910,7 @@ func configWithExpandDisabled() *config.Config {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            "api",
+				Strategy:            "passthrough", // Use passthrough since no valid API endpoint
 				FallbackStrategy:    "passthrough",
 				MinBytes:            300,
 				MaxBytes:            65536,
@@ -918,10 +918,10 @@ func configWithExpandDisabled() *config.Config {
 				IncludeExpandHint:   false, // No hint
 				EnableExpandContext: false, // DISABLED
 				API: config.APIConfig{
-					Endpoint: "/api/compress/tool-output",
-					APIKey:   os.Getenv("COMPRESR_API_KEY"),
-					Model:    "tool_output_openai",
-					Timeout:  30 * time.Second,
+					Endpoint:  "",
+					APISecret: "",
+					Model:     "",
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

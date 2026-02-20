@@ -137,5 +137,35 @@ func ExtractModelFromPath(path string) string {
 	return rest
 }
 
-// Ensure BedrockAdapter implements Adapter
+// =============================================================================
+// PARSED REQUEST ADAPTER - Delegate to Anthropic
+// =============================================================================
+
+// ParseRequest parses the request body once for reuse.
+func (a *BedrockAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
+	return a.anthropic.ParseRequest(body)
+}
+
+// ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
+func (a *BedrockAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
+	return a.anthropic.ExtractToolDiscoveryFromParsed(parsed, opts)
+}
+
+// ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
+func (a *BedrockAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) string {
+	return a.anthropic.ExtractUserQueryFromParsed(parsed)
+}
+
+// ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
+func (a *BedrockAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
+	return a.anthropic.ExtractToolOutputFromParsed(parsed)
+}
+
+// ApplyToolDiscoveryToParsed filters tools and returns modified body.
+func (a *BedrockAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
+	return a.anthropic.ApplyToolDiscoveryToParsed(parsed, results)
+}
+
+// Ensure BedrockAdapter implements Adapter and ParsedRequestAdapter
 var _ Adapter = (*BedrockAdapter)(nil)
+var _ ParsedRequestAdapter = (*BedrockAdapter)(nil)

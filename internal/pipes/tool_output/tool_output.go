@@ -208,14 +208,13 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				ctx.OutputCompressed = true
 				continue
 			}
-			p.store.DeleteCompressed(shadowID)
+			_ = p.store.DeleteCompressed(shadowID)
 		}
 
 		p.recordCacheMiss()
 
-		// Store original for expand_context retrieval
 		if p.store != nil {
-			p.store.Set(shadowID, ext.Content)
+			_ = p.store.Set(shadowID, ext.Content)
 		}
 
 		// Queue for compression
@@ -437,7 +436,7 @@ func (p *Pipe) compressOne(query, provider, capturedBearerToken, capturedBetaHea
 		}
 
 		if p.store != nil {
-			p.store.Delete(t.shadowID)
+			_ = p.store.Delete(t.shadowID)
 		}
 		return compressionResult{index: t.index, success: false, err: err}
 	}
@@ -471,7 +470,7 @@ func normalizeContent(content string) string {
 // touchOriginal extends the TTL of original content before LLM call (V2)
 func (p *Pipe) touchOriginal(shadowID string) {
 	if original, ok := p.store.Get(shadowID); ok {
-		p.store.Set(shadowID, original)
+		_ = p.store.Set(shadowID, original)
 	}
 }
 
@@ -559,7 +558,7 @@ func (p *Pipe) compressViaAPI(query, content, toolName, provider string) (string
 	if err != nil {
 		return "", fmt.Errorf("API request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		// Read response body for debugging
@@ -615,7 +614,7 @@ func (p *Pipe) compressViaExternalProvider(query, content, toolName, capturedBea
 
 	params := external.CallLLMParams{
 		Endpoint:     p.apiEndpoint,
-		APIKey:       p.apiKey,
+		APISecret:    p.apiKey,
 		Model:        p.apiModel,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
@@ -625,8 +624,8 @@ func (p *Pipe) compressViaExternalProvider(query, content, toolName, capturedBea
 
 	// OAuth fallback: reuse Bearer token captured from the incoming request.
 	// Claude Code OAuth tokens (sk-ant-oat*) require Bearer auth + anthropic-beta header.
-	if params.APIKey == "" && capturedBearerToken != "" {
-		params.BearerToken = capturedBearerToken
+	if params.APISecret == "" && capturedBearerToken != "" {
+		params.BearerAuth = capturedBearerToken
 		if capturedBetaHeader != "" {
 			params.ExtraHeaders = map[string]string{"anthropic-beta": capturedBetaHeader}
 		}

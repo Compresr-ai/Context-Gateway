@@ -249,7 +249,7 @@ func BuildAnthropicResponse(summary string, messages []json.RawMessage, lastInde
 			if err := json.Unmarshal(messages[i], &msg); err == nil {
 				role, _ := msg["role"].(string)
 				content := extractContent(msg["content"])
-				text.WriteString(fmt.Sprintf("[%s]: %s\n\n", role, content))
+				_, _ = fmt.Fprintf(&text, "[%s]: %s\n\n", role, content)
 				recentCount++
 			}
 		}

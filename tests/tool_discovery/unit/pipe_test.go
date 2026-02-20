@@ -161,6 +161,46 @@ func TestPipe_Process_FiltersTools_Anthropic(t *testing.T) {
 	assert.Greater(t, len(tools), 0)
 }
 
+func TestPipe_Process_Relevance_DoesNotInjectSearchTool(t *testing.T) {
+	cfg := testConfig("relevance", 1, 2, 0.3, nil)
+	cfg.Pipes.ToolDiscovery.EnableSearchFallback = true // Should be ignored for relevance
+	pipe := tooldiscovery.New(cfg)
+
+	body := openAIRequestWithToolsAndQuery(8, "search for code")
+	ctx := newOpenAIPipeContext(body)
+
+	result, err := pipe.Process(ctx)
+	require.NoError(t, err)
+	assert.True(t, ctx.ToolsFiltered)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(result, &req))
+	tools := req["tools"].([]any)
+	names := extractToolNames(tools)
+	assert.NotContains(t, names, "gateway_search_tools")
+}
+
+func TestPipe_Process_API_ReplacesWithSearchToolOnly(t *testing.T) {
+	cfg := testConfig("api", 1, 10, 0.8, []string{"run_tests"})
+	pipe := tooldiscovery.New(cfg)
+
+	body := openAIRequestWithToolsAndQuery(6, "search for code")
+	ctx := newOpenAIPipeContext(body)
+
+	result, err := pipe.Process(ctx)
+	require.NoError(t, err)
+	assert.True(t, ctx.ToolsFiltered)
+	assert.Len(t, ctx.DeferredTools, 6)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(result, &req))
+	tools := req["tools"].([]any)
+	require.Len(t, tools, 1)
+	names := extractToolNames(tools)
+	require.Len(t, names, 1)
+	assert.Equal(t, "gateway_search_tools", names[0])
+}
+
 // =============================================================================
 // RELEVANCE SCORING - RECENTLY USED TOOLS
 // =============================================================================

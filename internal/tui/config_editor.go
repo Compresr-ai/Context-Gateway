@@ -61,27 +61,15 @@ var SupportedProviders = loadProviders()
 
 // loadProviders loads provider definitions from external_providers.yaml
 func loadProviders() []ProviderInfo {
-	// Try multiple locations for external_providers.yaml
-	paths := []string{
-		"configs/external_providers.yaml",
-	}
-
-	// Add user config path
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		paths = append([]string{
-			filepath.Join(homeDir, ".config", "context-gateway", "external_providers.yaml"),
-		}, paths...)
-	}
-
-	for _, path := range paths {
+	tryLoad := func(path string) []ProviderInfo {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			continue
+			return nil
 		}
 
 		var cfg ExternalProvidersConfig
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			continue
+			return nil
 		}
 
 		// Convert to ProviderInfo slice
@@ -99,10 +87,18 @@ func loadProviders() []ProviderInfo {
 				})
 			}
 		}
+		return providers
+	}
 
-		if len(providers) > 0 {
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		userPath := filepath.Join(homeDir, ".config", "context-gateway", "external_providers.yaml")
+		if providers := tryLoad(userPath); len(providers) > 0 {
 			return providers
 		}
+	}
+
+	if providers := tryLoad("configs/external_providers.yaml"); len(providers) > 0 {
+		return providers
 	}
 
 	// Fallback to defaults

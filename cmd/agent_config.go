@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/compresr/context-gateway/internal/config"
@@ -41,11 +42,60 @@ type AgentEnvVar struct {
 
 // AgentCommand defines how to check, run, and install the agent.
 type AgentCommand struct {
-	Check           string   `yaml:"check"`
-	Run             string   `yaml:"run"`
-	Args            []string `yaml:"args"`
-	Install         string   `yaml:"install"`
+	Check           string   `yaml:"check"`       // legacy: shell-style string
+	CheckCmd        []string `yaml:"check_cmd"`   // preferred: executable + args
+	Run             string   `yaml:"run"`         // executable name/path
+	Args            []string `yaml:"args"`        // executable args
+	Install         string   `yaml:"install"`     // legacy: shell-style string
+	InstallCmd      []string `yaml:"install_cmd"` // preferred: executable + args
 	FallbackMessage string   `yaml:"fallback_message"`
+}
+
+var shellMetaPattern = regexp.MustCompile(`[|&;<>()$` + "`" + `\n\r]`)
+
+func parseLegacyCommand(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if shellMetaPattern.MatchString(trimmed) {
+		return nil, fmt.Errorf("legacy shell command contains unsupported shell operators: %q", raw)
+	}
+	parts := strings.Fields(trimmed)
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	return parts, nil
+}
+
+func normalizeCommandSpec(cmd AgentCommand) (AgentCommand, error) {
+	if len(cmd.CheckCmd) == 0 && cmd.Check != "" {
+		checkCmd, err := parseLegacyCommand(cmd.Check)
+		if err != nil {
+			return cmd, fmt.Errorf("invalid command.check: %w; use command.check_cmd instead", err)
+		}
+		cmd.CheckCmd = checkCmd
+	}
+
+	if len(cmd.InstallCmd) == 0 && cmd.Install != "" {
+		installCmd, err := parseLegacyCommand(cmd.Install)
+		if err != nil {
+			return cmd, fmt.Errorf("invalid command.install: %w; use command.install_cmd instead", err)
+		}
+		cmd.InstallCmd = installCmd
+	}
+
+	if strings.TrimSpace(cmd.Run) == "" {
+		return cmd, fmt.Errorf("agent.command.run is required")
+	}
+	if shellMetaPattern.MatchString(cmd.Run) {
+		return cmd, fmt.Errorf("agent.command.run must be an executable, not a shell expression")
+	}
+	if strings.ContainsAny(cmd.Run, " \t") {
+		return cmd, fmt.Errorf("agent.command.run must not include spaces; use command.args for arguments")
+	}
+
+	return cmd, nil
 }
 
 // parseAgentConfig parses agent YAML bytes into an AgentConfig.
@@ -62,6 +112,11 @@ func parseAgentConfig(data []byte) (*AgentConfig, error) {
 	if ac.Agent.Name == "" {
 		return nil, fmt.Errorf("agent.name is required")
 	}
+	normalizedCmd, err := normalizeCommandSpec(ac.Agent.Command)
+	if err != nil {
+		return nil, err
+	}
+	ac.Agent.Command = normalizedCmd
 
 	return &ac, nil
 }
@@ -76,6 +131,7 @@ func loadAgentConfig(name string) (*AgentConfig, []byte, error) {
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
 		overridePath := filepath.Join(homeDir, ".config", "context-gateway", "agents", name+".yaml")
+
 		if data, err := os.ReadFile(overridePath); err == nil {
 			ac, err := parseAgentConfig(data)
 			return ac, data, err
@@ -84,6 +140,7 @@ func loadAgentConfig(name string) (*AgentConfig, []byte, error) {
 
 	// Check local agents directory
 	localPath := filepath.Join("agents", name+".yaml")
+
 	if data, err := os.ReadFile(localPath); err == nil {
 		ac, err := parseAgentConfig(data)
 		return ac, data, err

@@ -92,7 +92,7 @@ func (e *Expander) RunExpandLoop(
 
 		// Read response
 		responseBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return result, err
 		}
@@ -298,7 +298,7 @@ func (e *Expander) CreateExpandResultMessages(calls []ExpandContextCall, isAnthr
 
 	if isAnthropic {
 		// Anthropic: single user message with multiple tool_result content blocks
-		var contentBlocks []interface{}
+		contentBlocks := make([]interface{}, 0, len(calls))
 		for _, call := range calls {
 			content, ok := e.store.Get(call.ShadowID)
 			var resultContent string

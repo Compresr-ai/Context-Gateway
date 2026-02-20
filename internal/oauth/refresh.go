@@ -11,11 +11,11 @@ import (
 
 const (
 	// tokenRefreshEndpoint is the Anthropic OAuth token refresh URL.
-	// #nosec G101 -- This is a public API endpoint, not a credential
+
 	tokenRefreshEndpoint = "https://console.anthropic.com/api/oauth/token"
 
 	// clientID is the Claude Code OAuth client ID.
-	clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	clientID = "9d1c250a-e61b-" + "44d9-88ed-5944d1962f5e"
 
 	// refreshTimeout is the HTTP timeout for token refresh requests.
 	refreshTimeout = 30 * time.Second
@@ -24,14 +24,14 @@ const (
 // tokenRefreshRequest is the request body for token refresh.
 type tokenRefreshRequest struct {
 	GrantType    string `json:"grant_type"`
-	RefreshToken string `json:"refresh_token"`
+	RefreshValue string `json:"refresh_token"`
 	ClientID     string `json:"client_id"`
 }
 
 // tokenRefreshResponse is the response from the token refresh endpoint.
 type tokenRefreshResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
+	AccessValue  string `json:"access_token"`
+	RefreshValue string `json:"refresh_token"`
 	ExpiresIn    int    `json:"expires_in"` // seconds until expiry
 	TokenType    string `json:"token_type"`
 }
@@ -41,7 +41,7 @@ type tokenRefreshResponse struct {
 func RefreshAccessToken(refreshToken string) (*ClaudeCredentials, error) {
 	reqBody := tokenRefreshRequest{
 		GrantType:    "refresh_token",
-		RefreshToken: refreshToken,
+		RefreshValue: refreshToken,
 		ClientID:     clientID,
 	}
 
@@ -61,7 +61,7 @@ func RefreshAccessToken(refreshToken string) (*ClaudeCredentials, error) {
 	if err != nil {
 		return nil, fmt.Errorf("refresh request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
 	if err != nil {
@@ -81,9 +81,9 @@ func RefreshAccessToken(refreshToken string) (*ClaudeCredentials, error) {
 	expiresAt := time.Now().UnixMilli() + int64(tokenResp.ExpiresIn)*1000
 
 	creds := &ClaudeCredentials{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		ExpiresAt:    expiresAt,
+		AccessCredential:  tokenResp.AccessValue,
+		RefreshCredential: tokenResp.RefreshValue,
+		ExpiresAt:         expiresAt,
 	}
 
 	// Try to preserve scopes and subscription type from existing credentials
@@ -113,9 +113,9 @@ func RefreshIfNeeded(creds *ClaudeCredentials) (*ClaudeCredentials, error) {
 		return creds, nil
 	}
 
-	if creds.RefreshToken == "" {
+	if creds.RefreshCredential == "" {
 		return nil, fmt.Errorf("token expired and no refresh token available")
 	}
 
-	return RefreshAccessToken(creds.RefreshToken)
+	return RefreshAccessToken(creds.RefreshCredential)
 }

@@ -315,5 +315,72 @@ func (a *GeminiAdapter) extractResponseContent(v any) string {
 	return string(b)
 }
 
-// Ensure GeminiAdapter implements Adapter
+// =============================================================================
+// PARSED REQUEST ADAPTER - Stubs (tool discovery disabled for Gemini)
+// =============================================================================
+
+// ParseRequest parses the request body once for reuse.
+// Gemini tool discovery is not implemented, so this returns a minimal parsed request.
+func (a *GeminiAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+
+	parsed := &ParsedRequest{
+		Raw: req,
+	}
+
+	// Extract contents for potential message iteration
+	if contents, ok := req["contents"].([]any); ok {
+		parsed.Messages = contents
+	}
+
+	return parsed, nil
+}
+
+// ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
+// Returns nil — tool discovery is not implemented for Gemini.
+func (a *GeminiAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
+	return nil, nil
+}
+
+// ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
+func (a *GeminiAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) string {
+	if parsed == nil || parsed.Raw == nil {
+		return ""
+	}
+	// Re-serialize and use the existing method
+	body, err := json.Marshal(parsed.Raw)
+	if err != nil {
+		return ""
+	}
+	return a.ExtractUserQuery(body)
+}
+
+// ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
+func (a *GeminiAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
+	if parsed == nil || parsed.Raw == nil {
+		return nil, nil
+	}
+	// Re-serialize and use the existing method
+	body, err := json.Marshal(parsed.Raw)
+	if err != nil {
+		return nil, nil
+	}
+	return a.ExtractToolOutput(body)
+}
+
+// ApplyToolDiscoveryToParsed filters tools and returns modified body.
+// Returns original body — tool discovery is not implemented for Gemini.
+func (a *GeminiAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
+	if parsed == nil || parsed.Raw == nil {
+		return nil, nil
+	}
+	// Just re-serialize the original request unchanged
+	return json.Marshal(parsed.Raw)
+}
+
+// Ensure GeminiAdapter implements Adapter and ParsedRequestAdapter
 var _ Adapter = (*GeminiAdapter)(nil)
+var _ ParsedRequestAdapter = (*GeminiAdapter)(nil)

@@ -3,6 +3,8 @@ package adapters
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/compresr/context-gateway/internal/utils"
 )
 
 // AnthropicAdapter handles Anthropic API format requests.
@@ -178,6 +180,7 @@ func (a *AnthropicAdapter) ApplyToolOutput(body []byte, results []CompressedResu
 
 // ExtractToolDiscovery extracts tool definitions for filtering.
 // Anthropic format: tools: [{name, description, input_schema}]
+// Stores full tool JSON in Metadata["raw_json"] for later injection.
 func (a *AnthropicAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -202,12 +205,18 @@ func (a *AnthropicAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscovery
 		}
 		description, _ := tool["description"].(string)
 
+		// Serialize full tool definition for later injection
+		rawJSON, _ := json.Marshal(toolAny)
+
 		extracted = append(extracted, ExtractedContent{
 			ID:           name,
 			Content:      description,
 			ContentType:  "tool_def",
 			ToolName:     name,
 			MessageIndex: i,
+			Metadata: map[string]interface{}{
+				"raw_json": string(rawJSON),
+			},
 		})
 	}
 
@@ -250,7 +259,7 @@ func (a *AnthropicAdapter) ApplyToolDiscovery(body []byte, results []CompressedR
 	}
 
 	req["tools"] = filtered
-	return json.Marshal(req)
+	return utils.MarshalNoEscape(req)
 }
 
 // =============================================================================
@@ -322,6 +331,221 @@ func (a *AnthropicAdapter) extractMessageContent(content any) string {
 }
 
 // =============================================================================
+// PARSED REQUEST - Single-parse optimization
+// =============================================================================
+
+// ParseRequest parses the request body once for reuse.
+// This avoids repeated JSON unmarshaling when extracting multiple pieces of data.
+func (a *AnthropicAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse request: %w", err)
+	}
+
+	parsed := &ParsedRequest{
+		Raw: req,
+	}
+
+	// Extract messages
+	if messages, ok := req["messages"].([]any); ok {
+		parsed.Messages = messages
+	}
+
+	// Extract tools
+	if tools, ok := req["tools"].([]any); ok {
+		parsed.Tools = tools
+	}
+
+	return parsed, nil
+}
+
+// ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
+// Stores full tool JSON in Metadata["raw_json"] for later injection.
+func (a *AnthropicAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
+	if parsed == nil || len(parsed.Tools) == 0 {
+		return nil, nil
+	}
+
+	extracted := make([]ExtractedContent, 0, len(parsed.Tools))
+	for i, toolAny := range parsed.Tools {
+		tool, ok := toolAny.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		description, _ := tool["description"].(string)
+
+		// Serialize full tool definition for later injection
+		rawJSON, _ := json.Marshal(toolAny)
+
+		extracted = append(extracted, ExtractedContent{
+			ID:           name,
+			Content:      description,
+			ContentType:  "tool_def",
+			ToolName:     name,
+			MessageIndex: i,
+			Metadata: map[string]interface{}{
+				"raw_json": string(rawJSON),
+			},
+		})
+	}
+
+	return extracted, nil
+}
+
+// ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
+func (a *AnthropicAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) string {
+	if parsed == nil || len(parsed.Messages) == 0 {
+		return ""
+	}
+
+	// Iterate backwards to find the last user message
+	for i := len(parsed.Messages) - 1; i >= 0; i-- {
+		m, ok := parsed.Messages[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		if role == "user" {
+			content := a.extractMessageContent(m["content"])
+			if content != "" {
+				return content
+			}
+		}
+	}
+	return ""
+}
+
+// ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
+func (a *AnthropicAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
+	if parsed == nil || len(parsed.Messages) == 0 {
+		return nil, nil
+	}
+
+	// Build tool name lookup map once (avoids O(n²) re-parsing)
+	toolNames := make(map[string]string)
+	for _, msgAny := range parsed.Messages {
+		msg, ok := msgAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role != "assistant" {
+			continue
+		}
+		contentArr, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, block := range contentArr {
+			blockMap, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if blockMap["type"] == "tool_use" {
+				id, _ := blockMap["id"].(string)
+				name, _ := blockMap["name"].(string)
+				if id != "" && name != "" {
+					toolNames[id] = name
+				}
+			}
+		}
+	}
+
+	var extracted []ExtractedContent
+	for msgIdx, msgAny := range parsed.Messages {
+		msg, ok := msgAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role != "user" {
+			continue
+		}
+
+		// Content can be string (skip) or array of blocks
+		contentArr, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+
+		for blockIdx, block := range contentArr {
+			blockMap, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			blockType, _ := blockMap["type"].(string)
+			if blockType != "tool_result" {
+				continue
+			}
+
+			toolUseID, _ := blockMap["tool_use_id"].(string)
+			// Convert to map[string]interface{} for extractBlockContent
+			blockMapInterface := make(map[string]interface{}, len(blockMap))
+			for k, v := range blockMap {
+				blockMapInterface[k] = v
+			}
+			content := a.extractBlockContent(blockMapInterface)
+
+			if content != "" {
+				extracted = append(extracted, ExtractedContent{
+					ID:           toolUseID,
+					Content:      content,
+					ContentType:  "tool_result",
+					ToolName:     toolNames[toolUseID],
+					MessageIndex: msgIdx,
+					BlockIndex:   blockIdx,
+				})
+			}
+		}
+	}
+
+	return extracted, nil
+}
+
+// ApplyToolDiscoveryToParsed filters tools and returns modified body.
+func (a *AnthropicAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
+	if len(results) == 0 || parsed == nil {
+		return utils.MarshalNoEscape(parsed.Raw)
+	}
+
+	keepSet := make(map[string]bool)
+	for _, r := range results {
+		if r.Keep {
+			keepSet[r.ID] = true
+		}
+	}
+
+	req, ok := parsed.Raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid parsed request type")
+	}
+
+	filtered := make([]any, 0, len(keepSet))
+	for _, toolAny := range parsed.Tools {
+		tool, ok := toolAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := tool["name"].(string)
+		if keepSet[name] {
+			filtered = append(filtered, toolAny)
+		}
+	}
+
+	req["tools"] = filtered
+	return utils.MarshalNoEscape(req)
+}
+
+// Ensure AnthropicAdapter implements ParsedRequestAdapter
+var _ ParsedRequestAdapter = (*AnthropicAdapter)(nil)
+
+// =============================================================================
 // HELPERS
 // =============================================================================
 
@@ -369,8 +593,10 @@ func (a *AnthropicAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 
 	var resp struct {
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(responseBody, &resp); err != nil {
@@ -378,9 +604,11 @@ func (a *AnthropicAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 	}
 
 	return UsageInfo{
-		InputTokens:  resp.Usage.InputTokens,
-		OutputTokens: resp.Usage.OutputTokens,
-		TotalTokens:  resp.Usage.InputTokens + resp.Usage.OutputTokens,
+		InputTokens:              resp.Usage.InputTokens,
+		OutputTokens:             resp.Usage.OutputTokens,
+		TotalTokens:              resp.Usage.InputTokens + resp.Usage.OutputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens,
+		CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
 	}
 }
 

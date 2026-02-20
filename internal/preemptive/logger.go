@@ -109,7 +109,7 @@ func (cl *CompactionLogger) Log(event CompactionEvent) {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	if data, err := json.Marshal(event); err == nil {
-		cl.file.Write(append(data, '\n'))
+		_, _ = cl.file.Write(append(data, '\n'))
 	}
 }
 

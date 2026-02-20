@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/compresr/context-gateway/internal/utils"
 )
 
 // OpenAIAdapter handles OpenAI API format requests.
@@ -267,6 +269,7 @@ func extractStringContent(v any) string {
 
 // ExtractToolDiscovery extracts tool definitions for filtering.
 // OpenAI format: tools: [{type: "function", function: {name, description, parameters}}]
+// Stores full tool JSON in Metadata["raw_json"] for later injection.
 func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -296,12 +299,18 @@ func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOpt
 		}
 		description := getString(fn, "description")
 
+		// Serialize full tool definition for later injection
+		rawJSON, _ := json.Marshal(toolAny)
+
 		extracted = append(extracted, ExtractedContent{
 			ID:           name,
 			Content:      description,
 			ContentType:  "tool_def",
 			ToolName:     name,
 			MessageIndex: i,
+			Metadata: map[string]interface{}{
+				"raw_json": string(rawJSON),
+			},
 		})
 	}
 
@@ -348,8 +357,294 @@ func (a *OpenAIAdapter) ApplyToolDiscovery(body []byte, results []CompressedResu
 	}
 
 	req["tools"] = filtered
-	return json.Marshal(req)
+	return utils.MarshalNoEscape(req)
 }
+
+// =============================================================================
+// PARSED REQUEST - Single-parse optimization for tool discovery
+// =============================================================================
+
+// ParseRequest parses the request body once for reuse.
+// This avoids repeated JSON unmarshaling when extracting multiple pieces of data.
+func (a *OpenAIAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse request: %w", err)
+	}
+
+	parsed := &ParsedRequest{
+		Raw: req,
+	}
+
+	// Extract messages (Chat Completions format)
+	if messages, ok := req["messages"].([]any); ok {
+		parsed.Messages = messages
+	}
+
+	// Extract input (Responses API format) - store in Messages for unified access
+	if input, ok := req["input"].([]any); ok && parsed.Messages == nil {
+		parsed.Messages = input
+	}
+
+	// Extract tools
+	if tools, ok := req["tools"].([]any); ok {
+		parsed.Tools = tools
+	}
+
+	return parsed, nil
+}
+
+// ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
+// OpenAI format: tools: [{type: "function", function: {name, description, parameters}}]
+func (a *OpenAIAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
+	if parsed == nil || len(parsed.Tools) == 0 {
+		return nil, nil
+	}
+
+	extracted := make([]ExtractedContent, 0, len(parsed.Tools))
+	for i, toolAny := range parsed.Tools {
+		tool, ok := toolAny.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		name := getString(fn, "name")
+		if name == "" {
+			continue
+		}
+		description := getString(fn, "description")
+
+		// Serialize full tool definition for later injection
+		rawJSON, _ := json.Marshal(toolAny)
+
+		extracted = append(extracted, ExtractedContent{
+			ID:           name,
+			Content:      description,
+			ContentType:  "tool_def",
+			ToolName:     name,
+			MessageIndex: i,
+			Metadata: map[string]interface{}{
+				"raw_json": string(rawJSON),
+			},
+		})
+	}
+
+	return extracted, nil
+}
+
+// ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
+func (a *OpenAIAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) string {
+	if parsed == nil || len(parsed.Messages) == 0 {
+		return ""
+	}
+
+	req, ok := parsed.Raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	// Check if this is Responses API format (has "input" key)
+	if _, hasInput := req["input"]; hasInput {
+		// Responses API: look for type="message" && role="user"
+		for i := len(parsed.Messages) - 1; i >= 0; i-- {
+			m, ok := parsed.Messages[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			typ := getString(m, "type")
+			role := getString(m, "role")
+			if typ == "message" && role == "user" {
+				content := extractStringContent(m["content"])
+				if content != "" {
+					return content
+				}
+			}
+		}
+		return ""
+	}
+
+	// Chat Completions format: look for role="user"
+	for i := len(parsed.Messages) - 1; i >= 0; i-- {
+		msg, ok := parsed.Messages[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if getString(msg, "role") == "user" {
+			content := extractStringContent(msg["content"])
+			if content != "" {
+				return content
+			}
+		}
+	}
+	return ""
+}
+
+// ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
+func (a *OpenAIAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
+	if parsed == nil || len(parsed.Messages) == 0 {
+		return nil, nil
+	}
+
+	req, ok := parsed.Raw.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+
+	// Check if this is Responses API format
+	if _, hasInput := req["input"]; hasInput {
+		return a.extractToolOutputFromParsedResponsesAPI(parsed)
+	}
+
+	// Chat Completions format
+	return a.extractToolOutputFromParsedChatCompletions(parsed)
+}
+
+// extractToolOutputFromParsedResponsesAPI extracts tool outputs from Responses API format.
+func (a *OpenAIAdapter) extractToolOutputFromParsedResponsesAPI(parsed *ParsedRequest) ([]ExtractedContent, error) {
+	// Build tool name lookup
+	toolNames := make(map[string]string)
+	for _, item := range parsed.Messages {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ := getString(m, "type"); typ == "function_call" {
+			callID := getString(m, "call_id")
+			name := getString(m, "name")
+			if callID != "" && name != "" {
+				toolNames[callID] = name
+			}
+		}
+	}
+
+	// Extract function call outputs
+	var extracted []ExtractedContent
+	for i, item := range parsed.Messages {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ := getString(m, "type"); typ == "function_call_output" {
+			callID := getString(m, "call_id")
+			content := extractStringContent(m["output"])
+			if callID != "" && content != "" {
+				extracted = append(extracted, ExtractedContent{
+					ID:           callID,
+					Content:      content,
+					ContentType:  "tool_result",
+					ToolName:     toolNames[callID],
+					MessageIndex: i,
+				})
+			}
+		}
+	}
+
+	return extracted, nil
+}
+
+// extractToolOutputFromParsedChatCompletions extracts tool outputs from Chat Completions format.
+func (a *OpenAIAdapter) extractToolOutputFromParsedChatCompletions(parsed *ParsedRequest) ([]ExtractedContent, error) {
+	// Build tool name lookup from assistant tool_calls
+	toolNames := make(map[string]string)
+	for _, msgAny := range parsed.Messages {
+		msg, ok := msgAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		if getString(msg, "role") != "assistant" {
+			continue
+		}
+		toolCalls, ok := msg["tool_calls"].([]any)
+		if !ok {
+			continue
+		}
+		for _, tcAny := range toolCalls {
+			tc, ok := tcAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			callID := getString(tc, "id")
+			fn, ok := tc["function"].(map[string]any)
+			if ok {
+				name := getString(fn, "name")
+				if callID != "" && name != "" {
+					toolNames[callID] = name
+				}
+			}
+		}
+	}
+
+	// Extract tool messages
+	var extracted []ExtractedContent
+	for i, msgAny := range parsed.Messages {
+		msg, ok := msgAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		if getString(msg, "role") != "tool" {
+			continue
+		}
+		callID := getString(msg, "tool_call_id")
+		content := extractStringContent(msg["content"])
+		if callID != "" && content != "" {
+			extracted = append(extracted, ExtractedContent{
+				ID:           callID,
+				Content:      content,
+				ContentType:  "tool_result",
+				ToolName:     toolNames[callID],
+				MessageIndex: i,
+			})
+		}
+	}
+
+	return extracted, nil
+}
+
+// ApplyToolDiscoveryToParsed filters tools and returns modified body.
+func (a *OpenAIAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
+	if len(results) == 0 || parsed == nil {
+		return utils.MarshalNoEscape(parsed.Raw)
+	}
+
+	keepSet := make(map[string]bool)
+	for _, r := range results {
+		if r.Keep {
+			keepSet[r.ID] = true
+		}
+	}
+
+	req, ok := parsed.Raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid parsed request type")
+	}
+
+	filtered := make([]any, 0, len(keepSet))
+	for _, toolAny := range parsed.Tools {
+		tool, ok := toolAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		name := getString(fn, "name")
+		if keepSet[name] {
+			filtered = append(filtered, toolAny)
+		}
+	}
+
+	req["tools"] = filtered
+	return utils.MarshalNoEscape(req)
+}
+
+// Ensure OpenAIAdapter implements ParsedRequestAdapter
+var _ ParsedRequestAdapter = (*OpenAIAdapter)(nil)
 
 // =============================================================================
 // QUERY EXTRACTION

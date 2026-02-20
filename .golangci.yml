@@ -1,4 +1,6 @@
 # yaml-language-server: $schema=https://golangci-lint.run/jsonschema/golangci.jsonschema.json
+version: "2"
+
 run:
   timeout: 5m
   tests: false
@@ -6,64 +8,54 @@ run:
 linters:
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
-    - gofmt
-    - goimports
     - misspell
     - bodyclose
-    - copyloopvar
     - gosec
     - prealloc
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    paths:
+      - tests
+      - ".*_test\\.go"
+  settings:
+    errcheck:
+      check-blank: false
+      # Ignore fire-and-forget writes in proxy (performance critical)
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+        - io.Copy
+        - (*os.File).Write
+        - (*os.File).Sync
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    gosec:
+      excludes:
+        # G101: Hardcoded credentials - false positive on URL constants and config templates
+        - G101
+        # G107: SSRF - false positive on constructed URLs from trusted config
+        - G107
+        # G204: Subprocess with variable - legitimate CLI commands from trusted agent configs
+        - G204
+        # G302/G306: File permissions - executables need 0755, hook scripts need 0700
+        - G302
+        - G306
+        # G304: File inclusion - legitimate config file loading for CLI tool
+        - G304
 
-linters-settings:
-  errcheck:
-    check-blank: false
-    # Ignore fire-and-forget writes in proxy (performance critical)
-    exclude-functions:
-      - (net/http.ResponseWriter).Write
-      - (*encoding/json.Encoder).Encode
-      - io.Copy
-      - (*os.File).Write
-      - (*os.File).Sync
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment
-  gosec:
-    excludes:
-      - G104  # Unhandled errors (handled via errcheck exclude)
-      - G304  # File inclusion via variable (intentional in config)
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
-issues:
-  exclude-dirs:
-    - tests
-  
-  exclude-rules:
-    # Exclude test files from most linters
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-        - bodyclose
-    
-    # Allow unused parameters in interface implementations
-    - linters:
-        - unused
-      text: "parameter .* seems to be unused"
-    
-    # Allow unchecked store operations (fire-and-forget cache)
-    - linters:
-        - errcheck
-      text: "Error return value of .*(store|Store).*"
-    
-    # Allow unchecked json.Unmarshal in handlers (validated elsewhere)
-    - linters:
-        - errcheck  
-      text: "Error return value of `json.Unmarshal`"
-
-  max-issues-per-linter: 50
-  max-same-issues: 5
+output:
+  show-stats: true

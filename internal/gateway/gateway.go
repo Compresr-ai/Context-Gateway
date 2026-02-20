@@ -25,6 +25,7 @@ import (
 
 	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/config"
+	"github.com/compresr/context-gateway/internal/costcontrol"
 	"github.com/compresr/context-gateway/internal/monitoring"
 	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 	"github.com/compresr/context-gateway/internal/preemptive"
@@ -111,13 +112,22 @@ type Gateway struct {
 	store       store.Store
 	tracker     *monitoring.Tracker
 	trajectory  *monitoring.TrajectoryManager
-	expander    *tooloutput.Expander
 	httpClient  *http.Client
 	server      *http.Server
 	rateLimiter *rateLimiter
 
+	// Cost control
+	costTracker *costcontrol.Tracker
+
 	// Preemptive summarization
 	preemptive *preemptive.Manager
+
+	// Tool sessions for hybrid tool discovery.
+	toolSessions *ToolSessionStore
+	authMode     *authFallbackStore
+
+	// Legacy expander (for streaming - to be migrated)
+	expander *tooloutput.Expander
 
 	// AWS Bedrock support
 	bedrockSigner *BedrockSigner
@@ -153,15 +163,17 @@ func New(cfg *config.Config) *Gateway {
 
 	// Initialize telemetry
 	tracker, err := monitoring.NewTracker(monitoring.TelemetryConfig{
-		Enabled:            cfg.Monitoring.TelemetryEnabled,
-		LogPath:            cfg.Monitoring.TelemetryPath,
-		LogToStdout:        cfg.Monitoring.LogToStdout,
-		CompressionLogPath: cfg.Monitoring.CompressionLogPath,
+		Enabled:              cfg.Monitoring.TelemetryEnabled,
+		LogPath:              cfg.Monitoring.TelemetryPath,
+		LogToStdout:          cfg.Monitoring.LogToStdout,
+		CompressionLogPath:   cfg.Monitoring.CompressionLogPath,
+		ToolDiscoveryLogPath: cfg.Monitoring.ToolDiscoveryLogPath,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to initialize telemetry")
 		tracker, _ = monitoring.NewTracker(monitoring.TelemetryConfig{Enabled: false})
 	}
+	tracker.RecordInit(buildInitEvent(cfg))
 
 	// Initialize trajectory manager (ATIF format) - separate files per session ID
 	// TrajectoryPath is treated as base directory for per-session files
@@ -173,9 +185,11 @@ func New(cfg *config.Config) *Gateway {
 		}
 	}
 	trajectoryMgr := monitoring.NewTrajectoryManager(monitoring.TrajectoryManagerConfig{
-		Enabled:   cfg.Monitoring.TrajectoryEnabled,
-		BaseDir:   trajectoryBaseDir,
-		AgentName: cfg.Monitoring.AgentName,
+		Enabled:         cfg.Monitoring.TrajectoryEnabled,
+		BaseDir:         trajectoryBaseDir,
+		AgentName:       cfg.Monitoring.AgentName,
+		SessionTTL:      time.Hour,
+		CleanupInterval: 5 * time.Minute,
 	})
 
 	// Use config write_timeout for upstream requests
@@ -209,6 +223,9 @@ func New(cfg *config.Config) *Gateway {
 		bedrockSigner = NewBedrockSigner()
 	}
 
+	// Initialize tool session store for hybrid tool discovery
+	toolSessions := NewToolSessionStore(time.Hour) // 1 hour TTL
+
 	g := &Gateway{
 		config:        cfg,
 		registry:      registry,
@@ -216,10 +233,13 @@ func New(cfg *config.Config) *Gateway {
 		store:         st,
 		tracker:       tracker,
 		trajectory:    trajectoryMgr,
-		expander:      tooloutput.NewExpander(st, tracker),
-		httpClient:    &http.Client{Timeout: clientTimeout, Transport: transport}, // 0 = no timeout
+		expander:      tooloutput.NewExpander(st, tracker), // Legacy for streaming
+		httpClient:    &http.Client{Timeout: clientTimeout, Transport: transport},
 		rateLimiter:   newRateLimiter(DefaultRateLimit),
+		costTracker:   costcontrol.NewTracker(cfg.CostControl),
 		preemptive:    preemptive.NewManager(cfg.ResolvePreemptiveProvider()),
+		toolSessions:  toolSessions,
+		authMode:      newAuthFallbackStore(time.Hour),
 		bedrockSigner: bedrockSigner,
 		logger:        logger,
 		requestLogger: requestLogger,
@@ -255,12 +275,14 @@ func New(cfg *config.Config) *Gateway {
 func (g *Gateway) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", g.handleHealth)
 	mux.HandleFunc("/expand", g.handleExpand)
+	mux.HandleFunc("/costs", g.handleCostDashboard)
 	mux.HandleFunc("/", g.handleProxy)
 }
 
 // Start starts the gateway.
 func (g *Gateway) Start() error {
 	log.Info().Int("port", g.config.Server.Port).Msg("gateway starting")
+	log.Info().Str("url", fmt.Sprintf("http://localhost:%d/costs", g.config.Server.Port)).Msg("cost dashboard")
 	return g.server.ListenAndServe()
 }
 
@@ -292,9 +314,9 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 
 	// Close telemetry tracker
 	if g.tracker != nil {
-		g.tracker.Close()
+		_ = g.tracker.Close()
 	}
 
-	g.store.Close()
+	_ = g.store.Close()
 	return g.server.Shutdown(ctx)
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 
 	"golang.org/x/term"
 )
@@ -113,19 +114,15 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 		return -1, fmt.Errorf("no items to select")
 	}
 
-	// Check if we're in a TTY
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		// Fall back to numbered menu for non-interactive mode
+	if !term.IsTerminal(syscall.Stdin) {
 		return selectNumberedMenu(prompt, items)
 	}
 
-	// Save terminal state and set raw mode
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	oldState, err := term.MakeRaw(syscall.Stdin)
 	if err != nil {
-		// Fall back to numbered menu if we can't set raw mode
 		return selectNumberedMenu(prompt, items)
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	defer func() { _ = term.Restore(syscall.Stdin, oldState) }()
 
 	selected := 0
 	reader := bufio.NewReader(os.Stdin)
@@ -236,16 +233,14 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 
 				// Move up to the selected item line
 				fmt.Printf("\033[%dA", linesUp)
-				fmt.Print("\033[2K\r") // Clear line
+				fmt.Print("\033[2K\r")
 
-				// Exit raw mode for text input
-				term.Restore(int(os.Stdin.Fd()), oldState)
-				fmt.Print("\033[?25h") // Show cursor
+				_ = term.Restore(syscall.Stdin, oldState)
+				fmt.Print("\033[?25h")
 
 				// Show editable line with cursor after dash
 				fmt.Printf("  %s❯%s %s%s%s - ", ColorGreen, ColorReset, ColorBold, items[selected].Label, ColorReset)
 
-				// Read input (user types and presses Enter)
 				inputReader := bufio.NewReader(os.Stdin)
 				input, _ := inputReader.ReadString('\n')
 				input = strings.TrimSpace(input)
@@ -254,9 +249,8 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 					items[selected].Description = input
 				}
 
-				// Re-enter raw mode
-				oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
-				fmt.Print("\033[?25l") // Hide cursor
+				oldState, _ = term.MakeRaw(syscall.Stdin)
+				fmt.Print("\033[?25l")
 
 				// Now we're on line below the edited item (Enter moved us down)
 				// Move back up to the edited line (we're 1 below it after Enter)
@@ -366,16 +360,14 @@ func PromptYesNo(prompt string, defaultYes bool) bool {
 func PromptPassword(prompt string) string {
 	fmt.Print(prompt)
 
-	// Try to use terminal password input
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		password, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Println() // New line after hidden input
+	if term.IsTerminal(syscall.Stdin) {
+		password, err := term.ReadPassword(syscall.Stdin)
+		fmt.Println()
 		if err == nil {
 			return strings.TrimSpace(string(password))
 		}
 	}
 
-	// Fall back to regular input
 	reader := bufio.NewReader(os.Stdin)
 	input, _ := reader.ReadString('\n')
 	return strings.TrimSpace(input)

@@ -196,8 +196,8 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 			apiEndpoint = strings.Replace(apiEndpoint, "::SCHEME::", "://", 1)
 		}
 	}
-	if cfg.Pipes.ToolOutput.API.APIKey != "" {
-		apiKey = cfg.Pipes.ToolOutput.API.APIKey
+	if cfg.Pipes.ToolOutput.API.APISecret != "" {
+		apiKey = cfg.Pipes.ToolOutput.API.APISecret
 	}
 	if cfg.Pipes.ToolOutput.API.Model != "" {
 		apiModel = cfg.Pipes.ToolOutput.API.Model

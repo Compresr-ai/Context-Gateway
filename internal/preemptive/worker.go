@@ -58,6 +58,7 @@ type Worker struct {
 	sessions         *SessionManager
 	summarizerCfg    SummarizerConfig
 	triggerThreshold float64
+	jobRetention     time.Duration
 
 	jobs     map[string]*Job
 	jobQueue chan *Job
@@ -69,11 +70,13 @@ type Worker struct {
 
 // NewWorker creates a new background worker.
 func NewWorker(summarizer *Summarizer, sessions *SessionManager, cfg SummarizerConfig, triggerThreshold float64) *Worker {
+	const defaultJobRetention = 30 * time.Minute
 	return &Worker{
 		summarizer:       summarizer,
 		sessions:         sessions,
 		summarizerCfg:    cfg,
 		triggerThreshold: triggerThreshold,
+		jobRetention:     defaultJobRetention,
 		jobs:             make(map[string]*Job),
 		jobQueue:         make(chan *Job, 100),
 		stopChan:         make(chan struct{}),
@@ -95,6 +98,8 @@ func (w *Worker) Start() {
 		w.wg.Add(1)
 		go w.processJobs(i)
 	}
+	w.wg.Add(1)
+	go w.cleanupJobsLoop()
 }
 
 // Stop stops all workers.
@@ -260,7 +265,50 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		}
 	}
 
+	// Release large request payloads once summarization finishes.
+	job.Messages = nil
+
 	close(job.done)
+}
+
+// cleanupJobsLoop removes old terminal jobs to keep memory bounded.
+func (w *Worker) cleanupJobsLoop() {
+	defer w.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.stopChan:
+			return
+		case <-ticker.C:
+			w.cleanupJobs()
+		}
+	}
+}
+
+func (w *Worker) cleanupJobs() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	now := time.Now()
+	for id, job := range w.jobs {
+		if job == nil {
+			delete(w.jobs, id)
+			continue
+		}
+		switch job.Status {
+		case JobCompleted, JobFailed, JobCancelled:
+			ref := job.CompletedAt
+			if ref == nil {
+				ref = &job.CreatedAt
+			}
+			if ref != nil && now.Sub(*ref) > w.jobRetention {
+				delete(w.jobs, id)
+			}
+		}
+	}
 }
 
 // Stats returns worker statistics.

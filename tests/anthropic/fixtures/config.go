@@ -130,23 +130,21 @@ func TestStore() store.Store {
 	return store.NewMemoryStore(5 * time.Minute)
 }
 
-// PreloadedStore creates a store with pre-loaded data
 func PreloadedStore(entries map[string]string) store.Store {
 	st := store.NewMemoryStore(5 * time.Minute)
 	for k, v := range entries {
-		st.Set(k, v)
+		_ = st.Set(k, v)
 	}
 	return st
 }
 
-// PreloadedStoreWithCompressed creates a store with pre-loaded original and compressed data
 func PreloadedStoreWithCompressed(original, compressed map[string]string) store.Store {
 	st := store.NewMemoryStore(5 * time.Minute)
 	for k, v := range original {
-		st.Set(k, v)
+		_ = st.Set(k, v)
 	}
 	for k, v := range compressed {
-		st.SetCompressed(k, v)
+		_ = st.SetCompressed(k, v)
 	}
 	return st
 }

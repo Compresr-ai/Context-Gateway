@@ -815,10 +815,10 @@ func compressionConfigOpenAI() *config.Config {
 				IncludeExpandHint:   true,
 				EnableExpandContext: true,
 				API: config.APIConfig{
-					Endpoint: os.Getenv("COMPRESR_API_URL") + "/api/compress/tool-output",
-					APIKey:   os.Getenv("COMPRESR_API_KEY"),
-					Model:    "tool_output_openai",
-					Timeout:  30 * time.Second,
+					Endpoint:  os.Getenv("COMPRESR_API_URL") + "/api/compress/tool-output",
+					APISecret: os.Getenv("COMPRESR_API_KEY"),
+					Model:     "tool_output_openai",
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

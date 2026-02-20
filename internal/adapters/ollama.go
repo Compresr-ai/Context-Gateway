@@ -64,5 +64,35 @@ func (a *OllamaAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 	return a.OpenAIAdapter.ExtractUsage(responseBody)
 }
 
-// Ensure OllamaAdapter implements Adapter
+// =============================================================================
+// PARSED REQUEST ADAPTER - Delegate to OpenAI
+// =============================================================================
+
+// ParseRequest parses the request body once for reuse.
+func (a *OllamaAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
+	return a.OpenAIAdapter.ParseRequest(body)
+}
+
+// ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
+func (a *OllamaAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
+	return a.OpenAIAdapter.ExtractToolDiscoveryFromParsed(parsed, opts)
+}
+
+// ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
+func (a *OllamaAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) string {
+	return a.OpenAIAdapter.ExtractUserQueryFromParsed(parsed)
+}
+
+// ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
+func (a *OllamaAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
+	return a.OpenAIAdapter.ExtractToolOutputFromParsed(parsed)
+}
+
+// ApplyToolDiscoveryToParsed filters tools and returns modified body.
+func (a *OllamaAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
+	return a.OpenAIAdapter.ApplyToolDiscoveryToParsed(parsed, results)
+}
+
+// Ensure OllamaAdapter implements Adapter and ParsedRequestAdapter
 var _ Adapter = (*OllamaAdapter)(nil)
+var _ ParsedRequestAdapter = (*OllamaAdapter)(nil)

@@ -79,8 +79,7 @@ func setupAnthropicAPIKey(agentName string) bool {
 	scope := promptCredentialScope("Save API key for")
 	persistCredential("ANTHROPIC_API_KEY", apiKey, scope)
 
-	// Set for current session regardless
-	os.Setenv("ANTHROPIC_API_KEY", apiKey)
+	_ = os.Setenv("ANTHROPIC_API_KEY", apiKey)
 	printSuccess("API key configured")
 
 	return true
@@ -179,8 +178,7 @@ func promptSlackCredentials() SlackConfig {
 	// Persist credential
 	persistCredential("SLACK_WEBHOOK_URL", webhookURL, scope)
 
-	// Set for current session
-	os.Setenv("SLACK_WEBHOOK_URL", webhookURL)
+	_ = os.Setenv("SLACK_WEBHOOK_URL", webhookURL)
 
 	config.Enabled = true
 	config.WebhookURL = webhookURL
@@ -195,11 +193,11 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", url) // #nosec G204 -- opening URL in browser is intentional
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", url) // #nosec G204 -- opening URL in browser is intentional
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		cmd = exec.Command("cmd", "/c", "start", url) // #nosec G204 -- opening URL in browser is intentional
 	default:
 		fmt.Printf("  Please open: %s\n", url)
 		return
@@ -231,7 +229,6 @@ func installClaudeCodeHooks() error {
 		return fmt.Errorf("failed to read embedded hook script: %w", err)
 	}
 
-	// #nosec G306 -- hook script needs to be executable
 	if err := os.WriteFile(hookScript, scriptData, 0700); err != nil {
 		return fmt.Errorf("failed to write hook script: %w", err)
 	}
@@ -412,10 +409,9 @@ func appendToEnvFile(envPath, key, value string) {
 				lines = append(lines, line)
 			}
 		}
-		file.Close()
+		_ = file.Close()
 	}
 
-	// Append if not found
 	if !found {
 		lines = append(lines, fmt.Sprintf("%s=%s", key, value))
 	}

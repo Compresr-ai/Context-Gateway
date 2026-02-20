@@ -1,0 +1,57 @@
+# Test config: cost control with tiny cap to trigger budget exceeded quickly
+
+metadata:
+  name: "Cost Control Test"
+  description: "Testing cost control feature"
+  strategy: "passthrough"
+
+server:
+  port: 18081
+  read_timeout: 30s
+  write_timeout: 1000s
+
+urls:
+  gateway: "http://localhost:18081"
+
+providers:
+  anthropic:
+    api_key: "${ANTHROPIC_API_KEY:-}"
+    model: "claude-haiku-4-5"
+
+preemptive:
+  enabled: true
+  trigger_threshold: 85.0
+  add_response_headers: true
+  log_dir: "logs"
+  compaction_log_path: "logs/compaction.jsonl"
+  summarizer:
+    provider: "anthropic"
+    max_tokens: 4096
+    timeout: 60s
+    token_estimate_ratio: 4
+  session:
+    summary_ttl: 3h
+    hash_message_count: 3
+
+cost_control:
+  enabled: true
+  session_cap: 0       # no per-session limit
+  global_cap: 0.001    # $0.001 global — should block after 1 request
+
+pipes:
+  tool_output:
+    enabled: false
+  tool_discovery:
+    enabled: false
+
+store:
+  type: "memory"
+  ttl: 1h
+
+monitoring:
+  log_level: "info"
+  log_format: "console"
+  log_output: "stdout"
+  telemetry_enabled: true
+  telemetry_path: "logs/telemetry.jsonl"
+  compression_log_path: "logs/compression.jsonl"

@@ -60,7 +60,7 @@ type SummarizerConfig struct {
 
 	// Inline settings (used if Provider is not set, or for overrides)
 	Model              string        `yaml:"model"`
-	APIKey             string        `yaml:"api_key"`
+	APISecret          string        `yaml:"api_key"`
 	Endpoint           string        `yaml:"endpoint"`
 	MaxTokens          int           `yaml:"max_tokens"`
 	Timeout            time.Duration `yaml:"timeout"`

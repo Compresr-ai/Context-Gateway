@@ -19,12 +19,15 @@ import (
 
 // Tracker handles telemetry event recording to file and stdout.
 type Tracker struct {
-	config             TelemetryConfig
-	requestLogPath     string
-	compressionLogPath string
-	requestCount       int
-	compressionCount   int
-	mu                 sync.Mutex
+	config               TelemetryConfig
+	requestLogPath       string
+	compressionLogPath   string
+	toolDiscoveryLogPath string
+	initLogPath          string
+	requestCount         int
+	compressionCount     int
+	toolDiscoveryCount   int
+	mu                   sync.Mutex
 }
 
 // NewTracker creates a new telemetry tracker.
@@ -43,10 +46,16 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 			return nil, err
 		}
 		t.requestLogPath = cfg.LogPath
+		t.initLogPath = filepath.Join(filepath.Dir(cfg.LogPath), "init.jsonl")
 		// Create empty file if it doesn't exist
 		if _, err := os.Stat(cfg.LogPath); os.IsNotExist(err) {
 			if f, err := os.Create(cfg.LogPath); err == nil {
-				f.Close()
+				_ = f.Close()
+			}
+		}
+		if _, err := os.Stat(t.initLogPath); os.IsNotExist(err) {
+			if f, err := os.Create(t.initLogPath); err == nil {
+				_ = f.Close()
 			}
 		}
 	}
@@ -59,7 +68,20 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 		// Create empty file if it doesn't exist
 		if _, err := os.Stat(cfg.CompressionLogPath); os.IsNotExist(err) {
 			if f, err := os.Create(cfg.CompressionLogPath); err == nil {
-				f.Close()
+				_ = f.Close()
+			}
+		}
+	}
+
+	if cfg.ToolDiscoveryLogPath != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.ToolDiscoveryLogPath), 0750); err != nil {
+			return nil, err
+		}
+		t.toolDiscoveryLogPath = cfg.ToolDiscoveryLogPath
+		// Create empty file if it doesn't exist
+		if _, err := os.Stat(cfg.ToolDiscoveryLogPath); os.IsNotExist(err) {
+			if f, err := os.Create(cfg.ToolDiscoveryLogPath); err == nil {
+				_ = f.Close()
 			}
 		}
 	}
@@ -79,7 +101,7 @@ func appendJSONL(path string, event any) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	_, err = f.Write(data)
 	return err
@@ -118,6 +140,20 @@ func (t *Tracker) RecordRequest(event *RequestEvent) {
 	}
 }
 
+// RecordInit records a gateway initialization event to a dedicated init JSONL.
+func (t *Tracker) RecordInit(event *InitEvent) {
+	if !t.config.Enabled || t.initLogPath == "" || event == nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := appendJSONL(t.initLogPath, event); err != nil {
+		log.Error().Err(err).Str("path", t.initLogPath).Msg("telemetry: failed to write init event")
+	}
+}
+
 // RecordExpand records an expand_context call.
 func (t *Tracker) RecordExpand(event *ExpandEvent) {
 	if !t.config.Enabled {
@@ -142,6 +178,11 @@ func (t *Tracker) CompressionLogEnabled() bool {
 	return t.config.Enabled && t.compressionLogPath != ""
 }
 
+// ToolDiscoveryLogEnabled returns true if tool discovery logging is enabled.
+func (t *Tracker) ToolDiscoveryLogEnabled() bool {
+	return t.config.Enabled && t.toolDiscoveryLogPath != ""
+}
+
 // LogCompressionComparison logs a compression comparison for debugging.
 func (t *Tracker) LogCompressionComparison(comparison CompressionComparison) {
 	if !t.CompressionLogEnabled() {
@@ -156,6 +197,22 @@ func (t *Tracker) LogCompressionComparison(comparison CompressionComparison) {
 		log.Error().Err(err).Str("path", t.compressionLogPath).Msg("telemetry: failed to write compression event")
 	} else {
 		t.compressionCount++
+	}
+}
+
+// LogToolDiscoveryComparison logs a tool discovery comparison to a dedicated log.
+func (t *Tracker) LogToolDiscoveryComparison(comparison CompressionComparison) {
+	if !t.ToolDiscoveryLogEnabled() {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := appendJSONL(t.toolDiscoveryLogPath, comparison); err != nil {
+		log.Error().Err(err).Str("path", t.toolDiscoveryLogPath).Msg("telemetry: failed to write tool discovery event")
+	} else {
+		t.toolDiscoveryCount++
 	}
 }
 

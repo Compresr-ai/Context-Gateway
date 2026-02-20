@@ -19,8 +19,8 @@ agent:
       value: "${OPENAI_API_KEY}"
 
   command:
-    check: "command -v opencode &> /dev/null"
+    check_cmd: ["command", "-v", "opencode"]
     run: "opencode"
     args: []
-    install: "go install github.com/opencode-ai/opencode@latest"
+    install_cmd: ["go", "install", "github.com/opencode-ai/opencode@latest"]
     fallback_message: "OpenCode not found. Install with: go install github.com/opencode-ai/opencode@latest"

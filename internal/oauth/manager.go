@@ -57,10 +57,10 @@ func (m *TokenManager) Initialize() error {
 
 	// Refresh if needed
 	if creds.NeedsRefresh() {
-		if creds.RefreshToken == "" {
+		if creds.RefreshCredential == "" {
 			return fmt.Errorf("OAuth token expired and no refresh token available")
 		}
-		refreshed, err := RefreshAccessToken(creds.RefreshToken)
+		refreshed, err := RefreshAccessToken(creds.RefreshCredential)
 		if err != nil {
 			return fmt.Errorf("failed to refresh OAuth token: %w", err)
 		}
@@ -75,7 +75,7 @@ func (m *TokenManager) Initialize() error {
 func (m *TokenManager) HasCredentials() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.credentials != nil && m.credentials.AccessToken != ""
+	return m.credentials != nil && m.credentials.AccessCredential != ""
 }
 
 // GetAccessToken returns the current access token.
@@ -87,7 +87,7 @@ func (m *TokenManager) GetAccessToken() string {
 	if m.credentials == nil {
 		return ""
 	}
-	return m.credentials.AccessToken
+	return m.credentials.AccessCredential
 }
 
 // GetCredentials returns a copy of the current credentials.
@@ -160,11 +160,11 @@ func (m *TokenManager) refreshIfNeeded() {
 		return
 	}
 
-	if creds.RefreshToken == "" {
+	if creds.RefreshCredential == "" {
 		return
 	}
 
-	refreshed, err := RefreshAccessToken(creds.RefreshToken)
+	refreshed, err := RefreshAccessToken(creds.RefreshCredential)
 	if err != nil {
 		// Log error but continue - we'll try again next tick
 		fmt.Printf("[oauth] Background refresh failed: %v\n", err)
@@ -182,11 +182,11 @@ func (m *TokenManager) ForceRefresh() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.credentials == nil || m.credentials.RefreshToken == "" {
+	if m.credentials == nil || m.credentials.RefreshCredential == "" {
 		return fmt.Errorf("no refresh token available")
 	}
 
-	refreshed, err := RefreshAccessToken(m.credentials.RefreshToken)
+	refreshed, err := RefreshAccessToken(m.credentials.RefreshCredential)
 	if err != nil {
 		return err
 	}

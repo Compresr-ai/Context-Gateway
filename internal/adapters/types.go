@@ -131,7 +131,47 @@ func ProviderFromString(s string) Provider {
 
 // UsageInfo holds token usage extracted from API response.
 type UsageInfo struct {
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
+	InputTokens              int
+	OutputTokens             int
+	TotalTokens              int
+	CacheCreationInputTokens int // Anthropic: tokens written to cache (1.25x input price)
+	CacheReadInputTokens     int // Anthropic: tokens read from cache (0.1x input price)
+}
+
+// =============================================================================
+// PARSED REQUEST - Single-parse optimization for tool discovery
+// =============================================================================
+
+// ParsedRequest holds a pre-parsed request body to avoid repeated JSON parsing.
+// This is an optimization for tool discovery which needs to extract multiple
+// pieces of information (tools, user query, tool outputs) from the same body.
+type ParsedRequest struct {
+	// Raw is the underlying parsed structure (provider-specific type)
+	Raw any
+
+	// Messages is the parsed messages array (provider-specific format)
+	Messages []any
+
+	// Tools is the parsed tools array (provider-specific format)
+	Tools []any
+}
+
+// ParsedRequestAdapter is an optional interface for adapters that support
+// single-parse optimization. Adapters implementing this can parse once and
+// extract multiple times, avoiding repeated JSON unmarshaling.
+type ParsedRequestAdapter interface {
+	// ParseRequest parses the request body once for reuse.
+	ParseRequest(body []byte) (*ParsedRequest, error)
+
+	// ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
+	ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error)
+
+	// ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
+	ExtractUserQueryFromParsed(parsed *ParsedRequest) string
+
+	// ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
+	ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error)
+
+	// ApplyToolDiscoveryToParsed filters tools and returns modified body.
+	ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error)
 }

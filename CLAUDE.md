@@ -113,10 +113,10 @@ Client → Gateway:8080
 ## Config Files
 
 - `configs/preemptive_summarization.yaml` — **Default production config**. Preemptive summarization only, compression pipes disabled.
-- `configs/tool_output_passthrough.yaml` — No compression, pure proxy
-- `configs/tool_output_compresr_api_0.5.yaml` — API compression via Compresr service
-- `configs/tool_output_reranker_api.yaml` — Reranker-based compression
-- `configs/templates/` — Templates for all pipe types
+- `configs/oauth_example.yaml` — OAuth configuration for Max/Pro subscribers (uses captured Bearer tokens)
+- `configs/test_1pct_threshold.yaml` — Testing config with low trigger threshold
+- `configs/test_cost_control.yaml` — Testing config with cost control enabled
+- `configs/external_providers.yaml` — LLM provider definitions for TUI wizard (not a proxy config)
 
 Environment variables in configs use `${VAR:-default}` syntax. Session log paths are injected via env vars (`SESSION_TELEMETRY_LOG`, `SESSION_TRAJECTORY_LOG`, etc.).
 
@@ -152,6 +152,7 @@ Session logs go to `logs/session_<n>_<date>/`:
 - `trajectory.json` — ATIF v1.6 format, agent trajectory
 - `telemetry.jsonl` — Per-request proxy telemetry
 - `compression.jsonl` — Per-tool compression details
+- `tool_discovery.jsonl` — Tool discovery filtering details
 - `compaction.jsonl` — Preemptive summarization events
 - `summary.json` — End-of-session aggregate
 - `gateway.log` — Server runtime logs

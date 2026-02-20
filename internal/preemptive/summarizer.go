@@ -57,8 +57,8 @@ func (s *Summarizer) SetEndpoint(endpoint string) {
 // getAuthToken returns the best available auth token and whether to use x-api-key header.
 func (s *Summarizer) getAuthToken() (string, bool) {
 	// Priority 1: Configured API key (always use x-api-key)
-	if s.config.APIKey != "" {
-		return s.config.APIKey, true
+	if s.config.APISecret != "" {
+		return s.config.APISecret, true
 	}
 	// Priority 2: Captured from request - mirror original header format
 	s.authMutex.RLock()
@@ -70,7 +70,7 @@ func (s *Summarizer) getAuthToken() (string, bool) {
 func (s *Summarizer) getEndpoint() string {
 	// When using captured auth (no configured API key), prefer captured endpoint
 	// because OAuth tokens are only valid for the endpoint they were issued for
-	if s.config.APIKey == "" {
+	if s.config.APISecret == "" {
 		s.authMutex.RLock()
 		captured := s.capturedEndpoint
 		s.authMutex.RUnlock()
@@ -263,7 +263,7 @@ func (s *Summarizer) callAPI(ctx context.Context, systemPrompt, userContent stri
 	authToken, _ := s.getAuthToken()
 
 	// Use configured API key if available, otherwise use captured auth
-	apiKey := s.config.APIKey
+	apiKey := s.config.APISecret
 	if apiKey == "" {
 		apiKey = authToken
 	}
@@ -271,7 +271,7 @@ func (s *Summarizer) callAPI(ctx context.Context, systemPrompt, userContent stri
 	params := external.CallLLMParams{
 		Provider:     s.config.Provider,
 		Endpoint:     endpoint,
-		APIKey:       apiKey,
+		APISecret:    apiKey,
 		Model:        s.config.Model,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userContent,
