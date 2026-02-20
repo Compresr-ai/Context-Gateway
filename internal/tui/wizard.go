@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 
 	"golang.org/x/term"
 )
@@ -60,15 +59,15 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 		return nil, fmt.Errorf("all fields skipped")
 	}
 
-	if !term.IsTerminal(syscall.Stdin) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return runWizardFallback(title, activeFields)
 	}
 
-	oldState, err := term.MakeRaw(syscall.Stdin)
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		return runWizardFallback(title, activeFields)
 	}
-	defer func() { _ = term.Restore(syscall.Stdin, oldState) }()
+	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
 
 	current := 0 // Current field index
 	editing := false
@@ -285,13 +284,13 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 					renderEditOptions(f.Options, editSelected)
 				case FieldTypeText, FieldTypePassword:
 					fmt.Print("\033[?25h")
-					_ = term.Restore(syscall.Stdin, oldState)
+					_ = term.Restore(int(os.Stdin.Fd()), oldState)
 
 					prompt := fmt.Sprintf("\n  %s: ", f.Label)
 					var val string
 					if f.Type == FieldTypePassword {
 						fmt.Print(prompt)
-						password, _ := term.ReadPassword(syscall.Stdin)
+						password, _ := term.ReadPassword(int(os.Stdin.Fd()))
 						val = strings.TrimSpace(string(password))
 						fmt.Println()
 					} else {
@@ -303,7 +302,7 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 					f.Value = val
 
 					// Re-enter raw mode
-					oldState, _ = term.MakeRaw(syscall.Stdin)
+					oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
 					fmt.Print("\033[?25l") // Hide cursor
 					if current < len(activeFields)-1 {
 						current++
@@ -372,8 +371,8 @@ func runWizardFallback(title string, fields []WizardField) (*WizardResult, error
 				result.Values[f.ID] = 0
 			}
 		case FieldTypePassword:
-			if term.IsTerminal(syscall.Stdin) {
-				password, _ := term.ReadPassword(syscall.Stdin)
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				password, _ := term.ReadPassword(int(os.Stdin.Fd()))
 				result.Values[f.ID] = strings.TrimSpace(string(password))
 				fmt.Println()
 			} else {

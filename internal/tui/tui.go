@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 
 	"golang.org/x/term"
 )
@@ -114,15 +113,15 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 		return -1, fmt.Errorf("no items to select")
 	}
 
-	if !term.IsTerminal(syscall.Stdin) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return selectNumberedMenu(prompt, items)
 	}
 
-	oldState, err := term.MakeRaw(syscall.Stdin)
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		return selectNumberedMenu(prompt, items)
 	}
-	defer func() { _ = term.Restore(syscall.Stdin, oldState) }()
+	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
 
 	selected := 0
 	reader := bufio.NewReader(os.Stdin)
@@ -235,7 +234,7 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 				fmt.Printf("\033[%dA", linesUp)
 				fmt.Print("\033[2K\r")
 
-				_ = term.Restore(syscall.Stdin, oldState)
+				_ = term.Restore(int(os.Stdin.Fd()), oldState)
 				fmt.Print("\033[?25h")
 
 				// Show editable line with cursor after dash
@@ -249,7 +248,7 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 					items[selected].Description = input
 				}
 
-				oldState, _ = term.MakeRaw(syscall.Stdin)
+				oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
 				fmt.Print("\033[?25l")
 
 				// Now we're on line below the edited item (Enter moved us down)
@@ -360,8 +359,8 @@ func PromptYesNo(prompt string, defaultYes bool) bool {
 func PromptPassword(prompt string) string {
 	fmt.Print(prompt)
 
-	if term.IsTerminal(syscall.Stdin) {
-		password, err := term.ReadPassword(syscall.Stdin)
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		password, err := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Println()
 		if err == nil {
 			return strings.TrimSpace(string(password))
