@@ -47,6 +47,7 @@ type rateLimiter struct {
 	mu         sync.RWMutex
 	rate       int
 	maxBuckets int
+	stopCh     chan struct{}
 }
 
 // bucket holds rate limiting state for a single IP.
@@ -57,7 +58,12 @@ type bucket struct {
 
 // newRateLimiter creates a new rate limiter with the specified rate per second.
 func newRateLimiter(rate int) *rateLimiter {
-	rl := &rateLimiter{requests: make(map[string]*bucket), rate: rate, maxBuckets: MaxRateLimitBuckets}
+	rl := &rateLimiter{
+		requests:   make(map[string]*bucket),
+		rate:       rate,
+		maxBuckets: MaxRateLimitBuckets,
+		stopCh:     make(chan struct{}),
+	}
 	// Start cleanup goroutine
 	go rl.cleanup()
 	return rl
@@ -112,18 +118,28 @@ func (rl *rateLimiter) evictOldest() {
 
 // cleanup periodically removes stale buckets.
 func (rl *rateLimiter) cleanup() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(DefaultCleanupInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		rl.mu.Lock()
-		cutoff := time.Now().Add(-10 * time.Minute)
-		for ip, b := range rl.requests {
-			if b.lastCheck.Before(cutoff) {
-				delete(rl.requests, ip)
+	for {
+		select {
+		case <-rl.stopCh:
+			return
+		case <-ticker.C:
+			rl.mu.Lock()
+			cutoff := time.Now().Add(-DefaultStaleTimeout)
+			for ip, b := range rl.requests {
+				if b.lastCheck.Before(cutoff) {
+					delete(rl.requests, ip)
+				}
 			}
+			rl.mu.Unlock()
 		}
-		rl.mu.Unlock()
 	}
+}
+
+// Stop stops the cleanup goroutine.
+func (rl *rateLimiter) Stop() {
+	close(rl.stopCh)
 }
 
 // loggingMiddleware logs request details and duration using the structured logging system.

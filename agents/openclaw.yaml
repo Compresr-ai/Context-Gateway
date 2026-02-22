@@ -48,7 +48,7 @@ agent:
       value: "http://localhost:${GATEWAY_PORT}"
 
   command:
-    check_cmd: ["command", "-v", "openclaw"]
+    check_cmd: ["which", "openclaw"]
     run: "openclaw"
     args: ["tui", "--token", "localdev"]
     # pre_run is handled by start_agent.sh which creates the config with selected model

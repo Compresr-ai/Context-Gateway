@@ -174,7 +174,7 @@ func (p *ExternalProvider) doRequest(url string, body []byte, sourceProvider str
 
 	// Make request
 	startTime := time.Now()
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.httpClient.Do(httpReq) // #nosec G704 -- external API endpoint is explicitly configured by operator
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -226,7 +226,7 @@ func (p *ExternalProvider) HealthCheck() error {
 		return fmt.Errorf("failed to create health check request: %w", err)
 	}
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.httpClient.Do(req) // #nosec G704 -- health-check target is explicitly configured by operator
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
 	}

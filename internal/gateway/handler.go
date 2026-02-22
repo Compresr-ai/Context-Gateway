@@ -29,6 +29,7 @@ import (
 	"github.com/compresr/context-gateway/internal/monitoring"
 	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 	"github.com/compresr/context-gateway/internal/preemptive"
+	"github.com/compresr/context-gateway/internal/utils"
 )
 
 type forwardAuthMeta struct {
@@ -50,17 +51,6 @@ func mergeForwardAuthMeta(dst *forwardAuthMeta, src forwardAuthMeta) {
 	if src.FallbackUsed {
 		dst.FallbackUsed = true
 	}
-}
-
-// maskKey masks an API key for logging (shows first 8 and last 4 chars).
-func maskKey(key string) string {
-	if key == "" {
-		return "(empty)"
-	}
-	if len(key) < 16 {
-		return "***"
-	}
-	return key[:8] + "..." + key[len(key)-4:]
 }
 
 // sanitizeModelName strips provider prefixes from model names in request body.
@@ -259,10 +249,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if g.preemptive != nil {
 		// Capture auth token for summarizer (allows Max/Pro users without explicit API key)
 		if auth := r.Header.Get("x-api-key"); auth != "" {
-			log.Debug().Str("auth_type", "x-api-key").Str("auth", maskKey(auth)).Msg("Captured auth for summarizer")
+			log.Debug().Str("auth_type", "x-api-key").Str("auth", utils.MaskKey(auth)).Msg("Captured auth for summarizer")
 			g.preemptive.SetAuthToken(auth, true) // from x-api-key header
 		} else if auth := r.Header.Get("Authorization"); auth != "" {
-			log.Debug().Str("auth_type", "Authorization").Str("auth", maskKey(auth)).Msg("Captured auth for summarizer")
+			log.Debug().Str("auth_type", "Authorization").Str("auth", utils.MaskKey(auth)).Msg("Captured auth for summarizer")
 			g.preemptive.SetAuthToken(strings.TrimPrefix(auth, "Bearer "), false) // from Authorization header
 		}
 		// Capture upstream endpoint URL for summarizer (same logic as forwardPassthrough)
@@ -628,7 +618,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 	var bufferedChunks [][]byte
 
 	// Read and buffer the entire stream
-	buf := make([]byte, 4096)
+	buf := make([]byte, DefaultBufferSize)
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
@@ -753,7 +743,7 @@ func (g *Gateway) streamResponseWithFilter(w http.ResponseWriter, reader io.Read
 	}
 
 	streamBuffer := tooloutput.NewStreamBuffer()
-	buf := make([]byte, 4096)
+	buf := make([]byte, DefaultBufferSize)
 
 	for {
 		n, err := reader.Read(buf)
@@ -786,7 +776,7 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, reader io.Reader) adapte
 
 	usageParser := newSSEUsageParser()
 
-	buf := make([]byte, 4096)
+	buf := make([]byte, DefaultBufferSize)
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
@@ -833,7 +823,7 @@ type sseUsageParser struct {
 
 func newSSEUsageParser() *sseUsageParser {
 	return &sseUsageParser{
-		buffer: make([]byte, 0, 4096),
+		buffer: make([]byte, 0, DefaultBufferSize),
 	}
 }
 
@@ -1017,8 +1007,8 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 	log.Info().
 		Str("targetURL", targetURL).
 		Bool("bedrock", isBedrock).
-		Str("x-api-key", maskKey(r.Header.Get("x-api-key"))).
-		Str("authorization", maskKey(r.Header.Get("Authorization"))).
+		Str("x-api-key", utils.MaskKey(r.Header.Get("x-api-key"))).
+		Str("authorization", utils.MaskKey(r.Header.Get("Authorization"))).
 		Msg("forwarding request")
 
 	parsedURL, err := url.Parse(targetURL)
@@ -1079,7 +1069,6 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 		} else {
 			authMeta.EffectiveMode = authMeta.InitialMode
 		}
-
 		resp, doErr := g.httpClient.Do(httpReq)
 		if doErr != nil {
 			log.Error().Err(doErr).Str("targetURL", targetURL).Msg("upstream request failed")

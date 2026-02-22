@@ -32,14 +32,23 @@ import (
 	"github.com/compresr/context-gateway/internal/store"
 )
 
+// Header constants for gateway requests.
 const (
-	MaxRequestBodySize         = 50 * 1024 * 1024
 	HeaderRequestID            = "X-Request-ID"
 	HeaderTargetURL            = "X-Target-URL"
 	HeaderProvider             = "X-Provider"
 	HeaderCompressionThreshold = "X-Compression-Threshold" // User-selectable: off, 256, 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k
-	DefaultRateLimit           = 100
-	MaxRateLimitBuckets        = 10000 // Prevent memory exhaustion
+)
+
+// Re-export centralized defaults for backward compatibility within this package.
+const (
+	MaxRequestBodySize     = config.MaxRequestBodySize
+	DefaultRateLimit       = config.DefaultRateLimit
+	MaxRateLimitBuckets    = config.MaxRateLimitBuckets
+	DefaultBufferSize      = config.DefaultBufferSize
+	DefaultCleanupInterval = config.DefaultCleanupInterval
+	DefaultDialTimeout     = config.DefaultDialTimeout
+	DefaultStaleTimeout    = config.DefaultStaleTimeout
 )
 
 // allowedHosts contains the approved LLM provider domains for SSRF protection.
@@ -81,11 +90,18 @@ var allowedHosts = map[string]bool{
 func init() {
 	// Allow additional hosts via environment variable
 	if extra := os.Getenv("GATEWAY_ALLOWED_HOSTS"); extra != "" {
+		var addedHosts []string
 		for _, host := range strings.Split(extra, ",") {
 			host = strings.TrimSpace(strings.ToLower(host))
 			if host != "" {
 				allowedHosts[host] = true
+				addedHosts = append(addedHosts, host)
 			}
+		}
+		if len(addedHosts) > 0 {
+			log.Info().
+				Strs("hosts", addedHosts).
+				Msg("SSRF allowlist extended via GATEWAY_ALLOWED_HOSTS")
 		}
 	}
 }
@@ -294,6 +310,14 @@ func (g *Gateway) Handler() http.Handler {
 // Shutdown gracefully shuts down the gateway.
 func (g *Gateway) Shutdown(ctx context.Context) error {
 	log.Info().Msg("gateway shutting down")
+
+	// Stop cleanup goroutines
+	if g.rateLimiter != nil {
+		g.rateLimiter.Stop()
+	}
+	if g.authMode != nil {
+		g.authMode.Stop()
+	}
 
 	// Stop preemptive summarization manager
 	if g.preemptive != nil {

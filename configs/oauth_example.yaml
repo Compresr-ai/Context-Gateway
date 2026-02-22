@@ -53,6 +53,13 @@ preemptive:
   
   summarizer:
     provider: "anthropic"  # Uses OAuth from captured Bearer token
+    max_tokens: 4096
+    timeout: 60s
+    token_estimate_ratio: 4
+
+  session:
+    summary_ttl: 3h
+    hash_message_count: 3
 
 # =============================================================================
 # COMPRESSION PIPES (Optional)

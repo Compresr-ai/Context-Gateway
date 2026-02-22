@@ -131,7 +131,7 @@ func loadAgentConfig(name string) (*AgentConfig, []byte, error) {
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
 		overridePath := filepath.Join(homeDir, ".config", "context-gateway", "agents", name+".yaml")
-
+		// #nosec G304,G703 -- path is constructed from internal agent override directory and normalized name
 		if data, err := os.ReadFile(overridePath); err == nil {
 			ac, err := parseAgentConfig(data)
 			return ac, data, err
@@ -140,7 +140,7 @@ func loadAgentConfig(name string) (*AgentConfig, []byte, error) {
 
 	// Check local agents directory
 	localPath := filepath.Join("agents", name+".yaml")
-
+	// #nosec G304,G703 -- path is constructed from local agents directory and normalized name
 	if data, err := os.ReadFile(localPath); err == nil {
 		ac, err := parseAgentConfig(data)
 		return ac, data, err

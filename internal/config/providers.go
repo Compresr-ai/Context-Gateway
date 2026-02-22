@@ -132,7 +132,7 @@ func (cfg *Config) ValidateUsedProviders() error {
 type ResolvedProvider struct {
 	Provider string // Provider name (anthropic, gemini, openai)
 	Endpoint string
-	APIKey   string
+	APIKey   string // Resolved credential field
 	Auth     string // Auth method: "api_key", "oauth", or "bedrock"
 	Model    string
 }

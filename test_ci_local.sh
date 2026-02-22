@@ -125,7 +125,7 @@ fi
 # Security (gosec) - if installed
 if command -v gosec &> /dev/null; then
     echo -e "${CYAN}▶ Security (gosec)${NC}"
-    if gosec -exclude-dir=tests -exclude=G104,G304 -quiet ./...; then
+    if gosec -exclude-dir=tests -quiet ./...; then
         echo -e "${GREEN}✓ Security scan passed${NC}"
     else
         echo -e "${RED}✗ Security scan failed${NC}"

@@ -14,7 +14,7 @@ agent:
       value: "${ANTHROPIC_API_KEY}"
 
   command:
-    check_cmd: ["command", "-v", "claude"]
+    check_cmd: ["which", "claude"]
     run: "claude"
     args: []
     install_cmd: ["npm", "install", "-g", "@anthropic-ai/claude-code"]

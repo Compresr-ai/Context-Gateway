@@ -19,6 +19,7 @@ type authFallbackStore struct {
 	mu       sync.RWMutex
 	sessions map[string]time.Time // session_id -> last fallback time
 	ttl      time.Duration
+	stopCh   chan struct{}
 }
 
 func newAuthFallbackStore(ttl time.Duration) *authFallbackStore {
@@ -28,6 +29,7 @@ func newAuthFallbackStore(ttl time.Duration) *authFallbackStore {
 	s := &authFallbackStore{
 		sessions: make(map[string]time.Time),
 		ttl:      ttl,
+		stopCh:   make(chan struct{}),
 	}
 	go s.cleanupLoop()
 	return s
@@ -62,11 +64,21 @@ func (s *authFallbackStore) ShouldUseAPIKeyMode(sessionID string) bool {
 }
 
 func (s *authFallbackStore) cleanupLoop() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(DefaultCleanupInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.cleanup()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.cleanup()
+		}
 	}
+}
+
+// Stop stops the cleanup goroutine.
+func (s *authFallbackStore) Stop() {
+	close(s.stopCh)
 }
 
 func (s *authFallbackStore) cleanup() {

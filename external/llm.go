@@ -47,7 +47,7 @@ type CallLLMParams struct {
 	Provider string
 
 	Endpoint     string
-	APISecret    string // API key (x-api-key for Anthropic, x-goog-api-key for Gemini)
+	APISecret    string
 	BearerAuth   string // OAuth token (Authorization: Bearer). Takes precedence over APISecret for Anthropic.
 	Model        string
 	SystemPrompt string

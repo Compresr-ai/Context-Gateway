@@ -20,7 +20,7 @@ agent:
       value: "${ANTHROPIC_API_KEY}"
 
   command:
-    check_cmd: ["command", "-v", "cursor"]
+    check_cmd: ["which", "cursor"]
     run: "cursor"
     args: ["."]
     install_cmd: []

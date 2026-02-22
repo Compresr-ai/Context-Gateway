@@ -49,12 +49,12 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 		t.initLogPath = filepath.Join(filepath.Dir(cfg.LogPath), "init.jsonl")
 		// Create empty file if it doesn't exist
 		if _, err := os.Stat(cfg.LogPath); os.IsNotExist(err) {
-			if f, err := os.Create(cfg.LogPath); err == nil {
+			if f, err := os.OpenFile(cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
 				_ = f.Close()
 			}
 		}
 		if _, err := os.Stat(t.initLogPath); os.IsNotExist(err) {
-			if f, err := os.Create(t.initLogPath); err == nil {
+			if f, err := os.OpenFile(t.initLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
 				_ = f.Close()
 			}
 		}
@@ -67,7 +67,7 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 		t.compressionLogPath = cfg.CompressionLogPath
 		// Create empty file if it doesn't exist
 		if _, err := os.Stat(cfg.CompressionLogPath); os.IsNotExist(err) {
-			if f, err := os.Create(cfg.CompressionLogPath); err == nil {
+			if f, err := os.OpenFile(cfg.CompressionLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
 				_ = f.Close()
 			}
 		}
@@ -80,7 +80,7 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 		t.toolDiscoveryLogPath = cfg.ToolDiscoveryLogPath
 		// Create empty file if it doesn't exist
 		if _, err := os.Stat(cfg.ToolDiscoveryLogPath); os.IsNotExist(err) {
-			if f, err := os.Create(cfg.ToolDiscoveryLogPath); err == nil {
+			if f, err := os.OpenFile(cfg.ToolDiscoveryLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
 				_ = f.Close()
 			}
 		}

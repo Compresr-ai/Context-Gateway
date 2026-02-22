@@ -54,18 +54,18 @@ type PipeContext struct {
 
 // ToolOutputCompression tracks individual tool output compression.
 type ToolOutputCompression struct {
-	ToolName          string
-	ToolCallID        string
-	ShadowID          string
-	OriginalContent   string
-	CompressedContent string
-	OriginalBytes     int
-	CompressedBytes   int
-	CacheHit          bool
-	IsLastTool        bool
-	MappingStatus     string // "hit", "miss", "compressed", "passthrough_small", "passthrough_large"
-	MinThreshold      int    // Min byte threshold used
-	MaxThreshold      int    // Max byte threshold used
+	ToolName          string `json:"tool_name"`
+	ToolCallID        string `json:"tool_call_id"`
+	ShadowID          string `json:"shadow_id"`
+	OriginalContent   string `json:"original_content"`
+	CompressedContent string `json:"compressed_content"`
+	OriginalBytes     int    `json:"original_bytes"`
+	CompressedBytes   int    `json:"compressed_bytes"`
+	CacheHit          bool   `json:"cache_hit"`
+	IsLastTool        bool   `json:"is_last_tool"`
+	MappingStatus     string `json:"mapping_status"` // "hit", "miss", "compressed", "passthrough_small", "passthrough_large"
+	MinThreshold      int    `json:"min_threshold"`  // Min byte threshold used
+	MaxThreshold      int    `json:"max_threshold"`  // Max byte threshold used
 }
 
 // NewPipeContext creates a new pipe context.

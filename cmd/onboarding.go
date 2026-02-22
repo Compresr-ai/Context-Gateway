@@ -98,45 +98,6 @@ type SlackConfig struct {
 	Scope      CredentialScope
 }
 
-// setupSlackNotifications interactively prompts for Slack notification setup.
-// Only called for claude_code agent. Returns the config (Enabled=false if skipped).
-// nolint:unused // Will be used in future Slack wizard integration
-func setupSlackNotifications() SlackConfig {
-	config := SlackConfig{Enabled: false}
-
-	// Check if already configured (webhook or bot token)
-	if os.Getenv("SLACK_WEBHOOK_URL") != "" {
-		if isSlackHookInstalled() {
-			printInfo("Slack notifications already configured (webhook)")
-			config.Enabled = true
-			config.WebhookURL = os.Getenv("SLACK_WEBHOOK_URL")
-			return config
-		}
-	} else if os.Getenv("SLACK_BOT_TOKEN") != "" && os.Getenv("SLACK_CHANNEL_ID") != "" {
-		if isSlackHookInstalled() {
-			printInfo("Slack notifications already configured (bot token)")
-			config.Enabled = true
-			config.BotToken = os.Getenv("SLACK_BOT_TOKEN")
-			config.ChannelID = os.Getenv("SLACK_CHANNEL_ID")
-			return config
-		}
-	}
-
-	fmt.Println()
-	printHeader("Slack Notifications (Optional)")
-	fmt.Println()
-	fmt.Println("  Get notified when Claude needs your input or finishes a task.")
-	fmt.Println()
-
-	// Ask if user wants Slack notifications
-	if !promptYesNo("Enable Slack notifications?", false) {
-		printInfo("Slack notifications skipped")
-		return config
-	}
-
-	return promptSlackCredentials()
-}
-
 // promptSlackCredentials prompts for Slack webhook URL (simple flow).
 // Called when user has already opted-in to Slack notifications.
 func promptSlackCredentials() SlackConfig {
@@ -193,11 +154,11 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url) // #nosec G204 -- opening URL in browser is intentional
+		cmd = exec.Command("open", url)
 	case "linux":
-		cmd = exec.Command("xdg-open", url) // #nosec G204 -- opening URL in browser is intentional
+		cmd = exec.Command("xdg-open", url)
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url) // #nosec G204 -- opening URL in browser is intentional
+		cmd = exec.Command("cmd", "/c", "start", url)
 	default:
 		fmt.Printf("  Please open: %s\n", url)
 		return
@@ -229,6 +190,7 @@ func installClaudeCodeHooks() error {
 		return fmt.Errorf("failed to read embedded hook script: %w", err)
 	}
 
+	// #nosec G306 -- hook script must be executable (0700)
 	if err := os.WriteFile(hookScript, scriptData, 0700); err != nil {
 		return fmt.Errorf("failed to write hook script: %w", err)
 	}

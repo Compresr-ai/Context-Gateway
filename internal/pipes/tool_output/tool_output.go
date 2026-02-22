@@ -554,7 +554,7 @@ func (p *Pipe) compressViaAPI(query, content, toolName, provider string) (string
 	}
 
 	client := &http.Client{Timeout: p.apiTimeout}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- API endpoint is an explicit operator configuration
 	if err != nil {
 		return "", fmt.Errorf("API request failed: %w", err)
 	}

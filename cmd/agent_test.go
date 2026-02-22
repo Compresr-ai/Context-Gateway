@@ -20,6 +20,11 @@ func TestGenerateCustomConfigYAML_UsesGlobalCostCap(t *testing.T) {
 		25,
 		0.8,
 		true,
+		false,                   // toolOutputEnabled
+		"external_provider",     // toolOutputStrategy
+		"gemini",                // toolOutputProvider
+		"gemini-3-flash",        // toolOutputModel
+		"${GEMINI_API_KEY:-}",   // toolOutputAPIKey
 	)
 
 	if !strings.Contains(cfg, "cost_control:") {

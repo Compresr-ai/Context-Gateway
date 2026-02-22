@@ -36,7 +36,7 @@ agent:
   command:
     # Command to check if the agent is available (optional but recommended)
     # Should return exit code 0 if available, non-zero otherwise
-    check_cmd: ["command", "-v", "my_agent"]
+    check_cmd: ["which", "my_agent"]
 
     # The actual command to run
     run: "my_agent"

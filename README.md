@@ -28,7 +28,7 @@ Context Gateway sits between your AI agent (Claude Code, Cursor, etc.) and the L
 curl -fsSL https://compresr.ai/api/download_cli | sh
 
 # 2. Select an agent (opens interactive TUI wizard)
-gateway agent
+context-gateway
 ```
 
 The TUI wizard will help you:

@@ -19,7 +19,7 @@ agent:
       value: "${OPENAI_API_KEY}"
 
   command:
-    check_cmd: ["command", "-v", "opencode"]
+    check_cmd: ["which", "opencode"]
     run: "opencode"
     args: []
     install_cmd: ["go", "install", "github.com/opencode-ai/opencode@latest"]
