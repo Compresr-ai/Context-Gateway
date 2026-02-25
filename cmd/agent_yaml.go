@@ -25,11 +25,15 @@ func saveConfig(state *ConfigState) string {
 		state.ToolDiscoveryMaxTools,
 		state.ToolDiscoveryTargetRatio,
 		state.ToolDiscoverySearchFallback,
+		state.ToolDiscoveryModel,
 		state.ToolOutputEnabled,
 		state.ToolOutputStrategy,
 		state.ToolOutputProvider.Name,
 		state.ToolOutputModel,
 		state.ToolOutputAPIKey,
+		state.ToolOutputMinBytes,
+		state.ToolOutputTargetRatio,
+		state.TelemetryEnabled,
 	)
 
 	homeDir, err := os.UserHomeDir()
@@ -70,11 +74,15 @@ func generateCustomConfigYAML(
 	toolDiscoveryMaxTools int,
 	toolDiscoveryTargetRatio float64,
 	toolDiscoverySearchFallback bool,
+	toolDiscoveryModel string,
 	toolOutputEnabled bool,
 	toolOutputStrategy string,
 	toolOutputProvider string,
 	toolOutputModel string,
 	toolOutputAPIKey string,
+	toolOutputMinBytes int,
+	toolOutputTargetRatio float64,
+	telemetryEnabled bool,
 ) string {
 	slackEnabled := "false"
 	if enableSlack {
@@ -97,15 +105,27 @@ func generateCustomConfigYAML(
 		endpoint = "https://api.openai.com/v1/chat/completions"
 	}
 
-	// Get tool output compression endpoint
+	// Get tool output compression endpoint (for external_provider strategy)
 	var toolOutputEndpoint string
-	switch toolOutputProvider {
-	case "anthropic":
-		toolOutputEndpoint = "https://api.anthropic.com/v1/messages"
-	case "gemini":
-		toolOutputEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + toolOutputModel + ":generateContent"
-	case "openai":
-		toolOutputEndpoint = "https://api.openai.com/v1/chat/completions"
+	// Determine which provider to use for tool_output
+	// Only use specified toolOutputProvider if enabled and using external_provider strategy
+	effectiveToolOutputProvider := provider // Default to main provider
+	if toolOutputEnabled && toolOutputStrategy == "external_provider" && toolOutputProvider != "" {
+		effectiveToolOutputProvider = toolOutputProvider
+	}
+
+	if toolOutputStrategy == "api" {
+		toolOutputEndpoint = "${COMPRESR_BASE_URL:-https://api.compresr.com}/v1/tool-output/compress"
+		toolOutputAPIKey = "${COMPRESR_API_KEY:-}" // #nosec G101 -- env var reference, not a credential
+	} else {
+		switch effectiveToolOutputProvider {
+		case "anthropic":
+			toolOutputEndpoint = "https://api.anthropic.com/v1/messages"
+		case "gemini":
+			toolOutputEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + toolOutputModel + ":generateContent"
+		case "openai":
+			toolOutputEndpoint = "https://api.openai.com/v1/chat/completions"
+		}
 	}
 
 	// Build providers section - include tool_output provider if different and enabled
@@ -114,11 +134,41 @@ func generateCustomConfigYAML(
     api_key: "%s"
     model: "%s"`, provider, apiKey, model)
 
-	if toolOutputEnabled && toolOutputProvider != "" && toolOutputProvider != provider {
+	if toolOutputEnabled && toolOutputStrategy == "external_provider" && effectiveToolOutputProvider != "" && effectiveToolOutputProvider != provider {
 		providersSection += fmt.Sprintf(`
   %s:
     api_key: "%s"
-    model: "%s"`, toolOutputProvider, toolOutputAPIKey, toolOutputModel)
+    model: "%s"`, effectiveToolOutputProvider, toolOutputAPIKey, toolOutputModel)
+	}
+
+	// Build tool_output section based on strategy
+	var toolOutputSection string
+	if toolOutputStrategy == "api" {
+		// API strategy: use Compresr API endpoint, no provider field
+		toolOutputSection = fmt.Sprintf(`  tool_output:
+    enabled: %t
+    strategy: "%s"
+    api:
+      endpoint: "%s"
+      api_key: "%s"
+      model: "%s"
+      timeout: 30s
+    min_bytes: %d
+    target_ratio: %.2f`,
+			toolOutputEnabled, toolOutputStrategy, toolOutputEndpoint, toolOutputAPIKey, toolOutputModel,
+			toolOutputMinBytes, toolOutputTargetRatio)
+	} else {
+		// External provider strategy: reference provider from providers section, no api field
+		toolOutputSection = fmt.Sprintf(`  tool_output:
+    enabled: %t
+    strategy: "%s"
+    provider: "%s"
+    enable_expand_context: true
+    include_expand_hint: true
+    min_bytes: %d
+    target_ratio: %.2f`,
+			toolOutputEnabled, toolOutputStrategy, effectiveToolOutputProvider,
+			toolOutputMinBytes, toolOutputTargetRatio)
 	}
 
 	return fmt.Sprintf(`# =============================================================================
@@ -149,7 +199,7 @@ preemptive:
   trigger_threshold: %.1f
   add_response_headers: true
   log_dir: "${SESSION_DIR:-logs}"
-  compaction_log_path: "${SESSION_COMPACTION_LOG:-logs/compaction.jsonl}"
+  compaction_log_path: "${SESSION_COMPACTION_LOG:-logs/history_compaction.jsonl}"
   
   summarizer:
     provider: "%s"
@@ -168,25 +218,14 @@ cost_control:
   global_cap: %.2f
 
 pipes:
-  tool_output:
-    enabled: %t
-    strategy: "%s"
-    provider: "%s"
-    api:
-      endpoint: "%s"
-      api_key: "%s"
-      model: "%s"
-      timeout: 30s
-    min_bytes: 2048
-    target_ratio: 0.5
-    enable_expand_context: true
-    include_expand_hint: true
+%s
   tool_discovery:
     enabled: %t
     strategy: "%s"
     api:
-      endpoint: "${COMPRESR_BASE_URL:-https://api.compresr.com}/v1/tool-discovery/search"
+      endpoint: "${COMPRESR_BASE_URL:-https://api.compresr.com}/api/compress/tool-discovery/"
       api_key: "${COMPRESR_API_KEY:-}"
+      model: "%s"
       timeout: 10s
     min_tools: %d
     max_tools: %d
@@ -202,19 +241,21 @@ notifications:
     enabled: %s
 
 monitoring:
-  # Off by default. Set to "info" or "debug" to enable logs.
+  # Set to "info" or "debug" to see gateway logs. Off disables gateway.log.
   log_level: "off"
   log_format: "console"
   log_output: "stdout"
-  # Telemetry is opt-in. Set to true to enable JSONL telemetry logs.
-  telemetry_enabled: false
+  # Telemetry controls JSONL telemetry logs (telemetry.jsonl, tool_output_compression.jsonl, etc.)
+  telemetry_enabled: %t
+  # Verbose payloads: set to true to capture request/response bodies and sanitized headers
+  verbose_payloads: false
   telemetry_path: "${SESSION_TELEMETRY_LOG:-logs/telemetry.jsonl}"
-  compression_log_path: "${SESSION_COMPRESSION_LOG:-logs/compression.jsonl}"
+  compression_log_path: "${SESSION_COMPRESSION_LOG:-logs/tool_output_compression.jsonl}"
   tool_discovery_log_path: "${SESSION_TOOL_DISCOVERY_LOG:-logs/tool_discovery.jsonl}"
 `, name, name, providersSection, triggerThreshold, provider, endpoint, costCapEnabled, costCap,
-		toolOutputEnabled, toolOutputStrategy, toolOutputProvider, toolOutputEndpoint, toolOutputAPIKey, toolOutputModel,
-		toolDiscoveryEnabled, toolDiscoveryStrategy, toolDiscoveryMinTools, toolDiscoveryMaxTools,
-		toolDiscoveryTargetRatio, toolDiscoverySearchFallback, slackEnabled)
+		toolOutputSection,
+		toolDiscoveryEnabled, toolDiscoveryStrategy, toolDiscoveryModel, toolDiscoveryMinTools, toolDiscoveryMaxTools,
+		toolDiscoveryTargetRatio, toolDiscoverySearchFallback, slackEnabled, telemetryEnabled)
 }
 
 // getProviderKeyURL returns the URL where users can get API keys for a provider.

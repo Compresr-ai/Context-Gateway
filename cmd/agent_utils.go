@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -250,6 +252,7 @@ func resolveConfig(userConfig string) ([]byte, string, error) {
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
 		path := filepath.Join(homeDir, ".config", "context-gateway", "configs", name+".yaml")
+		// #nosec G304 -- trusted config path
 		if data, err := os.ReadFile(path); err == nil {
 			return data, path, nil
 		}
@@ -257,6 +260,7 @@ func resolveConfig(userConfig string) ([]byte, string, error) {
 
 	// Check local configs directory
 	path := filepath.Join("configs", name+".yaml")
+	// #nosec G304 -- trusted config path
 	if data, err := os.ReadFile(path); err == nil {
 		return data, path, nil
 	}
@@ -405,6 +409,12 @@ func createSessionDir(baseDir string) string {
 
 // exportAgentEnv sets environment variables defined in the agent config.
 func exportAgentEnv(ac *AgentConfig) {
+	// First, unset any specified variables (for OAuth-based auth)
+	for _, varName := range ac.Agent.Unset {
+		_ = os.Unsetenv(varName)
+		printInfo(fmt.Sprintf("Unset: %s (agent will use OAuth)", varName))
+	}
+	// Then set the specified variables
 	for _, env := range ac.Agent.Environment {
 		_ = os.Setenv(env.Name, env.Value)
 		printInfo(fmt.Sprintf("Exported: %s", env.Name))
@@ -549,7 +559,12 @@ func startOpenClawGateway() *exec.Cmd {
 	// Start fresh gateway
 	printInfo("Starting OpenClaw gateway...")
 
-	cmd := exec.Command("openclaw", "gateway", "--port", "18789", "--allow-unconfigured", "--token", "localdev", "--force")
+	// Generate random token for security
+	tokenBytes := make([]byte, 16)
+	_, _ = rand.Read(tokenBytes)
+	randomToken := hex.EncodeToString(tokenBytes)
+
+	cmd := exec.Command("openclaw", "gateway", "--port", "18789", "--allow-unconfigured", "--token", randomToken, "--force") // #nosec G204 -- controlled command with known args
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	_ = cmd.Start()

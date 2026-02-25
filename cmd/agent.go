@@ -335,6 +335,27 @@ mainSelectionLoop:
 			os.Exit(1)
 		}
 
+		// Parse config early to check telemetry_enabled before setting env vars
+		earlyConfig, earlyErr := config.LoadFromBytes(configData)
+		if earlyErr != nil {
+			fmt.Fprintf(os.Stderr, "Error loading config '%s': %v\n", configSource, earlyErr)
+			os.Exit(1)
+		}
+
+		// DEBUG: Print API key resolution
+		if debugFlag {
+			fmt.Printf("\n[DEBUG] Config loaded from: %s\n", configSource)
+			fmt.Printf("[DEBUG] GEMINI_API_KEY env: %q\n", os.Getenv("GEMINI_API_KEY"))
+			for name, p := range earlyConfig.Providers {
+				fmt.Printf("[DEBUG] Provider %s: model=%s, key_len=%d\n", name, p.Model, len(p.APIKey))
+			}
+			resolved := earlyConfig.ResolvePreemptiveProvider()
+			fmt.Printf("[DEBUG] Resolved summarizer: provider=%s, model=%s, key_len=%d\n",
+				resolved.Summarizer.Provider, resolved.Summarizer.Model, len(resolved.Summarizer.APISecret))
+		}
+
+		telemetryEnabled := earlyConfig.Monitoring.TelemetryEnabled
+
 		// Create session directory for this agent invocation
 		logsBase := logDir
 		if logsBase == "" {
@@ -342,14 +363,19 @@ mainSelectionLoop:
 		}
 		sessionDir = createSessionDir(logsBase)
 
-		// Export session log paths for this agent
+		// Export session log paths for this agent (only if telemetry is enabled)
 		_ = os.Setenv("SESSION_DIR", sessionDir)
-		_ = os.Setenv("SESSION_TELEMETRY_LOG", filepath.Join(sessionDir, "telemetry.jsonl"))
-		_ = os.Setenv("SESSION_COMPRESSION_LOG", filepath.Join(sessionDir, "compression.jsonl"))
-		_ = os.Setenv("SESSION_TOOL_DISCOVERY_LOG", filepath.Join(sessionDir, "tool_discovery.jsonl"))
-		_ = os.Setenv("SESSION_COMPACTION_LOG", filepath.Join(sessionDir, "compaction.jsonl"))
-		_ = os.Setenv("SESSION_TRAJECTORY_LOG", filepath.Join(sessionDir, "trajectory.json"))
+		if telemetryEnabled {
+			_ = os.Setenv("SESSION_TELEMETRY_LOG", filepath.Join(sessionDir, "telemetry.jsonl"))
+			_ = os.Setenv("SESSION_COMPRESSION_LOG", filepath.Join(sessionDir, "tool_output_compression.jsonl"))
+			_ = os.Setenv("SESSION_TOOL_DISCOVERY_LOG", filepath.Join(sessionDir, "tool_discovery.jsonl"))
+			_ = os.Setenv("SESSION_COMPACTION_LOG", filepath.Join(sessionDir, "history_compaction.jsonl"))
+			_ = os.Setenv("SESSION_TRAJECTORY_LOG", filepath.Join(sessionDir, "trajectory.json"))
+		}
 		_ = os.Setenv("SESSION_GATEWAY_LOG", filepath.Join(sessionDir, "gateway.log"))
+
+		// Re-apply session env overrides to the early config now that env vars are set
+		earlyConfig.ApplySessionEnvOverrides()
 
 		printSuccess("Agent Session: " + filepath.Base(sessionDir))
 		printInfo(fmt.Sprintf("Gateway port: %d", gatewayPort))
@@ -371,6 +397,7 @@ mainSelectionLoop:
 		var gatewayLogFile *os.File
 		gatewayLogOutput := os.DevNull
 		if gwLogPath := os.Getenv("SESSION_GATEWAY_LOG"); gwLogPath != "" {
+			// #nosec G304 -- env-configured log path
 			if f, err := os.OpenFile(gwLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
 				gatewayLogFile = f
 				gatewayLogOutput = gwLogPath
@@ -393,11 +420,8 @@ mainSelectionLoop:
 			stdlog.SetOutput(gatewayLogFile)
 		}
 
-		cfg, err := config.LoadFromBytes(configData)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading config '%s': %v\n", configSource, err)
-			os.Exit(1)
-		}
+		// Reuse the config we already parsed earlier
+		cfg := earlyConfig
 
 		// Propagate agent flags to gateway config
 		// This allows the proxy to know about flags like --dangerously-skip-permissions
@@ -445,12 +469,13 @@ mainSelectionLoop:
 			printSuccess(fmt.Sprintf("Gateway ready on port %d", gatewayPort))
 		}
 
-		// Log the config used for this session
+		// Log the config used for this session (use resolved config to get inherited model)
+		resolvedPreemptive := cfg.ResolvePreemptiveProvider()
 		preemptive.LogSessionConfig(
 			configFlag,
 			configSource,
-			cfg.Preemptive.Summarizer.Provider,
-			cfg.Preemptive.Summarizer.Model,
+			resolvedPreemptive.Summarizer.Provider,
+			resolvedPreemptive.Summarizer.Model,
 		)
 	} else if proxyMode == "skip" {
 		printInfo("Skipping gateway (--proxy skip)")
@@ -512,7 +537,7 @@ mainSelectionLoop:
 
 	// Launch agent as child process
 
-	cmd := exec.Command("bash", "-c", agentCmd)
+	cmd := exec.Command("bash", "-c", agentCmd) // #nosec G204 -- user-selected agent command
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

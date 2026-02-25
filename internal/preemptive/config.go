@@ -7,6 +7,13 @@ package preemptive
 
 import "time"
 
+// DefaultCodexPromptPatterns are phrases for OpenAI Codex compaction requests.
+var DefaultCodexPromptPatterns = []string{
+	"summarize the conversation",
+	"create a summary of our conversation",
+	"compress the context",
+}
+
 // =============================================================================
 // DEFAULT PROMPT PATTERNS (per provider)
 // =============================================================================
@@ -19,12 +26,7 @@ var DefaultClaudeCodePromptPatterns = []string{
 	"important: do not use any tools",
 }
 
-// DefaultCodexPromptPatterns are phrases for OpenAI Codex compaction requests.
-var DefaultCodexPromptPatterns = []string{
-	"summarize the conversation",
-	"create a summary of our conversation",
-	"compress the context",
-}
+// (Codex support removed)
 
 // =============================================================================
 // DEFAULT SYSTEM PROMPTS (per provider)
@@ -56,30 +58,7 @@ Specific next actions when conversation resumes.
 
 Be specific. Be thorough. Capture what matters, not just what happened.`
 
-// DefaultCodexSystemPrompt is the default summarization prompt for OpenAI Codex/GPT.
-var DefaultCodexSystemPrompt = `You are a partner working alongside the user, invested in their success. Context is about to reset - this summary carries forward the partnership.
-
-Produce a recovery summary with these sections:
-
-## Who We're Working With
-The person in this conversation. Name, role, how they communicate. What do they care about?
-
-## What We're Working On
-The actual goal and inquiry driving the conversation. What's at stake?
-
-## What Just Happened
-Recent exchanges. What was discovered, decided, built? Be specific - file names, function names, error messages, code snippets.
-
-## Interaction Pattern
-Pace, direction, tone. What's working: tool effectiveness, approaches that succeeded or failed.
-
-## Key Artifacts
-Files, IDs, commands that worked. Technical details needed to continue.
-
-## Continue With
-Specific next actions when conversation resumes.
-
-Be specific. Be thorough. Capture what matters, not just what happened.`
+// (Codex support removed)
 
 // =============================================================================
 // MODEL CONTEXT WINDOWS
@@ -104,6 +83,9 @@ var DefaultModelContextWindows = map[string]ModelContextWindow{
 	"gpt-4-turbo-preview": {Model: "gpt-4-turbo-preview", MaxTokens: 128000, OutputMax: 4096, EffectiveMax: 123904},
 	"gpt-4o":              {Model: "gpt-4o", MaxTokens: 128000, OutputMax: 16384, EffectiveMax: 111616},
 	"gpt-4o-mini":         {Model: "gpt-4o-mini", MaxTokens: 128000, OutputMax: 16384, EffectiveMax: 111616},
+
+	// OpenAI Codex models (ChatGPT subscription)
+	"gpt-5.3-codex": {Model: "gpt-5.3-codex", MaxTokens: 64000, OutputMax: 16384, EffectiveMax: 47616},
 }
 
 // DefaultUnknownModelContextWindow is the fallback for unknown models.

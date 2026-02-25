@@ -64,6 +64,15 @@ type RequestEvent struct {
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
 	TotalTokens  int `json:"total_tokens,omitempty"`
+
+	// VERBOSE PAYLOADS (populated when monitoring.verbose_payloads=true)
+	RequestHeaders      map[string]string `json:"request_headers,omitempty"`       // Sanitized headers (no secrets)
+	ResponseHeaders     map[string]string `json:"response_headers,omitempty"`      // Response headers
+	RequestBodyPreview  string            `json:"request_body_preview,omitempty"`  // First 500 chars
+	ResponseBodyPreview string            `json:"response_body_preview,omitempty"` // First 500 chars
+	AuthHeaderSent      string            `json:"auth_header_sent,omitempty"`      // Masked: "Bearer xxx", "sk-..."
+	UpstreamURL         string            `json:"upstream_url,omitempty"`          // Actual endpoint hit
+	FallbackReason      string            `json:"fallback_reason,omitempty"`       // "401 Unauthorized", etc.
 }
 
 // InitEvent captures gateway startup configuration and agent flags.
@@ -141,6 +150,7 @@ type TelemetryConfig struct {
 	Enabled              bool   `yaml:"enabled"`
 	LogPath              string `yaml:"log_path"`
 	LogToStdout          bool   `yaml:"log_to_stdout"`
+	VerbosePayloads      bool   `yaml:"verbose_payloads"` // Log request/response bodies and headers
 	CompressionLogPath   string `yaml:"compression_log_path"`
 	ToolDiscoveryLogPath string `yaml:"tool_discovery_log_path"`
 }

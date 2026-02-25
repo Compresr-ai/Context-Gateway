@@ -11,11 +11,11 @@ import (
 
 const (
 	// tokenRefreshEndpoint is the Anthropic OAuth token refresh URL.
+	// #nosec G101 -- URL constant, not a credential
+	tokenRefreshEndpoint = "https://console.anthropic.com/api/oauth/token"
 
-	tokenRefreshEndpoint = "https://console.anthropic.com/api/oauth/token" //nolint:gosec // fixed OAuth endpoint URL, not a credential
-
-	// clientID is the Claude Code OAuth client ID.
-	clientID = "9d1c250a-e61b-" + "44d9-88ed-5944d1962f5e"
+	// clientID is the Claude Code OAuth client ID (public, not a secret).
+	clientID = "9d1c250a-e61b-" + "44d9-88ed-5944d1962f5e" // #nosec G101 -- public OAuth client ID
 
 	// refreshTimeout is the HTTP timeout for token refresh requests.
 	refreshTimeout = 30 * time.Second

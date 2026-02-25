@@ -151,9 +151,9 @@ See `docs/slack-setup.md` for manual setup.
 Session logs go to `logs/session_<n>_<date>/`:
 - `trajectory.json` — ATIF v1.6 format, agent trajectory
 - `telemetry.jsonl` — Per-request proxy telemetry
-- `compression.jsonl` — Per-tool compression details
+- `tool_output_compression.jsonl` — Per-tool compression details
 - `tool_discovery.jsonl` — Tool discovery filtering details
-- `compaction.jsonl` — Preemptive summarization events
+- `history_compaction.jsonl` — Preemptive summarization events
 - `summary.json` — End-of-session aggregate
 - `gateway.log` — Server runtime logs
 

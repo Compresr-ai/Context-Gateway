@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -184,10 +186,19 @@ func setAuthHeaders(req *http.Request, provider, apiKey, bearerToken string) {
 		// Bedrock auth is handled by SigV4 signing transport in the HTTPClient.
 		// No API key headers needed; the transport signs the request automatically.
 	case "gemini":
+		log.Debug().Str("provider", provider).Int("key_len", len(apiKey)).Str("key_prefix", safePrefix(apiKey, 10)).Msg("Setting Gemini auth header")
 		req.Header.Set("x-goog-api-key", apiKey)
 	default: // openai
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
 	}
+}
+
+// safePrefix returns the first n chars of s for debug logging.
+func safePrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // Temperature strategy: 0.0 for deterministic compression output.

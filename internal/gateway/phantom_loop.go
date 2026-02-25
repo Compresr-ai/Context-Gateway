@@ -99,7 +99,7 @@ func (p *PhantomLoop) Run(
 		}
 
 		// Read response
-		responseBody, err := io.ReadAll(resp.Body)
+		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
 		_ = resp.Body.Close()
 		if err != nil {
 			return result, err

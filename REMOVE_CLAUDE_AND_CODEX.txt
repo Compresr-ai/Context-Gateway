@@ -1,0 +1,6 @@
+Remove all Codex-related files, configs, and comments from the workspace:
+- Delete cmd/agents/codex.yaml
+- Remove Codex/OpenAI/Codex CLI comments from configs and code
+- Remove Codex-specific logic from detectors, tests, and docs
+- Remove any Codex-related environment variables or instructions
+- Remove Codex from any agent lists, docs, or setup scripts

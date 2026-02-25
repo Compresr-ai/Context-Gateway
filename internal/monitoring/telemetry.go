@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -97,7 +98,7 @@ func appendJSONL(path string, event any) error {
 	}
 	data = append(data, '\n')
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- user-configured telemetry path
 	if err != nil {
 		return err
 	}
@@ -229,4 +230,76 @@ func (t *Tracker) Close() error {
 	}
 
 	return nil
+}
+
+// ============================================================================
+// HELPERS FOR VERBOSE PAYLOADS
+// ============================================================================
+
+// SanitizeHeaders removes sensitive headers and returns a safe copy.
+func SanitizeHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	sanitized := make(map[string]string)
+	sensitiveHeaders := map[string]bool{
+		"authorization":    true,
+		"x-api-key":        true,
+		"api-key":          true,
+		"x-auth-token":     true,
+		"cookie":           true,
+		"set-cookie":       true,
+		"x-amzn-requestid": false, // Safe
+		"cf-ray":           false, // Safe
+		"x-request-id":     false, // Safe
+		"request-id":       false, // Safe,
+	}
+
+	for k, v := range headers {
+		lowerK := strings.ToLower(k)
+		if sensitiveHeaders[lowerK] {
+			// Mask sensitive headers
+			if len(v) > 4 {
+				sanitized[k] = v[:4] + "..." // Show first 4 chars
+			} else {
+				sanitized[k] = "***"
+			}
+		} else {
+			sanitized[k] = v
+		}
+	}
+
+	return sanitized
+}
+
+// MaskAuthHeader masks an authorization header value while preserving type info.
+func MaskAuthHeader(authHeader string) string {
+	if authHeader == "" {
+		return ""
+	}
+
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) == 2 {
+		authType := parts[0]  // "Bearer", "sk-", etc.
+		authValue := parts[1] // actual token
+		if len(authValue) > 4 {
+			return authType + " " + authValue[:4] + "..."
+		}
+		return authType + " ***"
+	}
+
+	// Mask the whole thing
+	if len(authHeader) > 4 {
+		return authHeader[:4] + "..."
+	}
+	return "***"
+}
+
+// PreviewBody extracts first N chars of a body string for logging.
+func PreviewBody(body string, maxChars int) string {
+	if len(body) > maxChars {
+		return body[:maxChars] + "...[truncated]"
+	}
+	return body
 }

@@ -66,7 +66,7 @@ func loadFromCredentialsFile() (*ClaudeCredentials, error) {
 		return nil, fmt.Errorf("invalid credentials file path")
 	}
 
-	data, err := os.ReadFile(credPath)
+	data, err := os.ReadFile(credPath) // #nosec G304 -- path validated above
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // Credentials not found, not an error
@@ -169,7 +169,7 @@ func SaveCredentials(creds *ClaudeCredentials) error {
 	}
 
 	// Read existing file to preserve other fields
-	existingData, err := os.ReadFile(credPath)
+	existingData, err := os.ReadFile(credPath) // #nosec G304 -- path from CredentialsFilePath()
 	var existing credentialsFile
 	if err == nil {
 		_ = json.Unmarshal(existingData, &existing)

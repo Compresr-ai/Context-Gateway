@@ -15,20 +15,17 @@
 package tooloutput
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"sync"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/external"
 	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/pipes"
 )
@@ -510,24 +507,23 @@ func (p *Pipe) recordRateLimited() {
 // COMPRESSION STRATEGIES
 // ============================================================================
 
-// compressViaAPI calls the compression API with query + tool output.
+// compressViaAPI calls the Compresr API via the centralized client.
 func (p *Pipe) compressViaAPI(query, content, toolName, provider string) (string, error) {
+	// Use the centralized Compresr client
+	if p.compresrClient == nil {
+		return "", fmt.Errorf("compresr client not initialized")
+	}
+
 	// Use configured model, fallback to default if not set
 	modelName := p.apiModel
 	if modelName == "" {
-		modelName = "cmprsr_tool_output_v1"
+		modelName = compresr.DefaultToolOutputModel // toc_latte
 	}
 
 	// Build source string: gateway:anthropic or gateway:openai
 	source := "gateway:" + provider
 
-	payload := struct {
-		ToolOutput string `json:"tool_output"`
-		UserQuery  string `json:"user_query"`
-		ToolName   string `json:"tool_name"`
-		ModelName  string `json:"compression_model_name"`
-		Source     string `json:"source"`
-	}{
+	params := compresr.CompressToolOutputParams{
 		ToolOutput: content,
 		UserQuery:  query,
 		ToolName:   toolName,
@@ -535,59 +531,18 @@ func (p *Pipe) compressViaAPI(query, content, toolName, provider string) (string
 		Source:     source,
 	}
 
-	body, err := json.Marshal(payload)
+	result, err := p.compresrClient.CompressToolOutput(params)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), p.apiTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", p.apiEndpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		req.Header.Set("X-API-Key", p.apiKey)
-	}
-
-	client := &http.Client{Timeout: p.apiTimeout}
-	resp, err := client.Do(req) // #nosec G704 -- API endpoint is an explicit operator configuration
-	if err != nil {
-		return "", fmt.Errorf("API request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		// Read response body for debugging
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API returned status %d: %s (endpoint: %s)", resp.StatusCode, string(respBody), p.apiEndpoint)
-	}
-
-	var result struct {
-		Success bool `json:"success"`
-		Data    struct {
-			CompressedOutput string `json:"compressed_output"`
-		} `json:"data"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return "", fmt.Errorf("API request failed")
+		return "", fmt.Errorf("compresr API call failed: %w", err)
 	}
 
 	// Validate compression actually reduced size - if not, return error to trigger fallback
-	if len(result.Data.CompressedOutput) >= len(content) {
+	if len(result.CompressedOutput) >= len(content) {
 		return "", fmt.Errorf("compression ineffective: output (%d bytes) >= input (%d bytes)",
-			len(result.Data.CompressedOutput), len(content))
+			len(result.CompressedOutput), len(content))
 	}
 
-	return result.Data.CompressedOutput, nil
+	return result.CompressedOutput, nil
 }
 
 // compressViaExternalProvider calls an external LLM provider directly.

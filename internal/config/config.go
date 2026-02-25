@@ -165,7 +165,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config file path is required")
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- user-specified config path
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file '%s': %w", path, err)
 	}
@@ -205,6 +205,12 @@ func ExpandEnvWithDefaults(s string) string {
 // This allows external systems (Harbor, Daytona) to redirect log paths
 // without modifying the base config files.
 func (c *Config) applyEnvOverrides() {
+	c.ApplySessionEnvOverrides()
+}
+
+// ApplySessionEnvOverrides applies SESSION_* environment variable overrides.
+// Exported so agent.go can call it after setting session env vars.
+func (c *Config) ApplySessionEnvOverrides() {
 	// SESSION_TELEMETRY_LOG overrides the telemetry log path
 	if envPath := os.Getenv("SESSION_TELEMETRY_LOG"); envPath != "" {
 		c.Monitoring.TelemetryPath = envPath

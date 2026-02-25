@@ -363,8 +363,6 @@ func WithDefaults(cfg Config) Config {
 	if len(cfg.Detectors.ClaudeCode.PromptPatterns) == 0 {
 		cfg.Detectors.ClaudeCode.PromptPatterns = DefaultClaudeCodePromptPatterns
 	}
-	if len(cfg.Detectors.Codex.PromptPatterns) == 0 {
-		cfg.Detectors.Codex.PromptPatterns = DefaultCodexPromptPatterns
-	}
+	// (Codex prompt pattern logic removed)
 	return cfg
 }

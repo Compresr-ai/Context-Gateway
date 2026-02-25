@@ -180,6 +180,14 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 			return nil, err
 		}
 
+		// Handle Ctrl+C in any mode
+		if b == 3 {
+			fmt.Print("\033[?25h") // Show cursor
+			_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			fmt.Println("\n\nInterrupted.")
+			os.Exit(130)
+		}
+
 		if editing {
 			f := &activeFields[current]
 			switch b {

@@ -1,0 +1,42 @@
+# =============================================================================
+# Context Gateway - Compresr API Models (Simplified)
+# =============================================================================
+# This file defines the default models for Compresr API compression features.
+# One model per use case for simplicity.
+#
+# Coffee-inspired naming convention:
+#   - Americano (Lingua): Fast, query-free
+#   - Latte (GemFilter): Balanced, query-aware
+#   - Espresso (SaT): Premium, LLM-based
+#
+# Prefixes:
+#   - hcc_: History Context Compressor
+#   - toc_: Tool Output Compressor
+#   - tdc_: Tool Discovery Compressor
+#
+# Last updated: February 2026
+# =============================================================================
+
+compresr:
+  display_name: "Compresr"
+  env_var: "COMPRESR_API_KEY"
+  base_url_env: "COMPRESR_BASE_URL"
+  default_base_url: "https://api.compresr.ai"
+
+  # History Compression - Lingua backbone (question-agnostic)
+  semantic_summarization:
+    default_model: "hcc_espresso_v1"
+    description: "Lingua-based history compression"
+    input_price_per_1m: 0.20
+
+  # Tool Output Compression - GemFilter backbone (attention-based, query-specific)
+  tool_output:
+    default_model: "toc_latte_v1"
+    description: "GemFilter attention-based tool output compression with query relevance"
+    input_price_per_1m: 0.25
+
+  # Tool Discovery - SaT backbone (question-specific)
+  tool_discovery:
+    default_model: "tdc_coldbrew_v1"
+    description: "SaT-based tool discovery and filtering"
+    input_price_per_1m: 40.0

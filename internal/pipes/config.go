@@ -29,6 +29,7 @@ const (
 	StrategySimple           = "simple"            // Simple compression (first N words)
 	StrategyExternalProvider = "external_provider" // Call external LLM provider (OpenAI/Anthropic) directly
 	StrategyRelevance        = "relevance"         // Local relevance-based tool filtering (no external API)
+	StrategyToolSearch       = "tool-search"       // Local regex-based tool search (no external API)
 )
 
 // =============================================================================
@@ -203,6 +204,9 @@ func (d *ToolDiscoveryConfig) Validate() error {
 	if d.Strategy == StrategyRelevance {
 		return nil // No external dependencies needed
 	}
+	if d.Strategy == StrategyToolSearch {
+		return nil // Local regex-based search, no external dependencies
+	}
 	if d.Strategy == StrategyAPI {
 		// Provider or API.Endpoint required
 		if d.Provider == "" && d.API.Endpoint == "" {
@@ -210,7 +214,7 @@ func (d *ToolDiscoveryConfig) Validate() error {
 		}
 		return nil
 	}
-	return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', or 'api'", d.Strategy)
+	return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', 'tool-search', or 'api'", d.Strategy)
 }
 
 // =============================================================================

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -248,7 +249,11 @@ func (h *SearchToolHandler) HandleCalls(calls []PhantomToolCall, isAnthropic boo
 
 // resolveMatches picks search backend by strategy.
 func (h *SearchToolHandler) resolveMatches(deferred []adapters.ExtractedContent, query string) []adapters.ExtractedContent {
-	if h.strategy == "api" {
+	switch h.strategy {
+	case "tool-search":
+		// Local regex-based search
+		return h.searchByRegex(deferred, query)
+	case "api":
 		if h.apiEndpoint == "" {
 			h.recordAPIFallback(query, "missing_api_endpoint", "api endpoint is empty", len(deferred), len(deferred))
 			log.Warn().Msg("search_tool(api): api endpoint is empty, restoring all deferred tools")
@@ -270,8 +275,115 @@ func (h *SearchToolHandler) resolveMatches(deferred []adapters.ExtractedContent,
 			return deferred
 		}
 		return result.Matches
+	default:
+		// Fallback to keyword-based search
+		return SearchDeferredTools(deferred, query, h.maxResults)
 	}
-	return SearchDeferredTools(deferred, query, h.maxResults)
+}
+
+// searchByRegex performs local regex-based search on deferred tools.
+// The query is treated as a regex pattern that matches against tool names,
+// descriptions, and parameter names/descriptions (case-insensitive).
+func (h *SearchToolHandler) searchByRegex(deferred []adapters.ExtractedContent, query string) []adapters.ExtractedContent {
+	if len(deferred) == 0 || strings.TrimSpace(query) == "" {
+		return nil
+	}
+
+	// Compile regex pattern (case-insensitive)
+	re, err := regexp.Compile("(?i)" + query)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("pattern", query).
+			Msg("search_tool(tool-search): invalid regex pattern, falling back to keyword search")
+		return SearchDeferredTools(deferred, query, h.maxResults)
+	}
+
+	var matches []adapters.ExtractedContent
+
+	// Check always-keep tools first
+	alwaysKeepSet := make(map[string]bool, len(h.alwaysKeep))
+	for _, name := range h.alwaysKeep {
+		alwaysKeepSet[name] = true
+	}
+
+	for _, tool := range deferred {
+		// Always-keep tools are always included
+		if alwaysKeepSet[tool.ToolName] {
+			matches = append(matches, tool)
+			continue
+		}
+
+		// Build searchable text: tool name + description + parameter info
+		searchText := tool.ToolName + " " + tool.Content
+
+		// Include parameter names and descriptions if available
+		if rawJSON, ok := tool.Metadata["raw_json"].(string); ok && rawJSON != "" {
+			var def map[string]any
+			if err := json.Unmarshal([]byte(rawJSON), &def); err == nil {
+				searchText += " " + extractParameterText(def)
+			}
+		}
+
+		if re.MatchString(searchText) {
+			matches = append(matches, tool)
+		}
+	}
+
+	log.Info().
+		Str("pattern", query).
+		Int("deferred", len(deferred)).
+		Int("matches", len(matches)).
+		Strs("found", extractToolNames(matches)).
+		Msg("search_tool(tool-search): regex search completed")
+
+	return matches
+}
+
+// extractParameterText extracts searchable text from tool parameter definitions.
+func extractParameterText(def map[string]any) string {
+	var parts []string
+
+	// Extract from input_schema (Anthropic style)
+	if inputSchema, ok := def["input_schema"].(map[string]any); ok {
+		parts = append(parts, extractPropertiesText(inputSchema)...)
+	}
+
+	// Extract from parameters (OpenAI style)
+	if params, ok := def["parameters"].(map[string]any); ok {
+		parts = append(parts, extractPropertiesText(params)...)
+	}
+
+	// Extract from function.parameters (OpenAI nested style)
+	if fn, ok := def["function"].(map[string]any); ok {
+		if params, ok := fn["parameters"].(map[string]any); ok {
+			parts = append(parts, extractPropertiesText(params)...)
+		}
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// extractPropertiesText extracts parameter names and descriptions from a schema.
+func extractPropertiesText(schema map[string]any) []string {
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	// Pre-allocate: each property contributes name + possibly description (max 2 items each)
+	parts := make([]string, 0, len(props)*2)
+
+	for name, propVal := range props {
+		parts = append(parts, name)
+		if prop, ok := propVal.(map[string]any); ok {
+			if desc, ok := prop["description"].(string); ok {
+				parts = append(parts, desc)
+			}
+		}
+	}
+
+	return parts
 }
 
 type toolDiscoverySearchRequest struct {
@@ -352,7 +464,7 @@ func (h *SearchToolHandler) searchViaAPI(deferred []adapters.ExtractedContent, q
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("status=%d body=%s", resp.StatusCode, string(respBody))
 	}

@@ -611,12 +611,24 @@ func InjectExpandContextTool(body []byte, shadowRefs map[string]string, provider
 		}
 	}
 
-	// Use provider for reliable format detection
-	isOpenAIFormat := provider == "openai"
+	// Detect if this is Responses API format (has "input" field) or Chat Completions (has "messages")
+	// Responses API uses flat tool format: {"type":"function","name":"...","parameters":...}
+	// Chat Completions uses nested format: {"type":"function","function":{"name":"...","parameters":...}}
+	_, hasInput := request["input"]
+	isResponsesAPI := hasInput && provider == "openai"
+	isOpenAIChatCompletions := provider == "openai" && !isResponsesAPI
 
 	var expandTool map[string]interface{}
-	if isOpenAIFormat {
-		// OpenAI Chat Completions format
+	if isResponsesAPI {
+		// OpenAI Responses API format (flat)
+		expandTool = map[string]interface{}{
+			"type":        "function",
+			"name":        ExpandContextToolName,
+			"description": "Retrieve the full, uncompressed content for a shadow reference. Use this when you need more detail from compressed tool outputs.",
+			"parameters":  ExpandContextToolSchema,
+		}
+	} else if isOpenAIChatCompletions {
+		// OpenAI Chat Completions format (nested)
 		expandTool = map[string]interface{}{
 			"type": "function",
 			"function": map[string]interface{}{

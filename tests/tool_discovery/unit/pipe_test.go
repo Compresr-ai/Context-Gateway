@@ -181,7 +181,26 @@ func TestPipe_Process_Relevance_DoesNotInjectSearchTool(t *testing.T) {
 }
 
 func TestPipe_Process_API_ReplacesWithSearchToolOnly(t *testing.T) {
+	// API strategy now filters directly (no phantom tool).
+	// Without a valid API endpoint, it returns original request unchanged.
 	cfg := testConfig("api", 1, 10, 0.8, []string{"run_tests"})
+	pipe := tooldiscovery.New(cfg)
+
+	body := openAIRequestWithToolsAndQuery(6, "search for code")
+	ctx := newOpenAIPipeContext(body)
+
+	result, err := pipe.Process(ctx)
+	require.NoError(t, err)
+
+	// API strategy without endpoint returns original tools unchanged
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(result, &req))
+	tools := req["tools"].([]any)
+	assert.Len(t, tools, 6) // All tools returned (API not configured)
+}
+
+func TestPipe_Process_ToolSearch_ReplacesWithSearchToolOnly(t *testing.T) {
+	cfg := testConfig("tool-search", 1, 10, 0.8, []string{"run_tests"})
 	pipe := tooldiscovery.New(cfg)
 
 	body := openAIRequestWithToolsAndQuery(6, "search for code")

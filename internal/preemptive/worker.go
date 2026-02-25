@@ -47,6 +47,11 @@ type Job struct {
 	LastIndex     int
 	Error         string
 	done          chan struct{}
+
+	// Per-job auth credentials for session isolation
+	AuthToken     string // Captured auth token for this job
+	AuthIsXAPIKey bool   // true = use x-api-key header, false = use Authorization: Bearer
+	AuthEndpoint  string // Captured endpoint for this job
 }
 
 // SummarizationJob is an alias for backward compatibility.
@@ -116,13 +121,23 @@ func (w *Worker) Stop() {
 	log.Info().Msg("Preemptive summarization workers stopped")
 }
 
-// SubmitJob submits a new summarization job (legacy name).
-func (w *Worker) SubmitJob(sessionID string, messages []json.RawMessage, model string) (*Job, error) {
-	return w.Submit(sessionID, messages, model), nil
+// JobAuthParams contains per-job auth credentials captured from the triggering request.
+// This ensures each background job uses the auth from its originating session, not a global.
+type JobAuthParams struct {
+	Token     string // Auth token (API key or Bearer token)
+	IsXAPIKey bool   // true = use x-api-key header, false = use Authorization: Bearer
+	Endpoint  string // Upstream endpoint URL
 }
 
-// Submit submits a new summarization job.
-func (w *Worker) Submit(sessionID string, messages []json.RawMessage, model string) *Job {
+// SubmitJob submits a new summarization job (legacy name).
+func (w *Worker) SubmitJob(sessionID string, messages []json.RawMessage, model string) (*Job, error) {
+	return w.Submit(sessionID, messages, model, JobAuthParams{}), nil
+}
+
+// Submit submits a new summarization job with per-job auth credentials.
+// The auth params are captured from the request that triggers this job,
+// ensuring session isolation.
+func (w *Worker) Submit(sessionID string, messages []json.RawMessage, model string, auth JobAuthParams) *Job {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -134,14 +149,17 @@ func (w *Worker) Submit(sessionID string, messages []json.RawMessage, model stri
 	}
 
 	job := &Job{
-		ID:           sessionID,
-		SessionID:    sessionID,
-		Status:       JobQueued,
-		CreatedAt:    time.Now(),
-		Messages:     messages,
-		MessageCount: len(messages),
-		Model:        model,
-		done:         make(chan struct{}),
+		ID:            sessionID,
+		SessionID:     sessionID,
+		Status:        JobQueued,
+		CreatedAt:     time.Now(),
+		Messages:      messages,
+		MessageCount:  len(messages),
+		Model:         model,
+		done:          make(chan struct{}),
+		AuthToken:     auth.Token,
+		AuthIsXAPIKey: auth.IsXAPIKey,
+		AuthEndpoint:  auth.Endpoint,
 	}
 
 	w.jobs[sessionID] = job
@@ -228,6 +246,9 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		KeepRecentTokens: w.summarizerCfg.KeepRecentTokens,
 		KeepRecentCount:  w.summarizerCfg.KeepRecentCount,
 		Model:            job.Model,
+		AuthToken:        job.AuthToken,
+		AuthIsXAPIKey:    job.AuthIsXAPIKey,
+		AuthEndpoint:     job.AuthEndpoint,
 	})
 
 	now := time.Now()

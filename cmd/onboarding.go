@@ -215,7 +215,7 @@ func updateClaudeSettings(settingsPath, hookScript string) error {
 	var settings map[string]interface{}
 
 	// Read existing settings or create new
-	data, err := os.ReadFile(settingsPath)
+	data, err := os.ReadFile(settingsPath) // #nosec G304 -- known settings path under ~/.claude
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -304,7 +304,7 @@ func isSlackHookInstalled() bool {
 	}
 
 	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
-	data, err := os.ReadFile(settingsPath)
+	data, err := os.ReadFile(settingsPath) // #nosec G304 -- known settings path
 	if err != nil {
 		return false
 	}
@@ -358,6 +358,7 @@ func appendToEnvFile(envPath, key, value string) {
 	var lines []string
 	found := false
 
+	// #nosec G304 -- env file constructed from known paths
 	file, err := os.Open(envPath)
 	if err == nil {
 		scanner := bufio.NewScanner(file)

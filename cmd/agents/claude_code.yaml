@@ -1,0 +1,25 @@
+# Claude Code Agent Configuration
+# ================================
+# Anthropic Claude via official CLI with gateway compression
+# Uses default_config.yaml with dual-model support:
+#   - Lingua: Semantic summarization
+#   - Compresr: Tool output & discovery
+
+agent:
+  name: "claude_code"
+  display_name: "Claude Code (CLI)"
+  description: "Anthropic Claude via official CLI with Compresr compression"
+  config: "default_config.yaml"
+
+  environment:
+    - name: "ANTHROPIC_BASE_URL"
+      value: "http://localhost:${GATEWAY_PORT}"
+    - name: "ANTHROPIC_API_KEY"
+      value: "${ANTHROPIC_API_KEY}"
+
+  command:
+    check_cmd: ["which", "claude"]
+    run: "claude"
+    args: []
+    install_cmd: ["npm", "install", "-g", "@anthropic-ai/claude-code"]
+    fallback_message: "Claude CLI not found."

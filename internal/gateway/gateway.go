@@ -24,6 +24,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/auth"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/costcontrol"
 	"github.com/compresr/context-gateway/internal/monitoring"
@@ -43,6 +44,7 @@ const (
 // Re-export centralized defaults for backward compatibility within this package.
 const (
 	MaxRequestBodySize     = config.MaxRequestBodySize
+	MaxResponseSize        = config.MaxResponseSize
 	DefaultRateLimit       = config.DefaultRateLimit
 	MaxRateLimitBuckets    = config.MaxRateLimitBuckets
 	DefaultBufferSize      = config.DefaultBufferSize
@@ -56,6 +58,7 @@ const (
 var allowedHosts = map[string]bool{
 	// Core providers
 	"api.openai.com":                    true,
+	"chatgpt.com":                       true, // ChatGPT subscription backend
 	"api.anthropic.com":                 true,
 	"generativelanguage.googleapis.com": true,
 
@@ -82,12 +85,18 @@ var allowedHosts = map[string]bool{
 	"api-inference.huggingface.co":  true,
 	"ai-gateway.cloudflare.com":     true,
 
-	// Local/self-hosted
-	"localhost": true,
-	"127.0.0.1": true,
+	// Localhost removed from default allowlist to prevent SSRF
+	// Use GATEWAY_ALLOW_LOCAL=true for local development
 }
 
 func init() {
+	// Allow local development via explicit opt-in
+	if os.Getenv("GATEWAY_ALLOW_LOCAL") == "true" {
+		allowedHosts["localhost"] = true
+		allowedHosts["127.0.0.1"] = true
+		log.Warn().Msg("SSRF protection: localhost enabled via GATEWAY_ALLOW_LOCAL (dev mode only)")
+	}
+
 	// Allow additional hosts via environment variable
 	if extra := os.Getenv("GATEWAY_ALLOWED_HOSTS"); extra != "" {
 		var addedHosts []string
@@ -104,6 +113,13 @@ func init() {
 				Msg("SSRF allowlist extended via GATEWAY_ALLOWED_HOSTS")
 		}
 	}
+}
+
+// EnableLocalHostsForTesting adds localhost to the SSRF allowlist.
+// This should only be called from test setup (TestMain).
+func EnableLocalHostsForTesting() {
+	allowedHosts["localhost"] = true
+	allowedHosts["127.0.0.1"] = true
 }
 
 // registerBedrockHosts adds Bedrock Runtime hosts to the SSRF allowlist.
@@ -141,6 +157,9 @@ type Gateway struct {
 	// Tool sessions for hybrid tool discovery.
 	toolSessions *ToolSessionStore
 	authMode     *authFallbackStore
+
+	// Provider-specific auth handlers (subscription/fallback)
+	authRegistry *auth.Registry
 
 	// Legacy expander (for streaming - to be migrated)
 	expander *tooloutput.Expander
@@ -182,6 +201,7 @@ func New(cfg *config.Config) *Gateway {
 		Enabled:              cfg.Monitoring.TelemetryEnabled,
 		LogPath:              cfg.Monitoring.TelemetryPath,
 		LogToStdout:          cfg.Monitoring.LogToStdout,
+		VerbosePayloads:      cfg.Monitoring.VerbosePayloads,
 		CompressionLogPath:   cfg.Monitoring.CompressionLogPath,
 		ToolDiscoveryLogPath: cfg.Monitoring.ToolDiscoveryLogPath,
 	})
@@ -242,6 +262,13 @@ func New(cfg *config.Config) *Gateway {
 	// Initialize tool session store for hybrid tool discovery
 	toolSessions := NewToolSessionStore(time.Hour) // 1 hour TTL
 
+	// Initialize provider-specific auth handlers
+	authRegistry, err := auth.SetupRegistry(cfg)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to initialize auth registry, fallback disabled")
+		authRegistry = auth.NewRegistry() // Empty registry
+	}
+
 	g := &Gateway{
 		config:        cfg,
 		registry:      registry,
@@ -253,9 +280,10 @@ func New(cfg *config.Config) *Gateway {
 		httpClient:    &http.Client{Timeout: clientTimeout, Transport: transport},
 		rateLimiter:   newRateLimiter(DefaultRateLimit),
 		costTracker:   costcontrol.NewTracker(cfg.CostControl),
-		preemptive:    preemptive.NewManager(cfg.ResolvePreemptiveProvider()),
+		preemptive:    preemptive.NewManager(cfg.ResolvePreemptiveProviderWithLogging(cfg.Monitoring.TelemetryEnabled)),
 		toolSessions:  toolSessions,
 		authMode:      newAuthFallbackStore(time.Hour),
+		authRegistry:  authRegistry,
 		bedrockSigner: bedrockSigner,
 		logger:        logger,
 		requestLogger: requestLogger,
@@ -317,6 +345,9 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	}
 	if g.authMode != nil {
 		g.authMode.Stop()
+	}
+	if g.authRegistry != nil {
+		g.authRegistry.Stop()
 	}
 
 	// Stop preemptive summarization manager

@@ -103,7 +103,7 @@ func main() {
 func resolveServeConfig(userConfig string) ([]byte, string, error) {
 	// If user specified a config path, read it directly
 	if userConfig != "" {
-		data, err := os.ReadFile(userConfig)
+		data, err := os.ReadFile(userConfig) // #nosec G304 -- user-specified config path
 		if err != nil {
 			return nil, "", fmt.Errorf("config file not found: %s", userConfig)
 		}
@@ -116,24 +116,27 @@ func resolveServeConfig(userConfig string) ([]byte, string, error) {
 	searchPaths := []string{}
 	if homeDir != "" {
 		searchPaths = append(searchPaths,
+			filepath.Join(homeDir, ".config", "context-gateway", "configs", "default_config.yaml"),
 			filepath.Join(homeDir, ".config", "context-gateway", "configs", "preemptive_summarization.yaml"),
 			filepath.Join(homeDir, ".config", "context-gateway", "configs", "config.yaml"),
 		)
 	}
 	searchPaths = append(searchPaths,
+		"configs/default_config.yaml",
 		"configs/preemptive_summarization.yaml",
 		"configs/config.yaml",
 	)
 
 	for _, path := range searchPaths {
+		// #nosec G304 -- trusted config search paths
 		if data, err := os.ReadFile(path); err == nil {
 			return data, path, nil
 		}
 	}
 
 	// Fall back to embedded config
-	if data, err := getEmbeddedConfig("preemptive_summarization"); err == nil {
-		return data, "(embedded) preemptive_summarization.yaml", nil
+	if data, err := getEmbeddedConfig("default_config"); err == nil {
+		return data, "(embedded) default_config.yaml", nil
 	}
 
 	return nil, "", fmt.Errorf("no config file found. Specify --config path")

@@ -24,6 +24,7 @@ type AgentSpec struct {
 	Models       []AgentModel  `yaml:"models"`
 	DefaultModel string        `yaml:"default_model"`
 	Environment  []AgentEnvVar `yaml:"environment"`
+	Unset        []string      `yaml:"unset"` // env vars to unset (for OAuth auth)
 	Command      AgentCommand  `yaml:"command"`
 }
 

@@ -2,6 +2,7 @@ package costcontrol
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,10 @@ type Tracker struct {
 	config   CostControlConfig
 	sessions map[string]*CostSession
 	mu       sync.RWMutex
+
+	// Atomic global cost accumulator for O(1) budget checks
+	// Stored as cost * 1e9 (nano-dollars) to use atomic int64 ops
+	globalCostNano int64
 }
 
 // NewTracker creates a new cost tracker. Starts a background cleanup goroutine.
@@ -33,18 +38,13 @@ func (t *Tracker) CheckBudget(sessionID string) BudgetCheckResult {
 
 	t.mu.RLock()
 	s := t.sessions[sessionID]
-
 	sessionCost := 0.0
 	if s != nil {
 		sessionCost = s.Cost
 	}
-
-	// Sum global cost while holding lock
-	var globalCost float64
-	for _, sess := range t.sessions {
-		globalCost += sess.Cost
-	}
 	t.mu.RUnlock()
+
+	globalCost := float64(atomic.LoadInt64(&t.globalCostNano)) / 1e9
 
 	// If not enforcing, always allow (still report costs)
 	if !t.config.Enabled {
@@ -66,14 +66,7 @@ func (t *Tracker) CheckBudget(sessionID string) BudgetCheckResult {
 
 // GetGlobalCost returns total accumulated cost across all sessions.
 func (t *Tracker) GetGlobalCost() float64 {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-
-	var total float64
-	for _, s := range t.sessions {
-		total += s.Cost
-	}
-	return total
+	return float64(atomic.LoadInt64(&t.globalCostNano)) / 1e9
 }
 
 // RecordUsage records actual cost from token counts (non-streaming).
@@ -97,6 +90,9 @@ func (t *Tracker) RecordUsage(sessionID, model string, inputTokens, outputTokens
 	if model != "" {
 		s.Model = model
 	}
+
+	costNano := int64(cost * 1e9)
+	atomic.AddInt64(&t.globalCostNano, costNano)
 }
 
 // GetSessionCost returns accumulated cost for a session.
@@ -176,6 +172,8 @@ func (t *Tracker) cleanup() {
 		now := time.Now()
 		for id, s := range t.sessions {
 			if now.Sub(s.LastUpdated) > sessionTTL {
+				costNano := int64(s.Cost * 1e9)
+				atomic.AddInt64(&t.globalCostNano, -costNano)
 				delete(t.sessions, id)
 			}
 		}

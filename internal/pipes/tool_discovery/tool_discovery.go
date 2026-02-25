@@ -17,11 +17,14 @@ package tooldiscovery
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/pipes"
 	"github.com/compresr/context-gateway/internal/utils"
@@ -52,9 +55,9 @@ var SearchToolSchema = map[string]any{
 
 // Score weights for relevance signals.
 const (
+	scoreExpanded     = 1000 // Tool was found via search (never filter again)
 	scoreRecentlyUsed = 100  // Tool was used in conversation history
 	scoreAlwaysKeep   = 100  // Tool is in the always-keep list
-	scoreExpanded     = 1000 // Tool was found via search (never filter again)
 	scoreExactName    = 50   // Query contains exact tool name
 	scoreWordMatch    = 10   // Per-word overlap between query and tool name/description
 )
@@ -67,9 +70,18 @@ type Pipe struct {
 	maxTools             int
 	targetRatio          float64
 	alwaysKeep           map[string]bool
+	alwaysKeepList       []string // For API payload
 	enableSearchFallback bool
 	searchToolName       string
 	maxSearchResults     int
+
+	// Compresr API client (used when strategy=api)
+	compresrClient *compresr.Client
+
+	// API strategy fields (legacy, used for non-compresr endpoints)
+	apiEndpoint string
+	apiKey      string
+	apiTimeout  time.Duration
 }
 
 // New creates a new tool discovery pipe.
@@ -96,13 +108,17 @@ func New(cfg *config.Config) *Pipe {
 
 	// Search fallback behavior:
 	// - relevance strategy: disabled (pure score-based filtering only)
-	// - api strategy: always enabled (LLM must discover tools through search)
+	// - tool-search strategy: enabled (LLM uses gateway_search_tools phantom tool)
+	// - api strategy: disabled (direct API filtering, no phantom tool)
 	// - disabled pipe: forced off
 	enableSearchFallback := cfg.Pipes.ToolDiscovery.EnableSearchFallback
 	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyRelevance {
 		enableSearchFallback = false
 	}
 	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyAPI {
+		enableSearchFallback = false // API strategy filters directly, no phantom tool
+	}
+	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyToolSearch {
 		enableSearchFallback = true
 	}
 	if !cfg.Pipes.ToolDiscovery.Enabled {
@@ -119,6 +135,36 @@ func New(cfg *config.Config) *Pipe {
 		maxSearchResults = DefaultMaxSearchResults
 	}
 
+	// API strategy configuration
+	apiEndpoint := cfg.Pipes.ToolDiscovery.API.Endpoint
+	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyAPI {
+		if apiEndpoint != "" {
+			// Prepend Compresr base URL if endpoint is relative
+			if !strings.HasPrefix(apiEndpoint, "http://") && !strings.HasPrefix(apiEndpoint, "https://") {
+				apiEndpoint = cfg.URLs.Compresr + apiEndpoint
+				// Clean up double slashes (except in http://)
+				apiEndpoint = strings.Replace(apiEndpoint, "://", "::SCHEME::", 1)
+				apiEndpoint = strings.ReplaceAll(apiEndpoint, "//", "/")
+				apiEndpoint = strings.Replace(apiEndpoint, "::SCHEME::", "://", 1)
+			}
+		} else if cfg.URLs.Compresr != "" {
+			// Default to compresr URL with standard path
+			apiEndpoint = strings.TrimRight(cfg.URLs.Compresr, "/") + "/api/compress/tool-discovery/"
+		}
+	}
+	apiTimeout := cfg.Pipes.ToolDiscovery.API.Timeout
+	if apiTimeout <= 0 {
+		apiTimeout = 10 * time.Second
+	}
+
+	// Initialize Compresr client when strategy is 'api'
+	var compresrClient *compresr.Client
+	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyAPI {
+		baseURL := cfg.URLs.Compresr
+		compresrClient = compresr.NewClient(baseURL, cfg.Pipes.ToolDiscovery.API.APISecret)
+		log.Info().Str("base_url", baseURL).Msg("tool_discovery: initialized Compresr client for API strategy")
+	}
+
 	return &Pipe{
 		enabled:              cfg.Pipes.ToolDiscovery.Enabled,
 		strategy:             cfg.Pipes.ToolDiscovery.Strategy,
@@ -126,9 +172,14 @@ func New(cfg *config.Config) *Pipe {
 		maxTools:             maxTools,
 		targetRatio:          targetRatio,
 		alwaysKeep:           alwaysKeep,
+		alwaysKeepList:       cfg.Pipes.ToolDiscovery.AlwaysKeep,
 		enableSearchFallback: enableSearchFallback,
 		searchToolName:       searchToolName,
 		maxSearchResults:     maxSearchResults,
+		compresrClient:       compresrClient,
+		apiEndpoint:          apiEndpoint,
+		apiKey:               cfg.Pipes.ToolDiscovery.API.APISecret,
+		apiTimeout:           apiTimeout,
 	}
 }
 
@@ -160,7 +211,9 @@ func (p *Pipe) Process(ctx *pipes.PipeContext) ([]byte, error) {
 	case config.StrategyRelevance:
 		return p.filterByRelevance(ctx)
 	case config.StrategyAPI:
-		return p.prepareAPISearch(ctx)
+		return p.filterByAPI(ctx)
+	case config.StrategyToolSearch:
+		return p.prepareToolSearch(ctx)
 	default:
 		return ctx.OriginalRequest, nil
 	}
@@ -182,12 +235,63 @@ func (p *Pipe) filterByRelevance(ctx *pipes.PipeContext) ([]byte, error) {
 	return p.filterByRelevanceParsed(ctx, parsedAdapter)
 }
 
-// prepareAPISearch prepares requests for API-based tool discovery.
+// prepareToolSearch prepares requests for tool-search strategy.
 // Strategy behavior:
 //  1. Extract all tools from the request
 //  2. Store them as deferred tools for session-scoped lookup
-//  3. Replace tools[] with only gateway_search_tools
-func (p *Pipe) prepareAPISearch(ctx *pipes.PipeContext) ([]byte, error) {
+//  3. Replace tools[] with only gateway_search_tools (phantom tool)
+func (p *Pipe) prepareToolSearch(ctx *pipes.PipeContext) ([]byte, error) {
+	if ctx.Adapter == nil || len(ctx.OriginalRequest) == 0 {
+		return ctx.OriginalRequest, nil
+	}
+
+	parsedAdapter, ok := ctx.Adapter.(adapters.ParsedRequestAdapter)
+	if !ok {
+		log.Warn().Str("adapter", ctx.Adapter.Name()).Msg("tool_discovery(tool-search): adapter does not implement ParsedRequestAdapter, skipping")
+		return ctx.OriginalRequest, nil
+	}
+
+	parsed, err := parsedAdapter.ParseRequest(ctx.OriginalRequest)
+	if err != nil {
+		log.Warn().Err(err).Msg("tool_discovery(tool-search): parse failed, skipping")
+		return ctx.OriginalRequest, nil
+	}
+
+	tools, err := parsedAdapter.ExtractToolDiscoveryFromParsed(parsed, nil)
+	if err != nil {
+		log.Warn().Err(err).Msg("tool_discovery(tool-search): extraction failed, skipping")
+		return ctx.OriginalRequest, nil
+	}
+	if len(tools) == 0 {
+		return ctx.OriginalRequest, nil
+	}
+
+	// Store all original tools for search and eventual re-injection.
+	ctx.DeferredTools = tools
+	ctx.ToolsFiltered = true
+
+	modified, err := p.replaceWithSearchToolOnly(ctx.OriginalRequest, ctx.Adapter.Provider())
+	if err != nil {
+		log.Warn().Err(err).Msg("tool_discovery(tool-search): failed to replace tools with search tool")
+		return ctx.OriginalRequest, nil
+	}
+
+	log.Info().
+		Int("total", len(tools)).
+		Str("search_tool", p.searchToolName).
+		Msg("tool_discovery(tool-search): replaced tools with gateway search tool")
+
+	return modified, nil
+}
+
+// filterByAPI filters tools by calling an external API.
+// Strategy behavior:
+//  1. Extract all tools and user query from the request
+//  2. Call external API with tools and query
+//  3. API returns selected tool names
+//  4. Filter request to keep only selected tools
+//  5. Forward filtered request to LLM (no phantom tool)
+func (p *Pipe) filterByAPI(ctx *pipes.PipeContext) ([]byte, error) {
 	if ctx.Adapter == nil || len(ctx.OriginalRequest) == 0 {
 		return ctx.OriginalRequest, nil
 	}
@@ -213,22 +317,111 @@ func (p *Pipe) prepareAPISearch(ctx *pipes.PipeContext) ([]byte, error) {
 		return ctx.OriginalRequest, nil
 	}
 
-	// Store all original tools for API search and eventual re-injection.
-	ctx.DeferredTools = tools
-	ctx.ToolsFiltered = true
+	// Extract user query from the request
+	query := parsedAdapter.ExtractUserQueryFromParsed(parsed)
 
-	modified, err := p.replaceWithSearchToolOnly(ctx.OriginalRequest, ctx.Adapter.Provider())
+	// Get provider name for source tracking
+	provider := ctx.Adapter.Name()
+
+	// Call external API to select relevant tools
+	selectedNames, err := p.callToolSelectionAPI(tools, query, provider)
 	if err != nil {
-		log.Warn().Err(err).Msg("tool_discovery(api): failed to replace tools with search tool")
+		log.Warn().Err(err).Msg("tool_discovery(api): API call failed, returning all tools")
 		return ctx.OriginalRequest, nil
 	}
 
+	// If no tools selected, return original
+	if len(selectedNames) == 0 {
+		log.Warn().Msg("tool_discovery(api): API returned no tools, returning all tools")
+		return ctx.OriginalRequest, nil
+	}
+
+	// Build set of selected names for fast lookup
+	selectedSet := make(map[string]bool, len(selectedNames))
+	for _, name := range selectedNames {
+		selectedSet[name] = true
+	}
+
+	// Also include always-keep tools
+	for _, name := range p.alwaysKeepList {
+		selectedSet[name] = true
+	}
+
+	// Build filter results
+	results := make([]adapters.CompressedResult, 0, len(tools))
+	keptNames := make([]string, 0)
+	for _, tool := range tools {
+		keep := selectedSet[tool.ToolName]
+		results = append(results, adapters.CompressedResult{
+			ID:   tool.ID,
+			Keep: keep,
+		})
+		if keep {
+			keptNames = append(keptNames, tool.ToolName)
+		}
+	}
+
+	// Apply filtered tools to request
+	modified, err := parsedAdapter.ApplyToolDiscoveryToParsed(parsed, results)
+	if err != nil {
+		log.Warn().Err(err).Msg("tool_discovery(api): apply failed, returning original")
+		return ctx.OriginalRequest, nil
+	}
+
+	// Mark that filtering occurred
+	ctx.ToolsFiltered = true
+
 	log.Info().
+		Str("query", query).
 		Int("total", len(tools)).
-		Str("search_tool", p.searchToolName).
-		Msg("tool_discovery(api): replaced tools with gateway search tool")
+		Int("kept", len(keptNames)).
+		Strs("kept_tools", keptNames).
+		Msg("tool_discovery(api): filtered tools via API")
 
 	return modified, nil
+}
+
+// callToolSelectionAPI calls the Compresr API to select relevant tools.
+func (p *Pipe) callToolSelectionAPI(tools []adapters.ExtractedContent, query, provider string) ([]string, error) {
+	// Use the centralized Compresr client
+	if p.compresrClient == nil {
+		return nil, fmt.Errorf("compresr client not initialized")
+	}
+
+	// Convert to compresr.ToolDefinition slice
+	toolDefs := make([]compresr.ToolDefinition, 0, len(tools))
+	for _, tool := range tools {
+		apiTool := compresr.ToolDefinition{
+			Name:        tool.ToolName,
+			Description: tool.Content,
+		}
+		// Include full parameters schema if available (backend expects 'parameters' field)
+		if rawJSON, ok := tool.Metadata["raw_json"].(string); ok && rawJSON != "" {
+			var def map[string]any
+			if err := json.Unmarshal([]byte(rawJSON), &def); err == nil {
+				apiTool.Parameters = def
+			}
+		}
+		toolDefs = append(toolDefs, apiTool)
+	}
+
+	// Build source string: gateway:anthropic or gateway:openai
+	source := "gateway:" + provider
+
+	params := compresr.FilterToolsParams{
+		Query:      query,
+		AlwaysKeep: p.alwaysKeepList,
+		Tools:      toolDefs,
+		MaxTools:   p.maxTools, // Use configured max from pipe config
+		Source:     source,
+	}
+
+	result, err := p.compresrClient.FilterTools(params)
+	if err != nil {
+		return nil, fmt.Errorf("compresr API call failed: %w", err)
+	}
+
+	return result.RelevantTools, nil
 }
 
 // =============================================================================
@@ -504,8 +697,12 @@ func (p *Pipe) injectSearchTool(body []byte, provider adapters.Provider) ([]byte
 		tools = []any{}
 	}
 
-	// Build the search tool definition based on provider format
-	searchTool := p.buildSearchToolDefinition(provider)
+	// Detect if this is Responses API format (has "input" field) or Chat Completions
+	_, hasInput := req["input"]
+	isResponsesAPI := hasInput && provider == adapters.ProviderOpenAI
+
+	// Build the search tool definition based on provider and API format
+	searchTool := p.buildSearchToolDefinitionForFormat(provider, isResponsesAPI)
 
 	tools = append(tools, searchTool)
 	req["tools"] = tools
@@ -520,13 +717,33 @@ func (p *Pipe) replaceWithSearchToolOnly(body []byte, provider adapters.Provider
 		return body, err
 	}
 
-	searchTool := p.buildSearchToolDefinition(provider)
+	// Detect if this is Responses API format (has "input" field) or Chat Completions
+	_, hasInput := req["input"]
+	isResponsesAPI := hasInput && provider == adapters.ProviderOpenAI
+
+	searchTool := p.buildSearchToolDefinitionForFormat(provider, isResponsesAPI)
 	req["tools"] = []any{searchTool}
 
 	return utils.MarshalNoEscape(req)
 }
 
+// buildSearchToolDefinitionForFormat creates the search tool in the appropriate format.
+// isResponsesAPI indicates whether to use flat format (Responses API) or nested (Chat Completions).
+func (p *Pipe) buildSearchToolDefinitionForFormat(provider adapters.Provider, isResponsesAPI bool) map[string]any {
+	if isResponsesAPI {
+		// OpenAI Responses API format (flat): {"type":"function","name":"...","parameters":...}
+		return map[string]any{
+			"type":        "function",
+			"name":        p.searchToolName,
+			"description": SearchToolDescription,
+			"parameters":  SearchToolSchema,
+		}
+	}
+	return p.buildSearchToolDefinition(provider)
+}
+
 // buildSearchToolDefinition creates the search tool in the appropriate provider format.
+// Note: For OpenAI Responses API, use buildSearchToolDefinitionForFormat instead.
 func (p *Pipe) buildSearchToolDefinition(provider adapters.Provider) map[string]any {
 	switch provider {
 	case adapters.ProviderOpenAI:

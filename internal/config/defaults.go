@@ -80,6 +80,9 @@ const DefaultDialTimeout = 30 * time.Second
 // MaxRequestBodySize is the maximum allowed request body (50MB).
 const MaxRequestBodySize = 50 * 1024 * 1024
 
+// MaxResponseSize is the maximum allowed upstream response body (50MB).
+const MaxResponseSize = 50 * 1024 * 1024
+
 // MaxErrorBodyLogLen limits error response body in logs to prevent bloat.
 const MaxErrorBodyLogLen = 500
 

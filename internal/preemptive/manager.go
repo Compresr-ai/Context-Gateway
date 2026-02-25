@@ -108,6 +108,7 @@ func (m *Manager) parseRequest(headers http.Header, body []byte, model, provider
 	// ==========================================================================
 	// HIERARCHICAL SESSION ID MATCHING
 	// ==========================================================================
+	// Priority 0: Explicit X-Session-ID header (client-provided, most reliable)
 	// Priority 1: Hash of first USER message (stable identifier)
 	// Priority 2: Fuzzy matching based on message count + recency (for subagents)
 	// Priority 3: Legacy hash fallback
@@ -116,15 +117,24 @@ func (m *Manager) parseRequest(headers http.Header, body []byte, model, provider
 	var sessionID string
 	var sessionSource string
 
+	// LEVEL 0: Explicit X-Session-ID header (most reliable - client provides)
+	if explicitID := headers.Get("X-Session-ID"); explicitID != "" {
+		sessionID = explicitID
+		sessionSource = "explicit_header"
+		log.Debug().Str("session_id", sessionID).Msg("Session ID from X-Session-ID header")
+	}
+
 	// LEVEL 1: Hash first USER message (most stable approach)
-	sessionID = m.sessions.GenerateSessionID(messages)
-	if sessionID != "" {
-		sessionSource = "first_user_message_hash"
-		log.Debug().Str("session_id", sessionID).Msg("Session ID from first user message hash")
+	if sessionID == "" {
+		sessionID = m.sessions.GenerateSessionID(messages)
+		if sessionID != "" {
+			sessionSource = "first_user_message_hash"
+			log.Debug().Str("session_id", sessionID).Msg("Session ID from first user message hash")
+		}
 	}
 
 	// LEVEL 2: Fuzzy matching (for subagents or when user message not found)
-	if sessionID == "" {
+	if sessionID == "" && !m.config.Session.DisableFuzzyMatching {
 		log.Info().Int("message_count", len(messages)).Msg("No user message found, attempting fuzzy match")
 
 		if match := m.sessions.FindBestMatchingSession(len(messages), model, ""); match != nil {
@@ -151,12 +161,22 @@ func (m *Manager) parseRequest(headers http.Header, body []byte, model, provider
 
 	provider := adapters.ProviderFromString(providerName)
 	detector := GetDetector(provider, m.config.Detectors)
-	detection := detector.Detect(body)
+
+	// Get URL path from headers for path-based detection (e.g., Codex /responses/compact)
+	requestPath := headers.Get("X-Request-Path")
+
+	// Use path-aware detection for OpenAI (Codex sends to /responses/compact)
+	var detection DetectionResult
+	if openaiDetector, ok := detector.(*OpenAIDetector); ok {
+		detection = openaiDetector.DetectWithPath(body, requestPath)
+	} else {
+		detection = detector.Detect(body)
+	}
 
 	// SPECIAL HANDLING FOR COMPACTION REQUESTS
 	// If this is a compaction request and we don't have a session with a ready summary,
 	// try fuzzy matching to find one that does
-	if detection.IsCompactionRequest {
+	if detection.IsCompactionRequest && !m.config.Session.DisableFuzzyMatching {
 		existing := m.sessions.Get(sessionID)
 		if existing == nil || (existing.State != StateReady && existing.State != StatePending) {
 			log.Info().
@@ -178,12 +198,31 @@ func (m *Manager) parseRequest(headers http.Header, body []byte, model, provider
 		}
 	}
 
+	// Capture per-request auth from headers for session isolation
+	var authToken string
+	var authIsXAPIKey bool
+	if xAPIKey := headers.Get("x-api-key"); xAPIKey != "" {
+		authToken = xAPIKey
+		authIsXAPIKey = true
+	} else if authHeader := headers.Get("Authorization"); authHeader != "" {
+		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+			authToken = authHeader[7:]
+			authIsXAPIKey = false
+		}
+	}
+
+	// Capture endpoint from headers
+	authEndpoint := headers.Get("X-Target-URL")
+
 	return &request{
-		messages:  messages,
-		model:     model,
-		sessionID: sessionID,
-		provider:  provider,
-		detection: detection,
+		messages:      messages,
+		model:         model,
+		sessionID:     sessionID,
+		provider:      provider,
+		detection:     detection,
+		authToken:     authToken,
+		authIsXAPIKey: authIsXAPIKey,
+		authEndpoint:  authEndpoint,
 	}, nil
 }
 
@@ -305,6 +344,9 @@ func (m *Manager) doSynchronous(req *request) (*summaryResult, error) {
 		KeepRecentTokens: m.config.Summarizer.KeepRecentTokens,
 		KeepRecentCount:  m.config.Summarizer.KeepRecentCount,
 		Model:            req.model,
+		AuthToken:        req.authToken,
+		AuthIsXAPIKey:    req.authIsXAPIKey,
+		AuthEndpoint:     req.authEndpoint,
 	})
 	if err != nil {
 		logError(req.sessionID, err)
@@ -377,7 +419,12 @@ func (m *Manager) triggerIfNeeded(session *Session, req *request, usage float64)
 
 	log.Info().Str("session", req.sessionID).Float64("usage", usage).Int("messages", len(req.messages)).Msg("Triggering preemptive summarization")
 	logPreemptiveTrigger(req.sessionID, req.model, len(req.messages), usage, m.config.TriggerThreshold, m.config.Summarizer.Provider, m.config.Summarizer.Model)
-	m.worker.Submit(req.sessionID, req.messages, req.model)
+
+	m.worker.Submit(req.sessionID, req.messages, req.model, JobAuthParams{
+		Token:     req.authToken,
+		IsXAPIKey: req.authIsXAPIKey,
+		Endpoint:  req.authEndpoint,
+	})
 }
 
 // =============================================================================
@@ -428,6 +475,10 @@ func (m *Manager) Stats() map[string]interface{} {
 // =============================================================================
 
 func initLogger(cfg Config) {
+	// Skip logging if disabled (follows telemetry_enabled setting)
+	if !cfg.LoggingEnabled {
+		return
+	}
 	logPath := cfg.CompactionLogPath
 	if logPath == "" {
 		logPath = cfg.LogDir

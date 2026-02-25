@@ -48,7 +48,7 @@ Supported agents:
 
 - **No more waiting** when conversation hits context limits
 - Compaction happens instantly (summary was pre-computed in background)
-- Check `logs/compaction.jsonl` to see what's happening
+- Check `logs/history_compaction.jsonl` to see what's happening
 
 ## Contributing
 

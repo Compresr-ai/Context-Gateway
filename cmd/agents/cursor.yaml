@@ -1,0 +1,29 @@
+# Cursor IDE Agent Configuration
+# ===============================
+# Routes Cursor's LLM requests through the gateway
+# Uses default_config.yaml with dual-model support
+
+agent:
+  name: "cursor"
+  display_name: "Cursor IDE"
+  description: "Cursor IDE with Compresr compression"
+  config: "default_config.yaml"
+
+  environment:
+    # Cursor uses OpenAI-compatible API format
+    - name: "OPENAI_BASE_URL"
+      value: "http://localhost:${GATEWAY_PORT}/v1"
+    - name: "OPENAI_API_KEY"
+      value: "${OPENAI_API_KEY}"
+    # For Cursor's Anthropic models
+    - name: "ANTHROPIC_BASE_URL"
+      value: "http://localhost:${GATEWAY_PORT}"
+    - name: "ANTHROPIC_API_KEY"
+      value: "${ANTHROPIC_API_KEY}"
+
+  command:
+    check_cmd: ["which", "cursor"]
+    run: "cursor"
+    args: ["."]
+    install_cmd: []
+    fallback_message: "Cursor not found. Download from https://cursor.com"

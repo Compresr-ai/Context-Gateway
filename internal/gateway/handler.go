@@ -175,7 +175,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		responseBody, _ := io.ReadAll(resp.Body)
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
 		copyHeaders(w, resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(responseBody)
@@ -271,8 +271,12 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			g.preemptive.SetEndpoint(targetURL)
 		}
 
+		// Pass URL path to preemptive manager for path-based compaction detection (e.g., /responses/compact for Codex)
+		requestHeaders := r.Header.Clone()
+		requestHeaders.Set("X-Request-Path", r.URL.Path)
+
 		var preemptiveBody []byte
-		preemptiveBody, isCompaction, syntheticResponse, preemptiveHeaders, _ = g.preemptive.ProcessRequest(r.Header, body, model, adapter.Name())
+		preemptiveBody, isCompaction, syntheticResponse, preemptiveHeaders, _ = g.preemptive.ProcessRequest(requestHeaders, body, model, adapter.Name())
 
 		// If we have a synthetic response (SDK compaction with cached summary),
 		// return it immediately without forwarding to Anthropic
@@ -313,6 +317,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 				requestBody:      body,
 				responseBody:     syntheticResponse,
 				forwardBody:      nil,
+				requestHeaders:   r.Header,
+				responseHeaders:  w.Header(),
+				upstreamURL:      "preemptive_summarization",
+				fallbackReason:   "",
 			})
 			return
 		}
@@ -380,8 +388,10 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	}
 
 	// Build request-scoped phantom handlers to avoid cross-request state leakage.
+	// Note: searchFallback is only for tool-search strategy (uses gateway_search_tools phantom tool).
+	// API strategy filters tools directly in the pipe, no phantom tool needed.
 	searchFallbackEnabled := g.config.Pipes.ToolDiscovery.Enabled &&
-		g.config.Pipes.ToolDiscovery.Strategy == config.StrategyAPI
+		g.config.Pipes.ToolDiscovery.Strategy == config.StrategyToolSearch
 	var requestPhantomLoop *PhantomLoop
 	var searchHandler *SearchToolHandler
 	if expandEnabled || searchFallbackEnabled {
@@ -396,20 +406,10 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 			if maxSearchResults <= 0 {
 				maxSearchResults = 5
 			}
-			apiEndpoint := g.config.Pipes.ToolDiscovery.API.Endpoint
-			if g.config.Pipes.ToolDiscovery.Strategy == config.StrategyAPI && apiEndpoint == "" {
-				base := strings.TrimRight(g.config.URLs.Compresr, "/")
-				if base != "" {
-					// Default API discovery endpoint used by strategy=api.
-					apiEndpoint = base + "/v1/tool-discovery/search"
-				}
-			}
+			// tool-search strategy uses local regex search, no API endpoint needed
 			searchHandler = NewSearchToolHandler(searchToolName, maxSearchResults, g.toolSessions, SearchToolHandlerOptions{
-				Strategy:    g.config.Pipes.ToolDiscovery.Strategy,
-				APIEndpoint: apiEndpoint,
-				APIKey:      g.config.Pipes.ToolDiscovery.API.APISecret,
-				APITimeout:  g.config.Pipes.ToolDiscovery.API.Timeout,
-				AlwaysKeep:  g.config.Pipes.ToolDiscovery.AlwaysKeep,
+				Strategy:   g.config.Pipes.ToolDiscovery.Strategy,
+				AlwaysKeep: g.config.Pipes.ToolDiscovery.AlwaysKeep,
 			})
 
 			// Combine deferred tools from session (previous requests) AND current request.
@@ -447,7 +447,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 		if fwdErr != nil {
 			err = fwdErr
 		} else {
-			respBody, _ := io.ReadAll(resp.Body)
+			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
 			_ = resp.Body.Close()
 			result = &PhantomLoopResult{
 				ResponseBody: respBody,
@@ -470,6 +470,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 			compressLatency: compressLatency, forwardLatency: forwardLatency, pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
+			requestHeaders: r.Header, responseHeaders: nil, upstreamURL: "", fallbackReason: "",
 		})
 		g.writeError(w, "upstream request failed", http.StatusBadGateway)
 		return
@@ -500,6 +501,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 		adapter: adapter, requestBody: originalBody, responseBody: result.ResponseBody,
 		forwardBody:     forwardBody,
 		authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
+		requestHeaders: r.Header, responseHeaders: result.Response.Header, upstreamURL: result.Response.Request.URL.String(), fallbackReason: "",
 	})
 
 	// Log provider errors and compression details
@@ -507,7 +509,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 		g.alerts.FlagProviderError(requestID, providerName, result.Response.StatusCode,
 			string(responseBody[:min(500, len(responseBody))]))
 	}
-	if compressionUsed {
+	if compressionUsed || pipeType == PipeToolDiscovery {
 		g.logCompressionDetails(pipeCtx, requestID, string(pipeType), originalBody, forwardBody)
 	}
 
@@ -581,6 +583,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
+			requestHeaders: r.Header, responseHeaders: nil, upstreamURL: "", fallbackReason: "",
 		})
 		g.writeError(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
 		return
@@ -605,8 +608,9 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &sseUsage,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
+			requestHeaders: r.Header, responseHeaders: resp.Header, upstreamURL: resp.Request.URL.String(), fallbackReason: "",
 		})
-		if compressionUsed {
+		if compressionUsed || pipeType == PipeToolDiscovery {
 			g.logCompressionDetails(pipeCtx, requestID, string(pipeType), originalBody, forwardBody)
 		}
 		return
@@ -654,7 +658,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			log.Error().Err(err).Msg("streaming: failed to rewrite history")
 			// Fall back to flushing original response
-			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks)
+			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks, resp.StatusCode)
 			return
 		}
 
@@ -665,7 +669,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		retryResp, retryMeta, err := g.forwardPassthrough(r.Context(), r, rewrittenBody)
 		if err != nil {
 			log.Error().Err(err).Msg("streaming: failed to re-send after expansion")
-			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks)
+			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks, resp.StatusCode)
 			return
 		}
 		mergeForwardAuthMeta(&authMeta, retryMeta)
@@ -689,6 +693,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &bufferedUsage,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
+			requestHeaders: r.Header, responseHeaders: retryResp.Header, upstreamURL: retryResp.Request.URL.String(), fallbackReason: "",
 		})
 
 		log.Info().
@@ -697,7 +702,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			Msg("streaming: expansion complete")
 	} else {
 		// No expand_context detected - flush buffered response
-		g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks)
+		g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks, resp.StatusCode)
 
 		g.recordRequestTelemetry(telemetryParams{
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
@@ -707,22 +712,23 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &bufferedUsage,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
+			requestHeaders: r.Header, responseHeaders: resp.Header, upstreamURL: resp.Request.URL.String(), fallbackReason: "",
 		})
 	}
 
-	if compressionUsed {
+	if compressionUsed || pipeType == PipeToolDiscovery {
 		g.logCompressionDetails(pipeCtx, requestID, string(pipeType), originalBody, forwardBody)
 	}
 }
 
 // flushBufferedResponse writes buffered chunks to the response writer.
-func (g *Gateway) flushBufferedResponse(w http.ResponseWriter, headers http.Header, preemptiveHeaders map[string]string, chunks [][]byte) {
+func (g *Gateway) flushBufferedResponse(w http.ResponseWriter, headers http.Header, preemptiveHeaders map[string]string, chunks [][]byte, statusCode int) {
 	copyHeaders(w, headers)
 	addPreemptiveHeaders(w, preemptiveHeaders)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(statusCode)
 
 	flusher, ok := w.(http.Flusher)
 	for _, chunk := range chunks {
@@ -1027,15 +1033,17 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 	} else if provider == adapters.ProviderUnknown && strings.HasPrefix(strings.TrimSpace(r.Header.Get("x-api-key")), "sk-ant-") {
 		provider = adapters.ProviderAnthropic
 	}
-	initialMode, isSubscriptionAuth := detectAuthMode(provider, r.Header)
+
+	// Use provider-specific auth handler for fallback logic
+	authHandler := g.authRegistry.GetOrDefault(provider)
+	initialMode, isSubscriptionAuth := authHandler.DetectAuthMode(r.Header)
 	authMeta.InitialMode = initialMode
 
-	fallbackAPIKey := resolveFallbackAPIKey(provider, g.config.Providers)
-	canFallbackToAPIKey := isSubscriptionAuth && fallbackAPIKey != ""
+	canFallbackToAPIKey := isSubscriptionAuth && authHandler.HasFallback()
 	sessionID := preemptive.ComputeSessionID(body)
 	useAPIKeyForSession := canFallbackToAPIKey && g.authMode != nil && g.authMode.ShouldUseAPIKeyMode(sessionID)
 
-	sendUpstream := func(useAPIKeyMode bool) (*http.Response, []byte, error) {
+	sendUpstream := func(useAPIKeyMode bool, fallbackHeaders map[string]string) (*http.Response, []byte, error) {
 		httpReq, reqErr := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 		if reqErr != nil {
 			return nil, nil, reqErr
@@ -1050,18 +1058,28 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 		} else {
 			// Non-Bedrock: forward relevant headers
 			for _, h := range []string{
-				"Content-Type", "Authorization", "x-api-key", "x-goog-api-key",
+				// Core auth headers
+				"Content-Type", "Content-Encoding", "Authorization", "x-api-key", "x-goog-api-key",
 				"api-key", "anthropic-version", "anthropic-beta",
+				// OpenAI headers
+				"OpenAI-Organization", "OpenAI-Project", "OpenAI-Beta",
+				// Codex CLI headers (required for ChatGPT subscription)
+				"Chatgpt-Account-Id", "Originator", "Session_id", "Version",
+				"X-Codex-Turn-Metadata", "Accept",
 			} {
 				if v := r.Header.Get(h); v != "" {
 					httpReq.Header.Set(h, v)
 				}
 			}
 
-			// Sticky fallback mode: override subscription auth with API key.
-			if useAPIKeyMode {
+			// Sticky/triggered fallback mode: apply fallback headers from auth handler
+			if useAPIKeyMode && fallbackHeaders != nil {
+				// Clear subscription auth headers based on provider
 				httpReq.Header.Del("Authorization")
-				httpReq.Header.Set("x-api-key", fallbackAPIKey)
+				// Apply fallback headers from auth handler
+				for k, v := range fallbackHeaders {
+					httpReq.Header.Set(k, v)
+				}
 			}
 		}
 		if useAPIKeyMode {
@@ -1077,7 +1095,7 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 
 		// Read body for upstream errors so we can inspect and preserve it.
 		if resp.StatusCode >= 400 {
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
 			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			log.Error().
 				Int("status", resp.StatusCode).
@@ -1091,24 +1109,34 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 	}
 
 	// First attempt: sticky mode may already force API key for this session.
-	resp, respBody, err := sendUpstream(useAPIKeyForSession)
+	var fallbackHeaders map[string]string
+	if useAPIKeyForSession {
+		fallbackHeaders = authHandler.GetFallbackHeaders()
+	}
+	resp, respBody, err := sendUpstream(useAPIKeyForSession, fallbackHeaders)
 	if err != nil {
 		return nil, authMeta, err
 	}
 
-	// One-shot fallback: if subscription appears exhausted, retry with API key and stick to it.
-	if canFallbackToAPIKey && !useAPIKeyForSession && resp != nil && isLikelySubscriptionExhausted(provider, resp.StatusCode, respBody) {
-		if g.authMode != nil {
-			g.authMode.MarkAPIKeyMode(sessionID)
+	// One-shot fallback: use provider-specific auth handler to determine if fallback should trigger.
+	// Key difference: OpenAI handlers trigger on 401 (auth error), Anthropic only on quota errors.
+	if canFallbackToAPIKey && !useAPIKeyForSession && resp != nil {
+		fallbackResult := authHandler.ShouldFallback(resp.StatusCode, respBody)
+		if fallbackResult.ShouldFallback {
+			if g.authMode != nil {
+				g.authMode.MarkAPIKeyMode(sessionID)
+			}
+			authMeta.FallbackUsed = true
+			_ = resp.Body.Close()
+			log.Info().
+				Str("session_id", sessionID).
+				Int("status", resp.StatusCode).
+				Str("reason", fallbackResult.Reason).
+				Str("provider", provider.String()).
+				Msg("auth_fallback: switching session to api-key mode")
+			retryResp, _, retryErr := sendUpstream(true, fallbackResult.Headers)
+			return retryResp, authMeta, retryErr
 		}
-		authMeta.FallbackUsed = true
-		_ = resp.Body.Close()
-		log.Info().
-			Str("session_id", sessionID).
-			Int("status", resp.StatusCode).
-			Msg("auth_fallback: switching session to api-key mode")
-		retryResp, _, retryErr := sendUpstream(true)
-		return retryResp, authMeta, retryErr
 	}
 
 	return resp, authMeta, nil
@@ -1192,6 +1220,11 @@ type telemetryParams struct {
 	authModeInitial   string
 	authModeEffective string
 	authFallbackUsed  bool
+	// For verbose payloads logging
+	requestHeaders  http.Header // Request headers from client
+	responseHeaders http.Header // Response headers from upstream
+	upstreamURL     string      // Actual URL that was hit
+	fallbackReason  string      // Reason for auth fallback, if any
 }
 
 // recordRequestTelemetry records a complete request event.
@@ -1212,7 +1245,8 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 		}
 	}
 
-	g.tracker.RecordRequest(&monitoring.RequestEvent{
+	// Build the RequestEvent with base fields
+	event := &monitoring.RequestEvent{
 		RequestID:            params.requestID,
 		Timestamp:            params.startTime,
 		Method:               params.method,
@@ -1245,7 +1279,57 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 		InputTokens:          usage.InputTokens,
 		OutputTokens:         usage.OutputTokens,
 		TotalTokens:          usage.TotalTokens,
-	})
+	}
+
+	// Add verbose payloads if enabled
+	if g.config.Monitoring.VerbosePayloads {
+		// Sanitize and copy request headers
+		if params.requestHeaders != nil {
+			reqHeadersMap := make(map[string]string)
+			for k, v := range params.requestHeaders {
+				if len(v) > 0 {
+					reqHeadersMap[k] = v[0]
+				}
+			}
+			event.RequestHeaders = monitoring.SanitizeHeaders(reqHeadersMap)
+		}
+
+		// Copy response headers
+		if params.responseHeaders != nil {
+			respHeadersMap := make(map[string]string)
+			for k, v := range params.responseHeaders {
+				if len(v) > 0 {
+					respHeadersMap[k] = v[0]
+				}
+			}
+			event.ResponseHeaders = monitoring.SanitizeHeaders(respHeadersMap)
+		}
+
+		// Add request body preview
+		event.RequestBodyPreview = monitoring.PreviewBody(string(params.requestBody), 500)
+
+		// Add response body preview
+		event.ResponseBodyPreview = monitoring.PreviewBody(string(params.responseBody), 500)
+
+		// Add masked auth header
+		if params.requestHeaders != nil {
+			if authHeader := params.requestHeaders.Get("Authorization"); authHeader != "" {
+				event.AuthHeaderSent = monitoring.MaskAuthHeader(authHeader)
+			} else if apiKeyHeader := params.requestHeaders.Get("X-API-Key"); apiKeyHeader != "" {
+				event.AuthHeaderSent = monitoring.MaskAuthHeader(apiKeyHeader)
+			}
+		}
+
+		// Add upstream URL if available
+		event.UpstreamURL = params.upstreamURL
+
+		// Add fallback reason if applicable
+		if params.authFallbackUsed && params.fallbackReason != "" {
+			event.FallbackReason = params.fallbackReason
+		}
+	}
+
+	g.tracker.RecordRequest(event)
 
 	// Record cost tracking (only when we have actual token counts from the API response).
 	// Streaming responses have empty bodies so ExtractUsage returns zeros — skip rather

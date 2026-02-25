@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/external"
+	"github.com/compresr/context-gateway/internal/compresr"
 )
 
 // Summarizer generates conversation summaries.
@@ -100,6 +101,12 @@ type SummarizeInput struct {
 	KeepRecentCount  int     // Message-based (legacy fallback)
 	Model            string  // Used to look up context window
 	ContextWindow    int     // Override context window (for testing)
+
+	// Per-job auth credentials for session isolation
+	// When set, these override global captured auth to prevent cross-session leakage
+	AuthToken     string // Auth token for this specific job
+	AuthIsXAPIKey bool   // true = use x-api-key header
+	AuthEndpoint  string // Endpoint for this specific job
 }
 
 // SummarizeOutput contains the result.
@@ -112,8 +119,17 @@ type SummarizeOutput struct {
 	OutputTokens        int
 }
 
-// Summarize generates a summary.
+// Summarize generates a summary using either LLM or Compresr API based on strategy.
 func (s *Summarizer) Summarize(ctx context.Context, input SummarizeInput) (*SummarizeOutput, error) {
+	// Route to appropriate implementation based on strategy
+	if s.config.Strategy == "api" {
+		return s.summarizeViaAPI(ctx, input)
+	}
+	return s.summarizeViaLLM(ctx, input)
+}
+
+// summarizeViaLLM uses LLM provider for summarization (original behavior).
+func (s *Summarizer) summarizeViaLLM(ctx context.Context, input SummarizeInput) (*SummarizeOutput, error) {
 	startTime := time.Now()
 	total := len(input.Messages)
 	if total == 0 {
@@ -135,7 +151,7 @@ func (s *Summarizer) Summarize(ctx context.Context, input SummarizeInput) (*Summ
 	}
 
 	formatted := FormatMessages(toSummarize)
-	result, err := s.callAPI(ctx, prompt, fmt.Sprintf("Please summarize the following conversation:\n\n%s", formatted))
+	result, err := s.callAPI(ctx, prompt, fmt.Sprintf("Please summarize the following conversation:\n\n%s", formatted), input)
 	if err != nil {
 		return nil, fmt.Errorf("API call failed: %w", err)
 	}
@@ -157,6 +173,74 @@ func (s *Summarizer) Summarize(ctx context.Context, input SummarizeInput) (*Summ
 		Duration:            time.Since(startTime),
 		InputTokens:         result.InputTokens,
 		OutputTokens:        result.OutputTokens,
+	}, nil
+}
+
+// summarizeViaAPI uses Compresr API for history compression.
+func (s *Summarizer) summarizeViaAPI(ctx context.Context, input SummarizeInput) (*SummarizeOutput, error) {
+	startTime := time.Now()
+	total := len(input.Messages)
+	if total == 0 {
+		return nil, fmt.Errorf("no messages to summarize")
+	}
+
+	if s.config.API == nil {
+		return nil, fmt.Errorf("API config is nil (required for strategy: api)")
+	}
+
+	// Determine keep_recent count
+	keepRecent := input.KeepRecentCount
+	if keepRecent <= 0 {
+		keepRecent = s.config.KeepRecentCount
+	}
+	if keepRecent <= 0 {
+		keepRecent = 3 // default
+	}
+
+	// Convert messages to Compresr format
+	historyMessages := make([]compresr.HistoryMessage, 0, total)
+	for _, msg := range input.Messages {
+		// Use interface{} for Content to handle both string and array (Anthropic content blocks)
+		var parsedMsg struct {
+			Role    string      `json:"role"`
+			Content interface{} `json:"content"`
+		}
+		if err := json.Unmarshal(msg, &parsedMsg); err != nil {
+			return nil, fmt.Errorf("failed to parse message: %w", err)
+		}
+		// Extract text content from string or content blocks array
+		contentStr := ExtractContentString(parsedMsg.Content)
+		historyMessages = append(historyMessages, compresr.HistoryMessage{
+			Role:    parsedMsg.Role,
+			Content: contentStr,
+		})
+	}
+
+	// Call Compresr API
+	client := compresr.NewClient(s.config.API.Endpoint, s.config.API.APIKey)
+	response, err := client.CompressHistory(compresr.CompressHistoryParams{
+		Messages:   historyMessages,
+		KeepRecent: keepRecent,
+		ModelName:  s.config.API.Model,
+		Source:     "gateway",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("compresr API call failed: %w", err)
+	}
+
+	// Calculate last summarized index (all messages except the kept ones)
+	lastIndex := total - response.MessagesKept - 1
+	if lastIndex < 0 {
+		lastIndex = 0
+	}
+
+	return &SummarizeOutput{
+		Summary:             response.Summary,
+		SummaryTokens:       response.CompressedTokens,
+		LastSummarizedIndex: lastIndex,
+		Duration:            time.Since(startTime),
+		InputTokens:         response.OriginalTokens,
+		OutputTokens:        response.CompressedTokens,
 	}, nil
 }
 
@@ -256,17 +340,38 @@ func (s *Summarizer) findCutoffByTokens(messages []json.RawMessage, keepTokens i
 	return cutoffIndex, nil
 }
 
-func (s *Summarizer) callAPI(ctx context.Context, systemPrompt, userContent string) (*external.CallLLMResult, error) {
+func (s *Summarizer) callAPI(ctx context.Context, systemPrompt, userContent string, input SummarizeInput) (*external.CallLLMResult, error) {
 	log.Debug().Str("model", s.config.Model).Str("provider", s.config.Provider).Int("max_tokens", s.config.MaxTokens).Msg("Calling summarization API")
 
-	endpoint := s.getEndpoint()
-	authToken, _ := s.getAuthToken()
-
-	// Use configured API key if available, otherwise use captured auth
-	apiKey := s.config.APISecret
-	if apiKey == "" {
-		apiKey = authToken
+	// Prefer per-job auth over global captured auth for session isolation
+	endpoint := input.AuthEndpoint
+	if endpoint == "" {
+		endpoint = s.getEndpoint()
 	}
+
+	// Determine auth token: configured API key > per-job > global captured
+	// Configured API key takes precedence because it's provider-specific (e.g., Gemini key
+	// for Gemini summarizer). Per-job auth from request headers may be for a different
+	// provider (e.g., Anthropic key) and must not override the configured key.
+	apiKey := ""
+	keySource := ""
+	if s.config.APISecret != "" {
+		apiKey = s.config.APISecret
+		keySource = "config.APISecret"
+	} else if input.AuthToken != "" {
+		apiKey = input.AuthToken
+		keySource = "input.AuthToken"
+	} else {
+		apiKey, _ = s.getAuthToken()
+		keySource = "captured auth"
+	}
+
+	log.Debug().
+		Str("provider", s.config.Provider).
+		Str("key_source", keySource).
+		Int("key_len", len(apiKey)).
+		Str("endpoint", endpoint).
+		Msg("Summarizer API key resolved")
 
 	params := external.CallLLMParams{
 		Provider:     s.config.Provider,
