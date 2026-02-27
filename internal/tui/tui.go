@@ -85,10 +85,12 @@ func PrintStep(msg string) {
 
 // MenuItem represents an item in a menu.
 type MenuItem struct {
-	Label       string // Display label
-	Description string // Optional description (or current value for editable)
-	Value       string // Return value (if different from label)
-	Editable    bool   // If true, allows inline text editing
+	Label        string // Display label
+	Description  string // Optional description (or current value for editable)
+	Value        string // Return value (if different from label)
+	Editable     bool   // If true, allows inline text editing
+	Locked       bool   // If true, item cannot be selected (grayed out with lock icon)
+	LockedReason string // Reason shown when item is locked (e.g., "Requires Pro subscription")
 }
 
 // menuLines tracks how many lines the last menu used (for clearing)
@@ -113,22 +115,24 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 		return -1, fmt.Errorf("no items to select")
 	}
 
-	// Check if we're in a TTY
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		// Fall back to numbered menu for non-interactive mode
 		return selectNumberedMenu(prompt, items)
 	}
 
-	// Save terminal state and set raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		// Fall back to numbered menu if we can't set raw mode
 		return selectNumberedMenu(prompt, items)
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
 
 	selected := 0
 	reader := bufio.NewReader(os.Stdin)
+
+	// Get terminal width for truncating descriptions
+	termWidth, _, err := term.GetSize(int(os.Stdin.Fd()))
+	if err != nil || termWidth < 40 {
+		termWidth = 80 // Default fallback
+	}
 
 	// Calculate total lines we'll render
 	totalLines := 3 + len(items) + 2 // prompt + blank + items + blank + help
@@ -138,6 +142,17 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 	defer fmt.Print("\033[?25h") // Show cursor on exit
 
 	firstRender := true
+
+	// Helper to truncate text to fit terminal width
+	truncate := func(text string, maxLen int) string {
+		if len(text) <= maxLen {
+			return text
+		}
+		if maxLen < 3 {
+			return text[:maxLen]
+		}
+		return text[:maxLen-3] + "..."
+	}
 
 	renderMenu := func() {
 		if !firstRender {
@@ -152,16 +167,50 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 
 		for i, item := range items {
 			fmt.Print("\033[2K") // Clear line
-			if i == selected {
-				fmt.Printf("\r  %s❯%s %s%s%s", ColorGreen, ColorReset, ColorBold, item.Label, ColorReset)
-				if item.Description != "" {
-					fmt.Printf(" %s- %s%s", ColorDim, item.Description, ColorReset)
+
+			// Calculate max description length to prevent wrapping
+			// Account for: "  ❯ " (4) + label + " - " (3) + description
+			prefixLen := 4
+			if i != selected {
+				prefixLen = 4 // "    " (no arrow)
+			}
+			maxDescLen := termWidth - prefixLen - len(item.Label) - 3 - 10 // -10 for safety margin
+			if maxDescLen < 20 {
+				maxDescLen = 20 // Minimum description length
+			}
+
+			if item.Locked {
+				// Locked items are grayed out with lock icon
+				desc := item.Description
+				if item.LockedReason != "" {
+					desc = "[" + item.LockedReason + "]"
 				}
+				if desc != "" {
+					desc = truncate(desc, maxDescLen)
+				}
+
+				if i == selected {
+					fmt.Printf("\r  %s❯%s %s🔒 %s%s", ColorDim, ColorReset, ColorDim, item.Label, ColorReset)
+				} else {
+					fmt.Printf("\r    %s🔒 %s%s", ColorDim, item.Label, ColorReset)
+				}
+				if desc != "" {
+					fmt.Printf(" %s%s%s", ColorDim, desc, ColorReset)
+				}
+			} else if i == selected {
+				desc := item.Description
+				if desc != "" {
+					desc = truncate(desc, maxDescLen)
+					desc = " " + ColorDim + "- " + desc + ColorReset
+				}
+				fmt.Printf("\r  %s❯%s %s%s%s%s", ColorGreen, ColorReset, ColorBold, item.Label, ColorReset, desc)
 			} else {
-				fmt.Printf("\r    %s", item.Label)
-				if item.Description != "" {
-					fmt.Printf(" %s- %s%s", ColorDim, item.Description, ColorReset)
+				desc := item.Description
+				if desc != "" {
+					desc = truncate(desc, maxDescLen)
+					desc = " " + ColorDim + "- " + desc + ColorReset
 				}
+				fmt.Printf("\r    %s%s", item.Label, desc)
 			}
 			fmt.Print("\n")
 		}
@@ -178,6 +227,13 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 		}
 
 		switch b {
+		case 3: // Ctrl+C - exit immediately
+			// Restore terminal state before exiting
+			fmt.Print("\033[?25h") // Show cursor
+			_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			fmt.Println("\n\nInterrupted.")
+			os.Exit(130) // Standard exit code for Ctrl+C
+
 		case 'q', 27: // q or Escape
 			// Check for escape sequence (arrow keys)
 			if b == 27 {
@@ -227,6 +283,11 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 			}
 			renderMenu()
 		case 13: // Enter
+			// Check if this is a locked item - don't allow selection
+			if items[selected].Locked {
+				// Show a brief message and continue
+				continue
+			}
 			// Check if this is an editable item
 			if items[selected].Editable {
 				// Calculate position: from help line, go up to selected item
@@ -236,16 +297,14 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 
 				// Move up to the selected item line
 				fmt.Printf("\033[%dA", linesUp)
-				fmt.Print("\033[2K\r") // Clear line
+				fmt.Print("\033[2K\r")
 
-				// Exit raw mode for text input
-				term.Restore(int(os.Stdin.Fd()), oldState)
-				fmt.Print("\033[?25h") // Show cursor
+				_ = term.Restore(int(os.Stdin.Fd()), oldState)
+				fmt.Print("\033[?25h")
 
 				// Show editable line with cursor after dash
 				fmt.Printf("  %s❯%s %s%s%s - ", ColorGreen, ColorReset, ColorBold, items[selected].Label, ColorReset)
 
-				// Read input (user types and presses Enter)
 				inputReader := bufio.NewReader(os.Stdin)
 				input, _ := inputReader.ReadString('\n')
 				input = strings.TrimSpace(input)
@@ -254,9 +313,8 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 					items[selected].Description = input
 				}
 
-				// Re-enter raw mode
 				oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
-				fmt.Print("\033[?25l") // Hide cursor
+				fmt.Print("\033[?25l")
 
 				// Now we're on line below the edited item (Enter moved us down)
 				// Move back up to the edited line (we're 1 below it after Enter)
@@ -366,16 +424,22 @@ func PromptYesNo(prompt string, defaultYes bool) bool {
 func PromptPassword(prompt string) string {
 	fmt.Print(prompt)
 
-	// Try to use terminal password input
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		password, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Println() // New line after hidden input
+		fmt.Println()
 		if err == nil {
 			return strings.TrimSpace(string(password))
 		}
 	}
 
-	// Fall back to regular input
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	return strings.TrimSpace(input)
+}
+
+// PromptInput prompts for visible text input (for API keys, etc.).
+func PromptInput(prompt string) string {
+	fmt.Print(prompt)
 	reader := bufio.NewReader(os.Stdin)
 	input, _ := reader.ReadString('\n')
 	return strings.TrimSpace(input)

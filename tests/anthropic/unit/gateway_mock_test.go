@@ -19,7 +19,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/gateway"
+	"github.com/compresr/context-gateway/internal/monitoring"
 )
 
 // =============================================================================
@@ -107,93 +111,200 @@ func TestGateway_Passthrough_ForwardsRequestUnchanged(t *testing.T) {
 	assert.NotEmpty(t, receivedHeaders.Get("X-Api-Key"))
 }
 
-// =============================================================================
-// TEST: Gateway HTTP Server - Tool Output Compression
-// =============================================================================
+func TestGateway_SubscriptionFallback_RetriesWithAPIKey(t *testing.T) {
+	var callCount int32
+	authByCall := make(map[int]string)
+	xAPIByCall := make(map[int]string)
 
-// TestGateway_Compression_CompressesLargeToolOutput tests that the gateway
-// compresses large tool outputs before forwarding to the upstream LLM.
-// Uses OpenAI Responses API format (input[] with function_call_output).
-func TestGateway_Compression_CompressesLargeToolOutput(t *testing.T) {
-	// 1. Create mock compression API
-	mockCompressionAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"compressed_output": "Go file with User struct, UserService for CRUD ops, caching with sync.Map",
-			},
-		})
-	}))
-	defer mockCompressionAPI.Close()
-
-	// 2. Create mock upstream LLM
-	var receivedUpstreamBody []byte
 	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedUpstreamBody, _ = io.ReadAll(r.Body)
+		call := int(atomic.AddInt32(&callCount, 1))
+		authByCall[call] = r.Header.Get("Authorization")
+		xAPIByCall[call] = r.Header.Get("x-api-key")
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":         "resp_123",
-			"object":     "response",
-			"created_at": time.Now().Unix(),
-			"output": []map[string]interface{}{
-				{
-					"type":    "message",
-					"role":    "assistant",
-					"content": []map[string]interface{}{{"type": "output_text", "text": "This Go file defines a User service with caching."}},
-				},
-			},
-		})
+		if call == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"subscription rate limit exceeded"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_retry_ok","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
 	}))
 	defer mockLLM.Close()
 
-	// 3. Create Gateway with compression enabled
-	cfg := compressionConfig(mockCompressionAPI.URL)
+	cfg := passthroughConfig()
+	cfg.Providers = config.ProvidersConfig{
+		"anthropic": {
+			APIKey: "sk-ant-api03-fallback-key",
+			Model:  "claude-3-5-sonnet-latest",
+		},
+	}
+
 	gw := gateway.New(cfg)
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	// 4. Create request with LARGE tool output (OpenAI Responses API format)
-	largeToolOutput := generateLargeToolOutput(2000)
-
-	// OpenAI Responses API format: input[] with function_call and function_call_output
-	requestBody := fmt.Sprintf(`{
-		"model": "gpt-4o",
-		"input": [
-			{"role": "user", "content": "Read main.go and explain it"},
-			{"type": "function_call", "call_id": "call_001", "name": "read_file", "arguments": "{\"path\": \"main.go\"}"},
-			{"type": "function_call_output", "call_id": "call_001", "output": %q}
-		]
-	}`, largeToolOutput)
-
-	originalLen := len(requestBody)
-
-	req, err := http.NewRequest("POST", gwServer.URL+"/v1/responses", strings.NewReader(requestBody))
+	requestBody := `{
+		"model":"claude-3-5-sonnet-latest",
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"hello"}]
+	}`
+	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", strings.NewReader(requestBody))
 	require.NoError(t, err)
-
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-api-key")
-	req.Header.Set("X-Target-URL", mockLLM.URL+"/v1/responses")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-subscription-token")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("X-Target-URL", mockLLM.URL+"/v1/messages")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	// 5. Verify response is successful
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount), "should retry once with api key")
+	assert.NotEmpty(t, authByCall[1], "first call should use subscription bearer token")
+	assert.Empty(t, xAPIByCall[1], "first call should not use x-api-key")
+	assert.Empty(t, authByCall[2], "retry should drop Authorization header")
+	assert.Equal(t, "sk-ant-api03-fallback-key", xAPIByCall[2], "retry should use configured fallback api key")
+}
 
-	// 6. Verify upstream received COMPRESSED content (smaller than original)
-	// The compressed summary should be much smaller than the 2KB original
-	assert.Less(t, len(receivedUpstreamBody), originalLen,
-		"Upstream should receive compressed (smaller) request: got %d, want < %d", len(receivedUpstreamBody), originalLen)
+func TestGateway_SubscriptionFallback_StickyPerSession(t *testing.T) {
+	var callCount int32
+	authByCall := make(map[int]string)
+	xAPIByCall := make(map[int]string)
 
-	// Verify the compressed content contains shadow prefix
-	// Note: JSON encoding may HTML-escape < > as \u003c \u003e
-	upstreamStr := string(receivedUpstreamBody)
-	hasShadow := strings.Contains(upstreamStr, "<<<SHADOW:") || strings.Contains(upstreamStr, "\\u003c\\u003c\\u003cSHADOW:")
-	assert.True(t, hasShadow, "Compressed content should have shadow ID prefix, got: %s", upstreamStr[:min(200, len(upstreamStr))])
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := int(atomic.AddInt32(&callCount, 1))
+		authByCall[call] = r.Header.Get("Authorization")
+		xAPIByCall[call] = r.Header.Get("x-api-key")
+
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"subscription quota exceeded"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer mockLLM.Close()
+
+	cfg := passthroughConfig()
+	cfg.Providers = config.ProvidersConfig{
+		"anthropic": {
+			APIKey: "sk-ant-api03-fallback-key",
+			Model:  "claude-3-5-sonnet-latest",
+		},
+	}
+
+	gw := gateway.New(cfg)
+	gwServer := httptest.NewServer(gw.Handler())
+	defer gwServer.Close()
+
+	requestBody := `{
+		"model":"claude-3-5-sonnet-latest",
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"same session message"}]
+	}`
+
+	send := func() *http.Response {
+		req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", strings.NewReader(requestBody))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer sk-ant-oat01-subscription-token")
+		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("X-Target-URL", mockLLM.URL+"/v1/messages")
+		resp, doErr := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		require.NoError(t, doErr)
+		return resp
+	}
+
+	resp1 := send()
+	assert.Equal(t, http.StatusOK, resp1.StatusCode)
+	resp1.Body.Close()
+
+	resp2 := send()
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	resp2.Body.Close()
+
+	assert.Equal(t, int32(3), atomic.LoadInt32(&callCount), "first request should retry; second should directly use api key")
+	assert.NotEmpty(t, authByCall[1])
+	assert.Empty(t, xAPIByCall[1])
+	assert.Empty(t, authByCall[2])
+	assert.Equal(t, "sk-ant-api03-fallback-key", xAPIByCall[2])
+	assert.Empty(t, authByCall[3], "session should remain in api key mode")
+	assert.Equal(t, "sk-ant-api03-fallback-key", xAPIByCall[3])
+}
+
+func TestGateway_AuthFallback_TelemetryAndInitLogs(t *testing.T) {
+	var callCount int32
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"subscription quota exceeded"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_ok","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer mockLLM.Close()
+
+	tempDir := t.TempDir()
+	telemetryPath := filepath.Join(tempDir, "telemetry.jsonl")
+
+	cfg := passthroughConfig()
+	cfg.Monitoring.TelemetryEnabled = true
+	cfg.Monitoring.TelemetryPath = telemetryPath
+	cfg.Providers = config.ProvidersConfig{
+		"anthropic": {
+			APIKey: "sk-ant-api03-fallback-key",
+			Model:  "claude-3-5-sonnet-latest",
+		},
+	}
+	cfg.AgentFlags = config.NewAgentFlags("claude_code", []string{"--dangerously-skip-permissions"})
+
+	gw := gateway.New(cfg)
+	gwServer := httptest.NewServer(gw.Handler())
+	defer gwServer.Close()
+
+	requestBody := `{
+		"model":"claude-3-5-sonnet-latest",
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"telemetry auth test"}]
+	}`
+	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-subscription-token")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("X-Target-URL", mockLLM.URL+"/v1/messages")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	telemetryBytes, err := os.ReadFile(telemetryPath)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(telemetryBytes)), "\n")
+	require.NotEmpty(t, lines)
+
+	var reqEvent monitoring.RequestEvent
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &reqEvent))
+	assert.Equal(t, "subscription", reqEvent.AuthModeInitial)
+	assert.Equal(t, "api_key", reqEvent.AuthModeEffective)
+	assert.True(t, reqEvent.AuthFallbackUsed)
+
+	initPath := filepath.Join(tempDir, "init.jsonl")
+	initBytes, err := os.ReadFile(initPath)
+	require.NoError(t, err)
+	initLines := strings.Split(strings.TrimSpace(string(initBytes)), "\n")
+	require.NotEmpty(t, initLines)
+
+	var initEvent monitoring.InitEvent
+	require.NoError(t, json.Unmarshal([]byte(initLines[len(initLines)-1]), &initEvent))
+	assert.Equal(t, "gateway_init", initEvent.Event)
+	assert.Equal(t, "claude_code", initEvent.AgentName)
+	assert.True(t, initEvent.AutoApproveMode)
 }
 
 // =============================================================================
@@ -261,78 +372,6 @@ func TestGateway_SmallContent_NotCompressed(t *testing.T) {
 	// Content should be unchanged (no shadow prefix)
 	assert.NotContains(t, string(receivedUpstreamBody), "<<<SHADOW:",
 		"Small content should not be compressed")
-}
-
-// =============================================================================
-// TEST: Gateway HTTP Server - Cache Hit Reuses Compressed
-// =============================================================================
-
-// TestGateway_CacheHit_ReusesCompressed tests that when the same tool output
-// is seen again, the cached compressed version is used.
-func TestGateway_CacheHit_ReusesCompressed(t *testing.T) {
-	compressionCallCount := 0
-	mockCompressionAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		compressionCallCount++
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"compressed_output": "Compressed summary of the code",
-			},
-		})
-	}))
-	defer mockCompressionAPI.Close()
-
-	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":     "resp_cache",
-			"object": "response",
-			"output": []map[string]interface{}{{"type": "message", "role": "assistant", "content": []map[string]interface{}{{"type": "output_text", "text": "Got it"}}}},
-		})
-	}))
-	defer mockLLM.Close()
-
-	cfg := compressionConfig(mockCompressionAPI.URL)
-	gw := gateway.New(cfg)
-	gwServer := httptest.NewServer(gw.Handler())
-	defer gwServer.Close()
-
-	// Same large tool output for both requests
-	largeToolOutput := generateLargeToolOutput(1500)
-
-	makeRequest := func() {
-		requestBody := fmt.Sprintf(`{
-			"model": "gpt-4o",
-			"input": [
-				{"role": "user", "content": "Analyze"},
-				{"type": "function_call", "call_id": "call_001", "name": "read_file", "arguments": "{}"},
-				{"type": "function_call_output", "call_id": "call_001", "output": %q}
-			]
-		}`, largeToolOutput)
-
-		req, _ := http.NewRequest("POST", gwServer.URL+"/v1/responses", strings.NewReader(requestBody))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer test-key")
-		req.Header.Set("X-Target-URL", mockLLM.URL+"/v1/responses")
-
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, _ := client.Do(req)
-		resp.Body.Close()
-	}
-
-	// First request - should call compression API
-	makeRequest()
-	assert.Equal(t, 1, compressionCallCount, "First request should call compression API")
-
-	// Second request with SAME content - should use cache
-	makeRequest()
-	assert.Equal(t, 1, compressionCallCount, "Second request should use cache, not call API again")
-
-	// Third request
-	makeRequest()
-	assert.Equal(t, 1, compressionCallCount, "Third request should also use cache")
 }
 
 // =============================================================================

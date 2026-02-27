@@ -1,0 +1,123 @@
+# =============================================================================
+# Context Gateway - Compresr API Configuration
+# =============================================================================
+# Uses Compresr API models for all compression:
+#   - History: hcc_espresso_v1 (preemptive summarization)
+#   - Tool Output: toc_latte_v1 (query-aware compression)
+#   - Tool Discovery: tdc_coldbrew_v1 (relevance filtering)
+#
+# Requires COMPRESR_API_KEY to be set.
+# Last updated: February 2026
+# =============================================================================
+
+metadata:
+  name: "Compresr API Configuration"
+  description: "All compression via Compresr API - no external LLM providers needed"
+  strategy: "compresr"
+
+server:
+  port: ${GATEWAY_PORT:-18080}
+  read_timeout: 30s
+  write_timeout: 1000s
+
+urls:
+  gateway: "http://localhost:${GATEWAY_PORT:-18080}"
+  compresr: "${COMPRESR_BASE_URL:-https://api.compresr.ai}"
+
+# =============================================================================
+# PROVIDERS
+# =============================================================================
+# No LLM providers needed - all compression via Compresr API
+
+providers: {}
+
+# =============================================================================
+# PREEMPTIVE SUMMARIZATION (Compresr API - hcc_espresso_v1)
+# =============================================================================
+
+preemptive:
+  enabled: true
+  trigger_threshold: 85.0
+  add_response_headers: true
+  
+  log_dir: "${SESSION_DIR:-logs}"
+  compaction_log_path: "${SESSION_COMPACTION_LOG:-logs/history_compaction.jsonl}"
+  
+  summarizer:
+    # Strategy: "api" uses Compresr API for history compression
+    strategy: "api"
+    api:
+      endpoint: "${COMPRESR_BASE_URL:-https://api.compresr.ai}/api/compress/history/"
+      api_key: "${COMPRESR_API_KEY:-}"
+      model: "hcc_espresso_v1"
+      timeout: 30s
+    
+    # Fallback settings (used if API fails)
+    max_tokens: 4096
+    timeout: 60s
+    token_estimate_ratio: 4
+  
+  session:
+    summary_ttl: 3h
+    hash_message_count: 3
+
+# =============================================================================
+# COMPRESSION PIPES (Compresr API)
+# =============================================================================
+
+pipes:
+  # Tool Output Compression - GemFilter backbone (query-aware, attention-based)
+  tool_output:
+    enabled: true
+    strategy: "api"
+    min_bytes: 2048
+    target_ratio: 0.15
+    api:
+      endpoint: "/api/compress/tool-output/"
+      api_key: "${COMPRESR_API_KEY:-}"
+      model: "toc_latte_v1"
+      timeout: 30s
+  
+  # Tool Discovery - SaT backbone (chunk-level relevance filtering)
+  tool_discovery:
+    enabled: true
+    strategy: "api"
+    min_tools: 5
+    max_tools: 25
+    target_ratio: 0.8
+    api:
+      endpoint: "/api/compress/tool-discovery/"
+      api_key: "${COMPRESR_API_KEY:-}"
+      model: "tdc_coldbrew_v1"
+      timeout: 20s
+
+# =============================================================================
+# COST CONTROL
+# =============================================================================
+
+cost_control:
+  enabled: false
+  session_cap: 0
+  global_cap: 0
+
+# =============================================================================
+# STORE
+# =============================================================================
+
+store:
+  type: "memory"
+  ttl: 1h
+
+# =============================================================================
+# MONITORING
+# =============================================================================
+
+monitoring:
+  log_level: "off"
+  log_format: "console"
+  log_output: "stdout"
+  telemetry_enabled: true
+  verbose_payloads: false
+  telemetry_path: "${SESSION_TELEMETRY_LOG:-logs/telemetry.jsonl}"
+  compression_log_path: "${SESSION_COMPRESSION_LOG:-logs/tool_output_compression.jsonl}"
+  tool_discovery_log_path: "${SESSION_TOOL_DISCOVERY_LOG:-logs/tool_discovery.jsonl}"

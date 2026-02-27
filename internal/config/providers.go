@@ -12,6 +12,8 @@ package config
 import (
 	"fmt"
 	"strings"
+
+	"github.com/rs/zerolog/log"
 )
 
 // ProviderConfig configures a single LLM provider.
@@ -132,7 +134,7 @@ func (cfg *Config) ValidateUsedProviders() error {
 type ResolvedProvider struct {
 	Provider string // Provider name (anthropic, gemini, openai)
 	Endpoint string
-	APIKey   string
+	APIKey   string // Resolved credential field
 	Auth     string // Auth method: "api_key", "oauth", or "bedrock"
 	Model    string
 }
@@ -184,12 +186,59 @@ func (cfg *Config) ResolvePreemptiveProvider() PreemptiveConfig {
 	if resolved.Summarizer.Model == "" {
 		resolved.Summarizer.Model = provider.Model
 	}
-	if resolved.Summarizer.APIKey == "" {
-		resolved.Summarizer.APIKey = provider.APIKey
+	if resolved.Summarizer.APISecret == "" {
+		resolved.Summarizer.APISecret = provider.APIKey
+		// Debug: log resolved API key length
+		if provider.APIKey != "" {
+			log.Debug().
+				Str("provider_name", resolved.Summarizer.Provider).
+				Int("provider_key_len", len(provider.APIKey)).
+				Msg("Resolved API key from provider config")
+		} else {
+			log.Warn().
+				Str("provider_name", resolved.Summarizer.Provider).
+				Msg("Provider API key is empty!")
+		}
 	}
 	if resolved.Summarizer.Endpoint == "" {
-		resolved.Summarizer.Endpoint = provider.GetEndpoint(resolved.Summarizer.Provider)
+		// Infer actual provider type from model name to resolve correct endpoint
+		actualProvider := inferProviderFromModel(provider.Model)
+		resolved.Summarizer.Endpoint = ResolveProviderEndpoint(actualProvider, provider.Model)
 	}
 
 	return resolved
+}
+
+// ResolvePreemptiveProviderWithLogging resolves provider settings and sets logging flag.
+// loggingEnabled controls whether history_compaction.jsonl is created (follows telemetry_enabled).
+func (cfg *Config) ResolvePreemptiveProviderWithLogging(loggingEnabled bool) PreemptiveConfig {
+	resolved := cfg.ResolvePreemptiveProvider()
+	resolved.LoggingEnabled = loggingEnabled
+	return resolved
+}
+
+// inferProviderFromModel infers the provider type from model name patterns.
+// Used when provider aliases (like "semantic_summarization") need endpoint resolution.
+func inferProviderFromModel(model string) string {
+	model = strings.ToLower(model)
+
+	// Anthropic models
+	if strings.Contains(model, "claude") || strings.Contains(model, "haiku") ||
+		strings.Contains(model, "sonnet") || strings.Contains(model, "opus") {
+		return ProviderAnthropic
+	}
+
+	// Gemini models
+	if strings.Contains(model, "gemini") {
+		return ProviderGemini
+	}
+
+	// OpenAI models (gpt, o1, o3, etc.)
+	if strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "o1-") ||
+		strings.HasPrefix(model, "o3-") {
+		return ProviderOpenAI
+	}
+
+	// Default to OpenAI for unknown patterns
+	return ProviderOpenAI
 }

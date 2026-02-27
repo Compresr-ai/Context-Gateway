@@ -1583,10 +1583,10 @@ func compressionConfigAnthropicDirect(apiKey string) *config.Config {
 				IncludeExpandHint:   false,
 				EnableExpandContext: false,
 				API: config.APIConfig{
-					Endpoint: "/api/compress/tool-output",
-					APIKey:   os.Getenv("COMPRESR_API_KEY"),
-					Model:    "tool_output_openai", // Use OpenAI model via API
-					Timeout:  30 * time.Second,
+					Endpoint:  "/api/compress/tool-output",
+					APISecret: os.Getenv("COMPRESR_API_KEY"),
+					Model:     "tool_output_openai", // Use OpenAI model via API
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

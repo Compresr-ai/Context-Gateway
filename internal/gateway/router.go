@@ -170,44 +170,16 @@ func (r *Router) processPipe(ctx *PipelineContext, pipeType PipeType) ([]byte, e
 	return modifiedBody, nil
 }
 
-// toPipeContext converts gateway PipelineContext to pipes.PipeContext.
-// Pipes will delegate extraction to adapter - no pre-extracted content passed.
+// toPipeContext returns the embedded PipeContext for pipe processing.
+// Since PipelineContext embeds *pipes.PipeContext, we return it directly.
 func (r *Router) toPipeContext(ctx *PipelineContext) *pipes.PipeContext {
-	pipeCtx := pipes.NewPipeContext(ctx.Adapter, ctx.OriginalRequest)
-	pipeCtx.CompressionThreshold = ctx.CompressionThreshold
-	pipeCtx.CapturedBearerToken = ctx.CapturedBearerToken
-	pipeCtx.CapturedBetaHeader = ctx.CapturedBetaHeader
-	pipeCtx.Provider = ctx.Provider
-	return pipeCtx
+	return ctx.PipeContext
 }
 
-// copyPipeResults copies results from pipes.PipeContext back to PipelineContext.
+// copyPipeResults computes derived fields that aren't directly embedded.
+// Most results are already accessible via PipelineContext's embedded *PipeContext.
 func (r *Router) copyPipeResults(pipeCtx *pipes.PipeContext, ctx *PipelineContext) {
-	ctx.OutputCompressed = pipeCtx.OutputCompressed
-	ctx.ToolsFiltered = pipeCtx.ToolsFiltered
-	ctx.FilteredToolCount = pipeCtx.ToolsSent
-	ctx.OriginalToolCount = pipeCtx.ToolsSent + pipeCtx.ToolsRemoved
-
-	// Merge shadow refs
-	for k, v := range pipeCtx.ShadowRefs {
-		ctx.ShadowRefs[k] = v
-	}
-
-	// Copy tool output compressions
-	for _, toc := range pipeCtx.ToolOutputCompressions {
-		ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, ToolOutputCompression{
-			ToolName:          toc.ToolName,
-			ToolCallID:        toc.ToolCallID,
-			ShadowID:          toc.ShadowID,
-			OriginalContent:   toc.OriginalContent,
-			CompressedContent: toc.CompressedContent,
-			OriginalBytes:     toc.OriginalBytes,
-			CompressedBytes:   toc.CompressedBytes,
-			CacheHit:          toc.CacheHit,
-			IsLastTool:        toc.IsLastTool,
-			MappingStatus:     toc.MappingStatus,
-			MinThreshold:      toc.MinThreshold,
-			MaxThreshold:      toc.MaxThreshold,
-		})
-	}
+    ctx.FilteredToolCount = pipeCtx.ToolsSent
+    ctx.OriginalToolCount = pipeCtx.ToolsSent + pipeCtx.ToolsRemoved
 }
+

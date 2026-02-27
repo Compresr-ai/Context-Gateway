@@ -61,27 +61,15 @@ var SupportedProviders = loadProviders()
 
 // loadProviders loads provider definitions from external_providers.yaml
 func loadProviders() []ProviderInfo {
-	// Try multiple locations for external_providers.yaml
-	paths := []string{
-		"configs/external_providers.yaml",
-	}
-
-	// Add user config path
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		paths = append([]string{
-			filepath.Join(homeDir, ".config", "context-gateway", "external_providers.yaml"),
-		}, paths...)
-	}
-
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
+	tryLoad := func(path string) []ProviderInfo {
+		data, err := os.ReadFile(path) // #nosec G304 -- trusted config paths
 		if err != nil {
-			continue
+			return nil
 		}
 
 		var cfg ExternalProvidersConfig
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			continue
+			return nil
 		}
 
 		// Convert to ProviderInfo slice
@@ -99,12 +87,159 @@ func loadProviders() []ProviderInfo {
 				})
 			}
 		}
+		return providers
+	}
 
-		if len(providers) > 0 {
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		userPath := filepath.Join(homeDir, ".config", "context-gateway", "external_providers.yaml")
+		if providers := tryLoad(userPath); len(providers) > 0 {
 			return providers
 		}
 	}
 
+	if providers := tryLoad("configs/external_providers.yaml"); len(providers) > 0 {
+		return providers
+	}
+
 	// Fallback to defaults
 	return DefaultProviders
+}
+
+// =============================================================================
+// COMPRESR API MODELS
+// =============================================================================
+
+// CompresrModelInfo contains information about a Compresr API model.
+type CompresrModelInfo struct {
+	Name        string
+	Description string
+	Recommended bool
+}
+
+// CompresrServiceInfo contains information about a Compresr service (tool_discovery or tool_output).
+type CompresrServiceInfo struct {
+	DefaultModel string
+	Models       []CompresrModelInfo
+}
+
+// CompresrConfig contains the Compresr API configuration.
+type CompresrConfig struct {
+	DisplayName    string
+	EnvVar         string
+	BaseURLEnv     string
+	DefaultBaseURL string
+	ToolDiscovery  CompresrServiceInfo
+	ToolOutput     CompresrServiceInfo
+}
+
+// compresrModelsConfig represents the compresr_models.yaml configuration
+type compresrModelsConfig struct {
+	Compresr struct {
+		DisplayName    string `yaml:"display_name"`
+		EnvVar         string `yaml:"env_var"`
+		BaseURLEnv     string `yaml:"base_url_env"`
+		DefaultBaseURL string `yaml:"default_base_url"`
+		ToolDiscovery  struct {
+			DefaultModel string `yaml:"default_model"`
+			Models       []struct {
+				Name        string `yaml:"name"`
+				Description string `yaml:"description"`
+				Recommended bool   `yaml:"recommended"`
+			} `yaml:"models"`
+		} `yaml:"tool_discovery"`
+		ToolOutput struct {
+			DefaultModel string `yaml:"default_model"`
+			Models       []struct {
+				Name        string `yaml:"name"`
+				Description string `yaml:"description"`
+				Recommended bool   `yaml:"recommended"`
+			} `yaml:"models"`
+		} `yaml:"tool_output"`
+	} `yaml:"compresr"`
+}
+
+// DefaultCompresrConfig is the fallback if compresr_models.yaml cannot be loaded
+var DefaultCompresrConfig = CompresrConfig{
+	DisplayName:    "Compresr",
+	EnvVar:         "COMPRESR_API_KEY",
+	BaseURLEnv:     "COMPRESR_BASE_URL",
+	DefaultBaseURL: "https://api.compresr.ai",
+	ToolDiscovery: CompresrServiceInfo{
+		DefaultModel: "tool-selector-v1",
+		Models: []CompresrModelInfo{
+			{Name: "tool-selector-v1", Description: "Fast, accurate tool selection", Recommended: true},
+			{Name: "tool-selector-lite", Description: "Ultra-fast, basic filtering"},
+			{Name: "tool-selector-pro", Description: "Most accurate, slower"},
+		},
+	},
+	ToolOutput: CompresrServiceInfo{
+		DefaultModel: "compressor-v1",
+		Models: []CompresrModelInfo{
+			{Name: "compressor-v1", Description: "Balanced compression", Recommended: true},
+			{Name: "compressor-lite", Description: "Fast, basic compression"},
+			{Name: "compressor-pro", Description: "Best compression ratio"},
+		},
+	},
+}
+
+// CompresrModels is loaded from compresr_models.yaml or falls back to defaults
+var CompresrModels = loadCompresrModels()
+
+// loadCompresrModels loads Compresr model definitions from compresr_models.yaml
+func loadCompresrModels() CompresrConfig {
+	tryLoad := func(path string) *CompresrConfig {
+		data, err := os.ReadFile(path) // #nosec G304 -- trusted config paths
+		if err != nil {
+			return nil
+		}
+
+		var cfg compresrModelsConfig
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil
+		}
+
+		// Convert to CompresrConfig
+		result := CompresrConfig{
+			DisplayName:    cfg.Compresr.DisplayName,
+			EnvVar:         cfg.Compresr.EnvVar,
+			BaseURLEnv:     cfg.Compresr.BaseURLEnv,
+			DefaultBaseURL: cfg.Compresr.DefaultBaseURL,
+		}
+
+		// Tool Discovery models
+		result.ToolDiscovery.DefaultModel = cfg.Compresr.ToolDiscovery.DefaultModel
+		for _, m := range cfg.Compresr.ToolDiscovery.Models {
+			result.ToolDiscovery.Models = append(result.ToolDiscovery.Models, CompresrModelInfo{
+				Name:        m.Name,
+				Description: m.Description,
+				Recommended: m.Recommended,
+			})
+		}
+
+		// Tool Output models
+		result.ToolOutput.DefaultModel = cfg.Compresr.ToolOutput.DefaultModel
+		for _, m := range cfg.Compresr.ToolOutput.Models {
+			result.ToolOutput.Models = append(result.ToolOutput.Models, CompresrModelInfo{
+				Name:        m.Name,
+				Description: m.Description,
+				Recommended: m.Recommended,
+			})
+		}
+
+		return &result
+	}
+
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		userPath := filepath.Join(homeDir, ".config", "context-gateway", "compresr_models.yaml")
+		if cfg := tryLoad(userPath); cfg != nil {
+			return *cfg
+		}
+	}
+
+	if cfg := tryLoad("internal/compresr/compresr_models.yaml"); cfg != nil {
+		return *cfg
+	}
+
+	// Fallback to defaults
+	return DefaultCompresrConfig
 }

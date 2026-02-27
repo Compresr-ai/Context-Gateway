@@ -33,7 +33,7 @@ func TestSessionManager_GenerateSessionID_DeterministicHashing(t *testing.T) {
 	id2 := sm.GenerateSessionID(messages)
 
 	assert.Equal(t, id1, id2, "same messages should produce same session ID")
-	assert.Len(t, id1, 16, "session ID should be 16 characters")
+	assert.Len(t, id1, 32, "session ID should be 32 characters")
 }
 
 func TestSessionManager_GenerateSessionID_DifferentMessages(t *testing.T) {
@@ -82,7 +82,7 @@ func TestSessionManager_GenerateSessionID_FewerThanHashCount(t *testing.T) {
 
 	id := sm.GenerateSessionID(messages)
 	assert.NotEmpty(t, id, "should generate ID with fewer messages than hash count")
-	assert.Len(t, id, 16)
+	assert.Len(t, id, 32)
 }
 
 func TestSessionManager_GetOrCreateSession_New(t *testing.T) {

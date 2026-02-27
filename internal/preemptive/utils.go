@@ -249,7 +249,7 @@ func BuildAnthropicResponse(summary string, messages []json.RawMessage, lastInde
 			if err := json.Unmarshal(messages[i], &msg); err == nil {
 				role, _ := msg["role"].(string)
 				content := extractContent(msg["content"])
-				text.WriteString(fmt.Sprintf("[%s]: %s\n\n", role, content))
+				_, _ = fmt.Fprintf(&text, "[%s]: %s\n\n", role, content)
 				recentCount++
 			}
 		}
@@ -363,8 +363,6 @@ func WithDefaults(cfg Config) Config {
 	if len(cfg.Detectors.ClaudeCode.PromptPatterns) == 0 {
 		cfg.Detectors.ClaudeCode.PromptPatterns = DefaultClaudeCodePromptPatterns
 	}
-	if len(cfg.Detectors.Codex.PromptPatterns) == 0 {
-		cfg.Detectors.Codex.PromptPatterns = DefaultCodexPromptPatterns
-	}
+	// (Codex prompt pattern logic removed)
 	return cfg
 }

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -19,12 +20,15 @@ import (
 
 // Tracker handles telemetry event recording to file and stdout.
 type Tracker struct {
-	config             TelemetryConfig
-	requestLogPath     string
-	compressionLogPath string
-	requestCount       int
-	compressionCount   int
-	mu                 sync.Mutex
+	config               TelemetryConfig
+	requestLogPath       string
+	compressionLogPath   string
+	toolDiscoveryLogPath string
+	initLogPath          string
+	requestCount         int
+	compressionCount     int
+	toolDiscoveryCount   int
+	mu                   sync.Mutex
 }
 
 // NewTracker creates a new telemetry tracker.
@@ -43,10 +47,16 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 			return nil, err
 		}
 		t.requestLogPath = cfg.LogPath
+		t.initLogPath = filepath.Join(filepath.Dir(cfg.LogPath), "init.jsonl")
 		// Create empty file if it doesn't exist
 		if _, err := os.Stat(cfg.LogPath); os.IsNotExist(err) {
-			if f, err := os.Create(cfg.LogPath); err == nil {
-				f.Close()
+			if f, err := os.OpenFile(cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
+				_ = f.Close()
+			}
+		}
+		if _, err := os.Stat(t.initLogPath); os.IsNotExist(err) {
+			if f, err := os.OpenFile(t.initLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
+				_ = f.Close()
 			}
 		}
 	}
@@ -58,8 +68,21 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 		t.compressionLogPath = cfg.CompressionLogPath
 		// Create empty file if it doesn't exist
 		if _, err := os.Stat(cfg.CompressionLogPath); os.IsNotExist(err) {
-			if f, err := os.Create(cfg.CompressionLogPath); err == nil {
-				f.Close()
+			if f, err := os.OpenFile(cfg.CompressionLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
+				_ = f.Close()
+			}
+		}
+	}
+
+	if cfg.ToolDiscoveryLogPath != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.ToolDiscoveryLogPath), 0750); err != nil {
+			return nil, err
+		}
+		t.toolDiscoveryLogPath = cfg.ToolDiscoveryLogPath
+		// Create empty file if it doesn't exist
+		if _, err := os.Stat(cfg.ToolDiscoveryLogPath); os.IsNotExist(err) {
+			if f, err := os.OpenFile(cfg.ToolDiscoveryLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
+				_ = f.Close()
 			}
 		}
 	}
@@ -75,11 +98,11 @@ func appendJSONL(path string, event any) error {
 	}
 	data = append(data, '\n')
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- user-configured telemetry path
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	_, err = f.Write(data)
 	return err
@@ -118,6 +141,20 @@ func (t *Tracker) RecordRequest(event *RequestEvent) {
 	}
 }
 
+// RecordInit records a gateway initialization event to a dedicated init JSONL.
+func (t *Tracker) RecordInit(event *InitEvent) {
+	if !t.config.Enabled || t.initLogPath == "" || event == nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := appendJSONL(t.initLogPath, event); err != nil {
+		log.Error().Err(err).Str("path", t.initLogPath).Msg("telemetry: failed to write init event")
+	}
+}
+
 // RecordExpand records an expand_context call.
 func (t *Tracker) RecordExpand(event *ExpandEvent) {
 	if !t.config.Enabled {
@@ -142,6 +179,11 @@ func (t *Tracker) CompressionLogEnabled() bool {
 	return t.config.Enabled && t.compressionLogPath != ""
 }
 
+// ToolDiscoveryLogEnabled returns true if tool discovery logging is enabled.
+func (t *Tracker) ToolDiscoveryLogEnabled() bool {
+	return t.config.Enabled && t.toolDiscoveryLogPath != ""
+}
+
 // LogCompressionComparison logs a compression comparison for debugging.
 func (t *Tracker) LogCompressionComparison(comparison CompressionComparison) {
 	if !t.CompressionLogEnabled() {
@@ -159,6 +201,22 @@ func (t *Tracker) LogCompressionComparison(comparison CompressionComparison) {
 	}
 }
 
+// LogToolDiscoveryComparison logs a tool discovery comparison to a dedicated log.
+func (t *Tracker) LogToolDiscoveryComparison(comparison CompressionComparison) {
+	if !t.ToolDiscoveryLogEnabled() {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := appendJSONL(t.toolDiscoveryLogPath, comparison); err != nil {
+		log.Error().Err(err).Str("path", t.toolDiscoveryLogPath).Msg("telemetry: failed to write tool discovery event")
+	} else {
+		t.toolDiscoveryCount++
+	}
+}
+
 // Close is kept for interface compatibility.
 func (t *Tracker) Close() error {
 	t.mu.Lock()
@@ -172,4 +230,76 @@ func (t *Tracker) Close() error {
 	}
 
 	return nil
+}
+
+// ============================================================================
+// HELPERS FOR VERBOSE PAYLOADS
+// ============================================================================
+
+// SanitizeHeaders removes sensitive headers and returns a safe copy.
+func SanitizeHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	sanitized := make(map[string]string)
+	sensitiveHeaders := map[string]bool{
+		"authorization":    true,
+		"x-api-key":        true,
+		"api-key":          true,
+		"x-auth-token":     true,
+		"cookie":           true,
+		"set-cookie":       true,
+		"x-amzn-requestid": false, // Safe
+		"cf-ray":           false, // Safe
+		"x-request-id":     false, // Safe
+		"request-id":       false, // Safe,
+	}
+
+	for k, v := range headers {
+		lowerK := strings.ToLower(k)
+		if sensitiveHeaders[lowerK] {
+			// Mask sensitive headers
+			if len(v) > 4 {
+				sanitized[k] = v[:4] + "..." // Show first 4 chars
+			} else {
+				sanitized[k] = "***"
+			}
+		} else {
+			sanitized[k] = v
+		}
+	}
+
+	return sanitized
+}
+
+// MaskAuthHeader masks an authorization header value while preserving type info.
+func MaskAuthHeader(authHeader string) string {
+	if authHeader == "" {
+		return ""
+	}
+
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) == 2 {
+		authType := parts[0]  // "Bearer", "sk-", etc.
+		authValue := parts[1] // actual token
+		if len(authValue) > 4 {
+			return authType + " " + authValue[:4] + "..."
+		}
+		return authType + " ***"
+	}
+
+	// Mask the whole thing
+	if len(authHeader) > 4 {
+		return authHeader[:4] + "..."
+	}
+	return "***"
+}
+
+// PreviewBody extracts first N chars of a body string for logging.
+func PreviewBody(body string, maxChars int) string {
+	if len(body) > maxChars {
+		return body[:maxChars] + "...[truncated]"
+	}
+	return body
 }

@@ -47,6 +47,11 @@ type Job struct {
 	LastIndex     int
 	Error         string
 	done          chan struct{}
+
+	// Per-job auth credentials for session isolation
+	AuthToken     string // Captured auth token for this job
+	AuthIsXAPIKey bool   // true = use x-api-key header, false = use Authorization: Bearer
+	AuthEndpoint  string // Captured endpoint for this job
 }
 
 // SummarizationJob is an alias for backward compatibility.
@@ -58,6 +63,7 @@ type Worker struct {
 	sessions         *SessionManager
 	summarizerCfg    SummarizerConfig
 	triggerThreshold float64
+	jobRetention     time.Duration
 
 	jobs     map[string]*Job
 	jobQueue chan *Job
@@ -69,11 +75,13 @@ type Worker struct {
 
 // NewWorker creates a new background worker.
 func NewWorker(summarizer *Summarizer, sessions *SessionManager, cfg SummarizerConfig, triggerThreshold float64) *Worker {
+	const defaultJobRetention = 30 * time.Minute
 	return &Worker{
 		summarizer:       summarizer,
 		sessions:         sessions,
 		summarizerCfg:    cfg,
 		triggerThreshold: triggerThreshold,
+		jobRetention:     defaultJobRetention,
 		jobs:             make(map[string]*Job),
 		jobQueue:         make(chan *Job, 100),
 		stopChan:         make(chan struct{}),
@@ -95,6 +103,8 @@ func (w *Worker) Start() {
 		w.wg.Add(1)
 		go w.processJobs(i)
 	}
+	w.wg.Add(1)
+	go w.cleanupJobsLoop()
 }
 
 // Stop stops all workers.
@@ -111,13 +121,23 @@ func (w *Worker) Stop() {
 	log.Info().Msg("Preemptive summarization workers stopped")
 }
 
-// SubmitJob submits a new summarization job (legacy name).
-func (w *Worker) SubmitJob(sessionID string, messages []json.RawMessage, model string) (*Job, error) {
-	return w.Submit(sessionID, messages, model), nil
+// JobAuthParams contains per-job auth credentials captured from the triggering request.
+// This ensures each background job uses the auth from its originating session, not a global.
+type JobAuthParams struct {
+	Token     string // Auth token (API key or Bearer token)
+	IsXAPIKey bool   // true = use x-api-key header, false = use Authorization: Bearer
+	Endpoint  string // Upstream endpoint URL
 }
 
-// Submit submits a new summarization job.
-func (w *Worker) Submit(sessionID string, messages []json.RawMessage, model string) *Job {
+// SubmitJob submits a new summarization job (legacy name).
+func (w *Worker) SubmitJob(sessionID string, messages []json.RawMessage, model string) (*Job, error) {
+	return w.Submit(sessionID, messages, model, JobAuthParams{}), nil
+}
+
+// Submit submits a new summarization job with per-job auth credentials.
+// The auth params are captured from the request that triggers this job,
+// ensuring session isolation.
+func (w *Worker) Submit(sessionID string, messages []json.RawMessage, model string, auth JobAuthParams) *Job {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -129,14 +149,17 @@ func (w *Worker) Submit(sessionID string, messages []json.RawMessage, model stri
 	}
 
 	job := &Job{
-		ID:           sessionID,
-		SessionID:    sessionID,
-		Status:       JobQueued,
-		CreatedAt:    time.Now(),
-		Messages:     messages,
-		MessageCount: len(messages),
-		Model:        model,
-		done:         make(chan struct{}),
+		ID:            sessionID,
+		SessionID:     sessionID,
+		Status:        JobQueued,
+		CreatedAt:     time.Now(),
+		Messages:      messages,
+		MessageCount:  len(messages),
+		Model:         model,
+		done:          make(chan struct{}),
+		AuthToken:     auth.Token,
+		AuthIsXAPIKey: auth.IsXAPIKey,
+		AuthEndpoint:  auth.Endpoint,
 	}
 
 	w.jobs[sessionID] = job
@@ -223,6 +246,9 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		KeepRecentTokens: w.summarizerCfg.KeepRecentTokens,
 		KeepRecentCount:  w.summarizerCfg.KeepRecentCount,
 		Model:            job.Model,
+		AuthToken:        job.AuthToken,
+		AuthIsXAPIKey:    job.AuthIsXAPIKey,
+		AuthEndpoint:     job.AuthEndpoint,
 	})
 
 	now := time.Now()
@@ -260,7 +286,50 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		}
 	}
 
+	// Release large request payloads once summarization finishes.
+	job.Messages = nil
+
 	close(job.done)
+}
+
+// cleanupJobsLoop removes old terminal jobs to keep memory bounded.
+func (w *Worker) cleanupJobsLoop() {
+	defer w.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.stopChan:
+			return
+		case <-ticker.C:
+			w.cleanupJobs()
+		}
+	}
+}
+
+func (w *Worker) cleanupJobs() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	now := time.Now()
+	for id, job := range w.jobs {
+		if job == nil {
+			delete(w.jobs, id)
+			continue
+		}
+		switch job.Status {
+		case JobCompleted, JobFailed, JobCancelled:
+			ref := job.CompletedAt
+			if ref == nil {
+				ref = &job.CreatedAt
+			}
+			if ref != nil && now.Sub(*ref) > w.jobRetention {
+				delete(w.jobs, id)
+			}
+		}
+	}
 }
 
 // Stats returns worker statistics.

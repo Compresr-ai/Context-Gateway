@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/store"
 	"github.com/rs/zerolog/log"
@@ -73,6 +74,9 @@ type Pipe struct {
 	includeExpandHint   bool    // Add expand_context() hint to compressed output
 	enableExpandContext bool    // Enable expand_context feature (tool injection, hint, expand loop)
 	store               store.Store
+
+	// Compresr API client (used when strategy=api)
+	compresrClient *compresr.Client
 
 	// API strategy config (strategy=api or strategy=external_provider)
 	apiEndpoint      string
@@ -196,8 +200,8 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 			apiEndpoint = strings.Replace(apiEndpoint, "::SCHEME::", "://", 1)
 		}
 	}
-	if cfg.Pipes.ToolOutput.API.APIKey != "" {
-		apiKey = cfg.Pipes.ToolOutput.API.APIKey
+	if cfg.Pipes.ToolOutput.API.APISecret != "" {
+		apiKey = cfg.Pipes.ToolOutput.API.APISecret
 	}
 	if cfg.Pipes.ToolOutput.API.Model != "" {
 		apiModel = cfg.Pipes.ToolOutput.API.Model
@@ -277,6 +281,14 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 
 		// Skip tools (categories resolved per-request based on provider)
 		skipCategories: skipCategories,
+	}
+
+	// Initialize Compresr client when strategy is 'api'
+	if cfg.Pipes.ToolOutput.Strategy == config.StrategyAPI {
+		// Use Compresr base URL from config, or fall back to default
+		baseURL := cfg.URLs.Compresr
+		p.compresrClient = compresr.NewClient(baseURL, apiKey, compresr.WithTimeout(apiTimeout))
+		log.Info().Str("base_url", baseURL).Str("model", apiModel).Dur("timeout", apiTimeout).Msg("tool_output: initialized Compresr client for API strategy")
 	}
 
 	// Log warning if no API key configured (will rely on captured Bearer token from requests)

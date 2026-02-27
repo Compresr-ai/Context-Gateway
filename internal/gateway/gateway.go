@@ -24,21 +24,33 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/auth"
 	"github.com/compresr/context-gateway/internal/config"
+	"github.com/compresr/context-gateway/internal/costcontrol"
 	"github.com/compresr/context-gateway/internal/monitoring"
 	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 	"github.com/compresr/context-gateway/internal/preemptive"
 	"github.com/compresr/context-gateway/internal/store"
 )
 
+// Header constants for gateway requests.
 const (
-	MaxRequestBodySize         = 50 * 1024 * 1024
 	HeaderRequestID            = "X-Request-ID"
 	HeaderTargetURL            = "X-Target-URL"
 	HeaderProvider             = "X-Provider"
 	HeaderCompressionThreshold = "X-Compression-Threshold" // User-selectable: off, 256, 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k
-	DefaultRateLimit           = 100
-	MaxRateLimitBuckets        = 10000 // Prevent memory exhaustion
+)
+
+// Re-export centralized defaults for backward compatibility within this package.
+const (
+	MaxRequestBodySize     = config.MaxRequestBodySize
+	MaxResponseSize        = config.MaxResponseSize
+	DefaultRateLimit       = config.DefaultRateLimit
+	MaxRateLimitBuckets    = config.MaxRateLimitBuckets
+	DefaultBufferSize      = config.DefaultBufferSize
+	DefaultCleanupInterval = config.DefaultCleanupInterval
+	DefaultDialTimeout     = config.DefaultDialTimeout
+	DefaultStaleTimeout    = config.DefaultStaleTimeout
 )
 
 // allowedHosts contains the approved LLM provider domains for SSRF protection.
@@ -46,6 +58,7 @@ const (
 var allowedHosts = map[string]bool{
 	// Core providers
 	"api.openai.com":                    true,
+	"chatgpt.com":                       true, // ChatGPT subscription backend
 	"api.anthropic.com":                 true,
 	"generativelanguage.googleapis.com": true,
 
@@ -72,21 +85,41 @@ var allowedHosts = map[string]bool{
 	"api-inference.huggingface.co":  true,
 	"ai-gateway.cloudflare.com":     true,
 
-	// Local/self-hosted
-	"localhost": true,
-	"127.0.0.1": true,
+	// Localhost removed from default allowlist to prevent SSRF
+	// Use GATEWAY_ALLOW_LOCAL=true for local development
 }
 
 func init() {
+	// Allow local development via explicit opt-in
+	if os.Getenv("GATEWAY_ALLOW_LOCAL") == "true" {
+		allowedHosts["localhost"] = true
+		allowedHosts["127.0.0.1"] = true
+		log.Warn().Msg("SSRF protection: localhost enabled via GATEWAY_ALLOW_LOCAL (dev mode only)")
+	}
+
 	// Allow additional hosts via environment variable
 	if extra := os.Getenv("GATEWAY_ALLOWED_HOSTS"); extra != "" {
+		var addedHosts []string
 		for _, host := range strings.Split(extra, ",") {
 			host = strings.TrimSpace(strings.ToLower(host))
 			if host != "" {
 				allowedHosts[host] = true
+				addedHosts = append(addedHosts, host)
 			}
 		}
+		if len(addedHosts) > 0 {
+			log.Info().
+				Strs("hosts", addedHosts).
+				Msg("SSRF allowlist extended via GATEWAY_ALLOWED_HOSTS")
+		}
 	}
+}
+
+// EnableLocalHostsForTesting adds localhost to the SSRF allowlist.
+// This should only be called from test setup (TestMain).
+func EnableLocalHostsForTesting() {
+	allowedHosts["localhost"] = true
+	allowedHosts["127.0.0.1"] = true
 }
 
 // registerBedrockHosts adds Bedrock Runtime hosts to the SSRF allowlist.
@@ -111,13 +144,25 @@ type Gateway struct {
 	store       store.Store
 	tracker     *monitoring.Tracker
 	trajectory  *monitoring.TrajectoryManager
-	expander    *tooloutput.Expander
 	httpClient  *http.Client
 	server      *http.Server
 	rateLimiter *rateLimiter
 
+	// Cost control
+	costTracker *costcontrol.Tracker
+
 	// Preemptive summarization
 	preemptive *preemptive.Manager
+
+	// Tool sessions for hybrid tool discovery.
+	toolSessions *ToolSessionStore
+	authMode     *authFallbackStore
+
+	// Provider-specific auth handlers (subscription/fallback)
+	authRegistry *auth.Registry
+
+	// Legacy expander (for streaming - to be migrated)
+	expander *tooloutput.Expander
 
 	// AWS Bedrock support
 	bedrockSigner *BedrockSigner
@@ -153,15 +198,18 @@ func New(cfg *config.Config) *Gateway {
 
 	// Initialize telemetry
 	tracker, err := monitoring.NewTracker(monitoring.TelemetryConfig{
-		Enabled:            cfg.Monitoring.TelemetryEnabled,
-		LogPath:            cfg.Monitoring.TelemetryPath,
-		LogToStdout:        cfg.Monitoring.LogToStdout,
-		CompressionLogPath: cfg.Monitoring.CompressionLogPath,
+		Enabled:              cfg.Monitoring.TelemetryEnabled,
+		LogPath:              cfg.Monitoring.TelemetryPath,
+		LogToStdout:          cfg.Monitoring.LogToStdout,
+		VerbosePayloads:      cfg.Monitoring.VerbosePayloads,
+		CompressionLogPath:   cfg.Monitoring.CompressionLogPath,
+		ToolDiscoveryLogPath: cfg.Monitoring.ToolDiscoveryLogPath,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to initialize telemetry")
 		tracker, _ = monitoring.NewTracker(monitoring.TelemetryConfig{Enabled: false})
 	}
+	tracker.RecordInit(buildInitEvent(cfg))
 
 	// Initialize trajectory manager (ATIF format) - separate files per session ID
 	// TrajectoryPath is treated as base directory for per-session files
@@ -173,9 +221,11 @@ func New(cfg *config.Config) *Gateway {
 		}
 	}
 	trajectoryMgr := monitoring.NewTrajectoryManager(monitoring.TrajectoryManagerConfig{
-		Enabled:   cfg.Monitoring.TrajectoryEnabled,
-		BaseDir:   trajectoryBaseDir,
-		AgentName: cfg.Monitoring.AgentName,
+		Enabled:         cfg.Monitoring.TrajectoryEnabled,
+		BaseDir:         trajectoryBaseDir,
+		AgentName:       cfg.Monitoring.AgentName,
+		SessionTTL:      time.Hour,
+		CleanupInterval: 5 * time.Minute,
 	})
 
 	// Use config write_timeout for upstream requests
@@ -209,6 +259,16 @@ func New(cfg *config.Config) *Gateway {
 		bedrockSigner = NewBedrockSigner()
 	}
 
+	// Initialize tool session store for hybrid tool discovery
+	toolSessions := NewToolSessionStore(time.Hour) // 1 hour TTL
+
+	// Initialize provider-specific auth handlers
+	authRegistry, err := auth.SetupRegistry(cfg)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to initialize auth registry, fallback disabled")
+		authRegistry = auth.NewRegistry() // Empty registry
+	}
+
 	g := &Gateway{
 		config:        cfg,
 		registry:      registry,
@@ -216,10 +276,14 @@ func New(cfg *config.Config) *Gateway {
 		store:         st,
 		tracker:       tracker,
 		trajectory:    trajectoryMgr,
-		expander:      tooloutput.NewExpander(st, tracker),
-		httpClient:    &http.Client{Timeout: clientTimeout, Transport: transport}, // 0 = no timeout
+		expander:      tooloutput.NewExpander(st, tracker), // Legacy for streaming
+		httpClient:    &http.Client{Timeout: clientTimeout, Transport: transport},
 		rateLimiter:   newRateLimiter(DefaultRateLimit),
-		preemptive:    preemptive.NewManager(cfg.ResolvePreemptiveProvider()),
+		costTracker:   costcontrol.NewTracker(cfg.CostControl),
+		preemptive:    preemptive.NewManager(cfg.ResolvePreemptiveProviderWithLogging(cfg.Monitoring.TelemetryEnabled)),
+		toolSessions:  toolSessions,
+		authMode:      newAuthFallbackStore(time.Hour),
+		authRegistry:  authRegistry,
 		bedrockSigner: bedrockSigner,
 		logger:        logger,
 		requestLogger: requestLogger,
@@ -256,12 +320,14 @@ func (g *Gateway) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", g.handleHealth)
 	mux.HandleFunc("/stats", g.handleStats)
 	mux.HandleFunc("/expand", g.handleExpand)
+	mux.HandleFunc("/costs", g.handleCostDashboard)
 	mux.HandleFunc("/", g.handleProxy)
 }
 
 // Start starts the gateway.
 func (g *Gateway) Start() error {
 	log.Info().Int("port", g.config.Server.Port).Msg("gateway starting")
+	log.Info().Str("url", fmt.Sprintf("http://localhost:%d/costs", g.config.Server.Port)).Msg("cost dashboard")
 	return g.server.ListenAndServe()
 }
 
@@ -273,6 +339,17 @@ func (g *Gateway) Handler() http.Handler {
 // Shutdown gracefully shuts down the gateway.
 func (g *Gateway) Shutdown(ctx context.Context) error {
 	log.Info().Msg("gateway shutting down")
+
+	// Stop cleanup goroutines
+	if g.rateLimiter != nil {
+		g.rateLimiter.Stop()
+	}
+	if g.authMode != nil {
+		g.authMode.Stop()
+	}
+	if g.authRegistry != nil {
+		g.authRegistry.Stop()
+	}
 
 	// Stop preemptive summarization manager
 	if g.preemptive != nil {
@@ -293,9 +370,9 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 
 	// Close telemetry tracker
 	if g.tracker != nil {
-		g.tracker.Close()
+		_ = g.tracker.Close()
 	}
 
-	g.store.Close()
+	_ = g.store.Close()
 	return g.server.Shutdown(ctx)
 }

@@ -83,7 +83,7 @@ func (sm *SessionManager) GenerateSessionID(messages []json.RawMessage) string {
 			h := sha256.New()
 			canonical, _ := json.Marshal(parsed)
 			h.Write(canonical)
-			return hex.EncodeToString(h.Sum(nil))[:16]
+			return hex.EncodeToString(h.Sum(nil))[:32]
 		}
 	}
 
@@ -115,7 +115,7 @@ func (sm *SessionManager) GenerateSessionIDLegacy(messages []json.RawMessage) st
 		h.Write([]byte("|"))
 	}
 
-	return hex.EncodeToString(h.Sum(nil))[:16]
+	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
 // GetOrCreateSession retrieves an existing session or creates a new one.

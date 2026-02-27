@@ -45,7 +45,7 @@ var (
 
 // InitCompactionLogger initializes the logger with a directory path.
 func InitCompactionLogger(logDir string) error {
-	return InitCompactionLoggerWithPath(filepath.Join(logDir, "compaction.jsonl"))
+	return InitCompactionLoggerWithPath(filepath.Join(logDir, "history_compaction.jsonl"))
 }
 
 // InitCompactionLoggerWithPath initializes the logger with a file path.
@@ -55,7 +55,7 @@ func InitCompactionLoggerWithPath(logPath string) error {
 		// Handle both directory and file paths
 		path := logPath
 		if filepath.Ext(logPath) != ".jsonl" {
-			path = filepath.Join(logPath, "compaction.jsonl")
+			path = filepath.Join(logPath, "history_compaction.jsonl")
 		}
 
 		// Create directory
@@ -65,7 +65,7 @@ func InitCompactionLoggerWithPath(logPath string) error {
 		}
 
 		// Open file
-		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- user-configured log path
 		if err != nil {
 			initErr = fmt.Errorf("open log file: %w", err)
 			return
@@ -109,7 +109,7 @@ func (cl *CompactionLogger) Log(event CompactionEvent) {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	if data, err := json.Marshal(event); err == nil {
-		cl.file.Write(append(data, '\n'))
+		_, _ = cl.file.Write(append(data, '\n'))
 	}
 }
 

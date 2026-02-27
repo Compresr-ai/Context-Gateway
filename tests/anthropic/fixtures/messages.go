@@ -128,9 +128,10 @@ func SingleToolOutputRequest(toolOutput string) []byte {
 
 // MultiToolOutputRequest creates a request with multiple tool outputs (OpenAI Responses API format).
 func MultiToolOutputRequest(outputs ...string) []byte {
-	input := []map[string]interface{}{
+	input := make([]map[string]interface{}, 0, 1+2*len(outputs))
+	input = append(input,
 		OpenAIUserInput("Read all the go files"),
-	}
+	)
 
 	// Add function calls
 	for i := range outputs {

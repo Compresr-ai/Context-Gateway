@@ -17,7 +17,7 @@ import (
 )
 
 func init() {
-	godotenv.Load("../../../.env")
+	_ = godotenv.Load("../../../.env")
 	// Silence logs during tests
 	zerolog.SetGlobalLevel(zerolog.Disabled)
 	log.Logger = zerolog.New(io.Discard)
@@ -52,11 +52,10 @@ func TestStore() store.Store {
 	return store.NewMemoryStore(1 * time.Hour)
 }
 
-// PreloadedStore creates a store with pre-populated shadow content.
 func PreloadedStore(content map[string]string) store.Store {
 	st := store.NewMemoryStore(1 * time.Hour)
 	for shadowID, c := range content {
-		st.Set(shadowID, c)
+		_ = st.Set(shadowID, c)
 	}
 	return st
 }

@@ -79,8 +79,7 @@ func setupAnthropicAPIKey(agentName string) bool {
 	scope := promptCredentialScope("Save API key for")
 	persistCredential("ANTHROPIC_API_KEY", apiKey, scope)
 
-	// Set for current session regardless
-	os.Setenv("ANTHROPIC_API_KEY", apiKey)
+	_ = os.Setenv("ANTHROPIC_API_KEY", apiKey)
 	printSuccess("API key configured")
 
 	return true
@@ -97,45 +96,6 @@ type SlackConfig struct {
 	BotToken   string // Bot token (legacy)
 	ChannelID  string // Channel ID (only needed for bot token)
 	Scope      CredentialScope
-}
-
-// setupSlackNotifications interactively prompts for Slack notification setup.
-// Only called for claude_code agent. Returns the config (Enabled=false if skipped).
-// nolint:unused // Will be used in future Slack wizard integration
-func setupSlackNotifications() SlackConfig {
-	config := SlackConfig{Enabled: false}
-
-	// Check if already configured (webhook or bot token)
-	if os.Getenv("SLACK_WEBHOOK_URL") != "" {
-		if isSlackHookInstalled() {
-			printInfo("Slack notifications already configured (webhook)")
-			config.Enabled = true
-			config.WebhookURL = os.Getenv("SLACK_WEBHOOK_URL")
-			return config
-		}
-	} else if os.Getenv("SLACK_BOT_TOKEN") != "" && os.Getenv("SLACK_CHANNEL_ID") != "" {
-		if isSlackHookInstalled() {
-			printInfo("Slack notifications already configured (bot token)")
-			config.Enabled = true
-			config.BotToken = os.Getenv("SLACK_BOT_TOKEN")
-			config.ChannelID = os.Getenv("SLACK_CHANNEL_ID")
-			return config
-		}
-	}
-
-	fmt.Println()
-	printHeader("Slack Notifications (Optional)")
-	fmt.Println()
-	fmt.Println("  Get notified when Claude needs your input or finishes a task.")
-	fmt.Println()
-
-	// Ask if user wants Slack notifications
-	if !promptYesNo("Enable Slack notifications?", false) {
-		printInfo("Slack notifications skipped")
-		return config
-	}
-
-	return promptSlackCredentials()
 }
 
 // promptSlackCredentials prompts for Slack webhook URL (simple flow).
@@ -179,8 +139,7 @@ func promptSlackCredentials() SlackConfig {
 	// Persist credential
 	persistCredential("SLACK_WEBHOOK_URL", webhookURL, scope)
 
-	// Set for current session
-	os.Setenv("SLACK_WEBHOOK_URL", webhookURL)
+	_ = os.Setenv("SLACK_WEBHOOK_URL", webhookURL)
 
 	config.Enabled = true
 	config.WebhookURL = webhookURL
@@ -231,7 +190,7 @@ func installClaudeCodeHooks() error {
 		return fmt.Errorf("failed to read embedded hook script: %w", err)
 	}
 
-	// #nosec G306 -- hook script needs to be executable
+	// #nosec G306 -- hook script must be executable (0700)
 	if err := os.WriteFile(hookScript, scriptData, 0700); err != nil {
 		return fmt.Errorf("failed to write hook script: %w", err)
 	}
@@ -256,7 +215,7 @@ func updateClaudeSettings(settingsPath, hookScript string) error {
 	var settings map[string]interface{}
 
 	// Read existing settings or create new
-	data, err := os.ReadFile(settingsPath)
+	data, err := os.ReadFile(settingsPath) // #nosec G304 -- known settings path under ~/.claude
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -345,7 +304,7 @@ func isSlackHookInstalled() bool {
 	}
 
 	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
-	data, err := os.ReadFile(settingsPath)
+	data, err := os.ReadFile(settingsPath) // #nosec G304 -- known settings path
 	if err != nil {
 		return false
 	}
@@ -399,6 +358,7 @@ func appendToEnvFile(envPath, key, value string) {
 	var lines []string
 	found := false
 
+	// #nosec G304 -- env file constructed from known paths
 	file, err := os.Open(envPath)
 	if err == nil {
 		scanner := bufio.NewScanner(file)
@@ -412,10 +372,9 @@ func appendToEnvFile(envPath, key, value string) {
 				lines = append(lines, line)
 			}
 		}
-		file.Close()
+		_ = file.Close()
 	}
 
-	// Append if not found
 	if !found {
 		lines = append(lines, fmt.Sprintf("%s=%s", key, value))
 	}

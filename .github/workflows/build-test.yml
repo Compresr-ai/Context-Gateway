@@ -24,9 +24,9 @@ jobs:
         run: make embed-prep
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.0
           args: --timeout=5m
 
   test:
@@ -94,7 +94,19 @@ jobs:
       - name: Run Gosec Security Scanner
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.21.0
-          gosec -exclude-dir=tests -exclude=G104,G304 -fmt=sarif -out=gosec-results.sarif ./...
+          # Exclude rules that are false positives for proxy/CLI apps:
+          # G101: URL constants, not credentials
+          # G104: Unhandled errors (covered by errcheck)
+          # G107,G704: Variable URLs (proxy core function)
+          # G117: Logging request data (required for debugging)
+          # G204,G702: Command execution (CLI agent launch)
+          # G302,G306: Executable permissions (required for binaries/hooks)
+          # G303,G304: File paths (config loading)
+          # G703: Path traversal (using ~/.config, not user input)
+          # G705: XSS (proxy response forwarding)
+          gosec -exclude-dir=tests \
+            -exclude=G101,G104,G107,G117,G204,G302,G304,G306,G702,G703,G704,G705 \
+            -fmt=sarif -out=gosec-results.sarif ./...
 
       - name: Check for vulnerabilities in dependencies
         run: |

@@ -1,0 +1,66 @@
+# Agent Configuration Template
+# ============================
+# Copy this template to create new agent configurations.
+# Uses default_config.yaml with dual-model support:
+#   - Lingua: Semantic summarization  
+#   - Compresr: Tool output & discovery
+#
+# Example:
+#   cp agents/template_example.yaml agents/my_agent.yaml
+#   # Edit agents/my_agent.yaml with your agent's settings
+#   ./start_agent.sh my_agent
+
+agent:
+  # Unique identifier for the agent (should match filename without .yaml)
+  name: "template"
+
+  # Display name shown in the interactive menu
+  display_name: "Template Agent"
+
+  # Brief description of what this agent does
+  description: "Template for creating new agent configurations"
+
+  # Gateway config to use (defaults to default_config.yaml)
+  config: "default_config.yaml"
+
+  # Environment variables to export before starting the agent
+  # Supports ${VAR} syntax for variable substitution from .env file
+  environment:
+    # Example: Route API calls through gateway
+    - name: "OPENAI_BASE_URL"
+      value: "http://localhost:${GATEWAY_PORT}"
+
+    # Example: Use API key from .env file
+    - name: "OPENAI_API_KEY"
+      value: "${OPENAI_API_KEY}"
+
+    # Example: Custom agent-specific variable
+    - name: "AGENT_MODE"
+      value: "production"
+
+  # Command configuration for starting the agent
+  command:
+    # Command to check if the agent is available (optional but recommended)
+    # Should return exit code 0 if available, non-zero otherwise
+    check_cmd: ["which", "my_agent"]
+
+    # The actual command to run
+    run: "my_agent"
+
+    # Additional arguments to pass to the command (optional)
+    args: []
+
+    # Optional install command to run if the check command fails
+    install_cmd: ["npm", "install", "-g", "my-agent"]
+    # Message to display if the check command fails
+    fallback_message: "Agent not found. Install with: npm install -g my-agent"
+
+# Notes:
+# ------
+# - Uses default_config.yaml automatically (can be overridden with --config flag)
+# - Default config includes Lingua summarization + Compresr tool compression
+# - Gateway port defaults to 18080 or can be overridden with --port flag
+# - All environment variable substitution uses ${VAR} syntax
+# - Variables are sourced from .env file at project root
+# - Gateway starts automatically if not running (unless --proxy skip flag is used)
+# - Gateway stops automatically when agent exits (unless --keep-gateway flag is used)

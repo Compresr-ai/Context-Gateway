@@ -57,8 +57,13 @@ elif [[ -z "${SLACK_BOT_TOKEN:-}" || -z "${SLACK_CHANNEL_ID:-}" ]]; then
 fi
 
 # ── Debug: log raw input ─────────────────────────────────────────────────
-if [[ -n "$cwd" ]]; then
+# Use session directory if available, otherwise fall back to cwd/logs
+if [[ -n "${SESSION_DIR:-}" ]]; then
+  DEBUG_LOG="${SESSION_DIR}/hook-debug.log"
+elif [[ -n "$cwd" ]]; then
   DEBUG_LOG="$cwd/logs/hook-debug.log"
+fi
+if [[ -n "${DEBUG_LOG:-}" ]]; then
   mkdir -p "$(dirname "$DEBUG_LOG")"
   echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $input" >> "$DEBUG_LOG"
 fi

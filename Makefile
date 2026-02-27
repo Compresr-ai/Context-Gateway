@@ -15,7 +15,7 @@ GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 
 # Build the binary
-build:
+build: embed-prep
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	$(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
@@ -90,7 +90,7 @@ lint:
 # Security scan (same as CI)
 security:
 	@echo "Running security scan..."
-	gosec -exclude-dir=tests -exclude=G104,G304 ./...
+	gosec -exclude-dir=tests ./...
 	govulncheck ./...
 
 # Dev: build and run in foreground with default config

@@ -72,14 +72,40 @@ var Providers = map[string]ProviderConfig{
 }
 
 // GetProviderByPath returns the provider config that matches the path.
+// BaseURL is resolved dynamically from environment variables at call time.
 func GetProviderByPath(path string) *ProviderConfig {
 	for _, p := range Providers {
 		for _, prefix := range p.Paths {
 			if strings.Contains(path, prefix) {
 				cfg := p // Copy to avoid returning pointer to loop variable
+				// Dynamically resolve BaseURL from env vars at runtime
+				// This allows agent-specific overrides set after package init
+				cfg.BaseURL = getProviderBaseURL(cfg.Name)
 				return &cfg
 			}
 		}
 	}
 	return nil
+}
+
+// getProviderBaseURL returns the base URL for a provider, checking env vars at runtime.
+func getProviderBaseURL(providerName string) string {
+	switch providerName {
+	case "anthropic":
+		return envOrDefault("ANTHROPIC_PROVIDER_URL", "https://api.anthropic.com")
+	case "openai":
+		return envOrDefault("OPENAI_PROVIDER_URL", "https://api.openai.com")
+	case "gemini":
+		return envOrDefault("GEMINI_PROVIDER_URL", "https://generativelanguage.googleapis.com")
+	case "bedrock":
+		return envOrDefault("BEDROCK_PROVIDER_URL", "https://bedrock-runtime."+envOrDefault("AWS_REGION", envOrDefault("AWS_DEFAULT_REGION", "us-east-1"))+".amazonaws.com")
+	case "ollama":
+		return envOrDefault("OLLAMA_PROVIDER_URL", "http://localhost:11434")
+	case "openrouter":
+		return envOrDefault("OPENROUTER_PROVIDER_URL", "https://openrouter.ai/api")
+	case "opencode":
+		return envOrDefault("OPENCODE_PROVIDER_URL", "https://opencode.ai/zen")
+	default:
+		return Providers[providerName].BaseURL
+	}
 }

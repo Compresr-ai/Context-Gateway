@@ -29,6 +29,7 @@ const (
 	StrategySimple           = "simple"            // Simple compression (first N words)
 	StrategyExternalProvider = "external_provider" // Call external LLM provider (OpenAI/Anthropic) directly
 	StrategyRelevance        = "relevance"         // Local relevance-based tool filtering (no external API)
+	StrategyToolSearch       = "tool-search"       // Local regex-based tool search (no external API)
 )
 
 // =============================================================================
@@ -185,6 +186,11 @@ type ToolDiscoveryConfig struct {
 	MaxTools    int      `yaml:"max_tools"`    // Keep at most this many tools (default: 25)
 	TargetRatio float64  `yaml:"target_ratio"` // Keep this ratio of tools (e.g., 0.8 = 80%)
 	AlwaysKeep  []string `yaml:"always_keep"`  // Tool names to never filter out
+
+	// Hybrid search fallback (allows LLM to request filtered-out tools)
+	EnableSearchFallback bool   `yaml:"enable_search_fallback"` // Inject gateway_search_tools (default: true when filtering)
+	SearchToolName       string `yaml:"search_tool_name"`       // Name of the search tool (default: "gateway_search_tools")
+	MaxSearchResults     int    `yaml:"max_search_results"`     // Max tools returned by search (default: 5)
 }
 
 // Validate validates tool discovery pipe config.
@@ -198,6 +204,9 @@ func (d *ToolDiscoveryConfig) Validate() error {
 	if d.Strategy == StrategyRelevance {
 		return nil // No external dependencies needed
 	}
+	if d.Strategy == StrategyToolSearch {
+		return nil // Local regex-based search, no external dependencies
+	}
 	if d.Strategy == StrategyAPI {
 		// Provider or API.Endpoint required
 		if d.Provider == "" && d.API.Endpoint == "" {
@@ -205,7 +214,7 @@ func (d *ToolDiscoveryConfig) Validate() error {
 		}
 		return nil
 	}
-	return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', or 'api'", d.Strategy)
+	return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', 'tool-search', or 'api'", d.Strategy)
 }
 
 // =============================================================================
@@ -216,7 +225,7 @@ func (d *ToolDiscoveryConfig) Validate() error {
 // Not used in current release - tool output compression is disabled.
 type APIConfig struct {
 	Endpoint      string        `yaml:"endpoint"`       // API endpoint URL
-	APIKey        string        `yaml:"api_key"`        // API authentication key
+	APISecret     string        `yaml:"api_key"`        // API authentication key
 	Model         string        `yaml:"model"`          // Compression model to use
 	Timeout       time.Duration `yaml:"timeout"`        // Request timeout
 	QueryAgnostic bool          `yaml:"query_agnostic"` // If true, compression is context-agnostic
