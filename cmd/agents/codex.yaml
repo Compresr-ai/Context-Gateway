@@ -11,7 +11,7 @@ agent:
   name: "codex"
   display_name: "Codex (CLI)"
   description: "OpenAI Codex CLI with Compresr compression"
-  config: "default_config.yaml"
+  config: "fast_setup.yaml"
 
   environment:
     - name: "OPENAI_BASE_URL"

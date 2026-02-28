@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/compresr/context-gateway/internal/tui"
+
+	"gopkg.in/yaml.v3"
 )
 
 // selectFromList shows an interactive menu using arrow keys and returns the selected index.
@@ -329,7 +331,7 @@ func listAvailableConfigs() []string {
 	return names
 }
 
-// isUserConfig checks if a config is a user-created config (in ~/.config/context-gateway/configs/)
+// isUserConfig checks if a config is a user-created config (in ~/.config/context-gateway/configs/).
 func isUserConfig(name string) bool {
 	homeDir, _ := os.UserHomeDir()
 	if homeDir == "" {
@@ -340,7 +342,7 @@ func isUserConfig(name string) bool {
 	return err == nil
 }
 
-// hasUserConfigs checks if there are any user-created configs
+// hasUserConfigs checks if there are any user-created configs.
 func hasUserConfigs() bool {
 	homeDir, _ := os.UserHomeDir()
 	if homeDir == "" {
@@ -359,7 +361,7 @@ func hasUserConfigs() bool {
 	return false
 }
 
-// listUserConfigs returns only user-created configs
+// listUserConfigs returns only user-created config names.
 func listUserConfigs() []string {
 	homeDir, _ := os.UserHomeDir()
 	if homeDir == "" {
@@ -378,6 +380,52 @@ func listUserConfigs() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// extractConfigDescription reads the metadata.description from a config file.
+// Returns empty string if metadata is not present or on error.
+func extractConfigDescription(name string) string {
+	data, _, err := resolveConfig(name)
+	if err != nil {
+		return ""
+	}
+
+	var meta struct {
+		Metadata struct {
+			Description string `yaml:"description"`
+		} `yaml:"metadata"`
+	}
+	if err := yaml.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return meta.Metadata.Description
+}
+
+// listAvailableConfigsPrint prints all discovered configs to stdout.
+func listAvailableConfigsPrint() {
+	configs := listAvailableConfigs()
+
+	printHeader("Available Configs")
+
+	if len(configs) == 0 {
+		fmt.Println("  No configs found.")
+		return
+	}
+
+	for i, name := range configs {
+		source := "(built-in)"
+		if isUserConfig(name) {
+			source = "(user)"
+		}
+
+		desc := extractConfigDescription(name)
+
+		fmt.Printf("  \033[0;32m[%d]\033[0m \033[1m%s\033[0m \033[2m%s\033[0m\n", i+1, name, source)
+		if desc != "" {
+			fmt.Printf("      %s\n", desc)
+		}
+		fmt.Println()
+	}
 }
 
 // createSessionDir creates a timestamped session directory.
@@ -454,32 +502,6 @@ func listAvailableAgents() {
 		fmt.Println()
 		i++
 	}
-}
-
-// selectModelInteractive shows a model selection menu for agents like OpenClaw.
-// Returns the selected model ID.
-func selectModelInteractive(ac *AgentConfig) string {
-	if len(ac.Agent.Models) == 0 {
-		return ac.Agent.DefaultModel
-	}
-
-	labels := make([]string, len(ac.Agent.Models))
-	for i, m := range ac.Agent.Models {
-		label := m.Name
-		if m.ID == ac.Agent.DefaultModel {
-			label += " (default)"
-		}
-		labels[i] = label
-	}
-
-	idx, err := selectFromList("Choose which model to use:", labels)
-	if err != nil {
-		return ac.Agent.DefaultModel
-	}
-
-	selected := ac.Agent.Models[idx]
-	printSuccess(fmt.Sprintf("Selected: %s (%s)", selected.Name, selected.ID))
-	return selected.ID
 }
 
 // createOpenClawConfig writes the OpenClaw config with proxy routing.
@@ -608,10 +630,12 @@ func printAgentHelp() {
 	fmt.Println("Usage: context-gateway [AGENT] [OPTIONS] [-- AGENT_ARGS...]")
 	fmt.Println()
 	fmt.Println("Options:")
-	fmt.Println("  -c, --config FILE    Gateway config (optional - shows menu if not specified)")
+	fmt.Println("  -c, --config [NAME]  Config menu if NAME omitted, uses NAME directly if provided")
+	fmt.Println("  --config list        List available configs")
 	fmt.Println("  -p, --port PORT      Gateway port (default: 18080)")
 	fmt.Println("  -d, --debug          Enable debug logging")
 	fmt.Println("  --proxy MODE         auto (default), start, skip")
+	fmt.Println("  --reset-api-key      Reset Compresr API key and re-run setup")
 	fmt.Println("  -l, --list           List available agents")
 	fmt.Println("  -h, --help           Show this help")
 	fmt.Println()
@@ -621,9 +645,10 @@ func printAgentHelp() {
 	fmt.Println("  (e.g., -p is used by the gateway for --port).")
 	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  context-gateway                                  Interactive mode")
-	fmt.Println("  context-gateway claude_code                      Interactive config selection")
-	fmt.Println("  context-gateway claude_code -c preemptive_summarization")
+	fmt.Println("  context-gateway                                  Start with default config")
+	fmt.Println("  context-gateway claude_code -c                   Config management menu")
+	fmt.Println("  context-gateway claude_code -c fast_setup        Use specific config")
+	fmt.Println("  context-gateway --config list                    List configs")
 	fmt.Println("  context-gateway -l                               List agents")
 	fmt.Println("  context-gateway claude_code -- -p \"fix the bug\"  Pass -p to Claude Code")
 	fmt.Println("  context-gateway claude_code -d -- --verbose      Debug gateway, --verbose to agent")

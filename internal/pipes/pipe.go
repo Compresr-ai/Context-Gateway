@@ -16,17 +16,25 @@
 package pipes
 
 import (
+	"context"
+
 	"github.com/compresr/context-gateway/internal/adapters"
 )
 
 // PipeContext carries data through pipe processing.
 // Pipes use this to access the adapter and store results.
 type PipeContext struct {
+	// Request context for cancellation and timeouts
+	RequestCtx context.Context
+
 	// Adapter for provider-agnostic extraction/application
 	Adapter adapters.Adapter
 
 	// Original request body
 	OriginalRequest []byte
+
+	// Target model for cost-based compression decisions
+	TargetModel string
 
 	// Compression threshold (from user header)
 	CompressionThreshold CompressionThreshold
@@ -50,6 +58,9 @@ type PipeContext struct {
 	ToolSessionID string                      // Session ID for tool filtering
 	ExpandedTools map[string]bool             // Tools previously found via search (force-keep)
 	DeferredTools []adapters.ExtractedContent // Tools filtered out (stored for search)
+
+	// Tool discovery model used for logging
+	ToolDiscoveryModel string // Model used for tool discovery (e.g., "tdc_coldbrew_v1")
 }
 
 // ToolOutputCompression tracks individual tool output compression.
@@ -57,8 +68,6 @@ type ToolOutputCompression struct {
 	ToolName          string `json:"tool_name"`
 	ToolCallID        string `json:"tool_call_id"`
 	ShadowID          string `json:"shadow_id"`
-	OriginalContent   string `json:"original_content"`
-	CompressedContent string `json:"compressed_content"`
 	OriginalBytes     int    `json:"original_bytes"`
 	CompressedBytes   int    `json:"compressed_bytes"`
 	CacheHit          bool   `json:"cache_hit"`
@@ -66,6 +75,9 @@ type ToolOutputCompression struct {
 	MappingStatus     string `json:"mapping_status"` // "hit", "miss", "compressed", "passthrough_small", "passthrough_large"
 	MinThreshold      int    `json:"min_threshold"`  // Min byte threshold used
 	MaxThreshold      int    `json:"max_threshold"`  // Max byte threshold used
+	Model             string `json:"model"`          // Compression model used (e.g., "toc_latte_v1")
+	OriginalContent   string `json:"original_content"`
+	CompressedContent string `json:"compressed_content"`
 }
 
 // NewPipeContext creates a new pipe context.
@@ -85,7 +97,7 @@ type Pipe interface {
 	Name() string
 
 	// Strategy returns the processing strategy:
-	// "passthrough" = do nothing, "api" = call Compresr API
+	// "passthrough" = do nothing, "compresr" = call Compresr API
 	Strategy() string
 
 	// Enabled returns whether this pipe is active.

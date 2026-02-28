@@ -85,6 +85,70 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 			expectError: true,
 			errorMsg:    "timeout",
 		},
+		{
+			name: "valid api strategy with hcc_espresso_v1",
+			config: preemptive.SummarizerConfig{
+				Strategy: preemptive.StrategyCompresr,
+				Compresr: &preemptive.CompresrConfig{
+					Endpoint: "/api/compress/history/",
+					APIKey:   "cmp_test-key",
+					Model:    "hcc_espresso_v1",
+					Timeout:  60 * time.Second,
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "compresr strategy missing compresr config",
+			config: preemptive.SummarizerConfig{
+				Strategy: preemptive.StrategyCompresr,
+				Compresr: nil,
+			},
+			expectError: true,
+			errorMsg:    "summarizer.compresr is required",
+		},
+		{
+			name: "api strategy missing endpoint",
+			config: preemptive.SummarizerConfig{
+				Strategy: preemptive.StrategyCompresr,
+				Compresr: &preemptive.CompresrConfig{
+					Endpoint: "",
+					APIKey:   "cmp_test-key",
+					Model:    "hcc_espresso_v1",
+					Timeout:  60 * time.Second,
+				},
+			},
+			expectError: true,
+			errorMsg:    "endpoint",
+		},
+		{
+			name: "api strategy missing api key",
+			config: preemptive.SummarizerConfig{
+				Strategy: preemptive.StrategyCompresr,
+				Compresr: &preemptive.CompresrConfig{
+					Endpoint: "/api/compress/history/",
+					APIKey:   "",
+					Model:    "hcc_espresso_v1",
+					Timeout:  60 * time.Second,
+				},
+			},
+			expectError: true,
+			errorMsg:    "api_key",
+		},
+		{
+			name: "api strategy missing model",
+			config: preemptive.SummarizerConfig{
+				Strategy: preemptive.StrategyCompresr,
+				Compresr: &preemptive.CompresrConfig{
+					Endpoint: "/api/compress/history/",
+					APIKey:   "cmp_test-key",
+					Model:    "",
+					Timeout:  60 * time.Second,
+				},
+			},
+			expectError: true,
+			errorMsg:    "model",
+		},
 	}
 
 	for _, tt := range tests {
@@ -124,6 +188,21 @@ func TestSummarizer_Creation(t *testing.T) {
 		MaxTokens:       4096,
 		Timeout:         60 * time.Second,
 		KeepRecentCount: 10,
+	}
+
+	summarizer := preemptive.NewSummarizer(cfg)
+	require.NotNil(t, summarizer)
+}
+
+func TestSummarizer_CreationWithAPIStrategy(t *testing.T) {
+	cfg := preemptive.SummarizerConfig{
+		Strategy: preemptive.StrategyCompresr,
+		Compresr: &preemptive.CompresrConfig{
+			Endpoint: "/api/compress/history/",
+			APIKey:   "cmp_test-key",
+			Model:    "hcc_espresso_v1",
+			Timeout:  60 * time.Second,
+		},
 	}
 
 	summarizer := preemptive.NewSummarizer(cfg)

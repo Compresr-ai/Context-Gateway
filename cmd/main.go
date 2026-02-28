@@ -15,8 +15,10 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/gateway"
+	"github.com/compresr/context-gateway/internal/tui"
 )
 
 // ANSI color codes
@@ -44,7 +46,8 @@ func printBanner() {
 func loadEnvFiles() {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		_ = godotenv.Load()
+		// If we can't resolve home, fall back to no-op to avoid
+		// accidentally loading a local .env.
 		return
 	}
 
@@ -53,9 +56,6 @@ func loadEnvFiles() {
 	if _, err := os.Stat(configEnv); err == nil {
 		_ = godotenv.Load(configEnv)
 	}
-
-	// Also load local .env (can override)
-	_ = godotenv.Load()
 }
 
 func main() {
@@ -116,13 +116,13 @@ func resolveServeConfig(userConfig string) ([]byte, string, error) {
 	searchPaths := []string{}
 	if homeDir != "" {
 		searchPaths = append(searchPaths,
-			filepath.Join(homeDir, ".config", "context-gateway", "configs", "default_config.yaml"),
+			filepath.Join(homeDir, ".config", "context-gateway", "configs", "fast_setup.yaml"),
 			filepath.Join(homeDir, ".config", "context-gateway", "configs", "preemptive_summarization.yaml"),
 			filepath.Join(homeDir, ".config", "context-gateway", "configs", "config.yaml"),
 		)
 	}
 	searchPaths = append(searchPaths,
-		"configs/default_config.yaml",
+		"configs/fast_setup.yaml",
 		"configs/preemptive_summarization.yaml",
 		"configs/config.yaml",
 	)
@@ -135,8 +135,8 @@ func resolveServeConfig(userConfig string) ([]byte, string, error) {
 	}
 
 	// Fall back to embedded config
-	if data, err := getEmbeddedConfig("default_config"); err == nil {
-		return data, "(embedded) default_config.yaml", nil
+	if data, err := getEmbeddedConfig("fast_setup"); err == nil {
+		return data, "(embedded) fast_setup.yaml", nil
 	}
 
 	return nil, "", fmt.Errorf("no config file found. Specify --config path")
@@ -190,6 +190,12 @@ func runGatewayServer(args []string) {
 
 	// Create gateway
 	gw := gateway.New(cfg)
+
+	// Display usage status bar (if API key is configured)
+	statusBar := displayGatewayStatus()
+	if statusBar != nil {
+		gw.SetStatusReporter(statusBar)
+	}
 
 	// Handle graceful shutdown
 	go func() {
@@ -263,6 +269,7 @@ func printHelp() {
 	fmt.Println("  -p, --port PORT      Gateway port (default: 18080)")
 	fmt.Println("  -d, --debug          Enable debug logging")
 	fmt.Println("  --proxy MODE         auto (default), start, skip")
+	fmt.Println("  --reset-api-key      Reset Compresr API key and re-run setup")
 	fmt.Println("  -l, --list           List available agents")
 	fmt.Println()
 	fmt.Println("Server Options:")
@@ -276,5 +283,35 @@ func printHelp() {
 	fmt.Println("  context-gateway claude_code -- -p \"fix the bug\"")
 	fmt.Println("                                     Pass -p flag through to Claude Code")
 	fmt.Println()
-	fmt.Println("Documentation: https://docs.compresr.ai/gateway")
+	fmt.Println("Claude Code Commands:")
+	fmt.Println("  /savings                           Show cost/time savings (in Claude Code)")
+	fmt.Println()
+	fmt.Printf("Documentation: %s\n", config.DefaultCompresrDocsURL)
+}
+
+// displayGatewayStatus shows the usage/balance status bar.
+// Uses COMPRESR_API_KEY to fetch status from the API.
+func displayGatewayStatus() *tui.StatusBar {
+	apiKey := os.Getenv("COMPRESR_API_KEY")
+	if apiKey == "" {
+		return nil
+	}
+
+	baseURL := os.Getenv("COMPRESR_BASE_URL")
+	if baseURL == "" {
+		baseURL = config.DefaultCompresrAPIBaseURL
+	}
+
+	client := compresr.NewClient(baseURL, apiKey)
+	statusBar := tui.NewStatusBar(client)
+	statusBar.EnableFooter(true)
+
+	if err := statusBar.Refresh(); err != nil {
+		// Silently skip on error
+		return statusBar
+	}
+
+	statusBar.RenderBox()
+	statusBar.StartAutoRefresh(tui.AutoRefreshInterval)
+	return statusBar
 }

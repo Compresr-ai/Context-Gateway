@@ -450,11 +450,11 @@ func TestHard_Compression_APIReturnsHTML(t *testing.T) {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:          true,
-				Strategy:         config.StrategyAPI,
+				Strategy:         config.StrategyCompresr,
 				FallbackStrategy: config.StrategyPassthrough,
 				MinBytes:         10,
 				MaxBytes:         1024 * 1024,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,
 				},
@@ -487,11 +487,11 @@ func TestHard_Compression_APITimeout(t *testing.T) {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:          true,
-				Strategy:         config.StrategyAPI,
+				Strategy:         config.StrategyCompresr,
 				FallbackStrategy: config.StrategyPassthrough,
 				MinBytes:         10,
 				MaxBytes:         1024 * 1024,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  100 * time.Millisecond,
 				},

@@ -27,9 +27,7 @@ type Summarizer struct {
 
 // NewSummarizer creates a new summarizer.
 func NewSummarizer(cfg SummarizerConfig) *Summarizer {
-	return &Summarizer{
-		config: cfg,
-	}
+	return &Summarizer{config: cfg}
 }
 
 // SetAuthToken stores an auth token captured from incoming requests.
@@ -119,13 +117,14 @@ type SummarizeOutput struct {
 	OutputTokens        int
 }
 
-// Summarize generates a summary using either LLM or Compresr API based on strategy.
+// Summarize generates a summary based on the configured strategy.
 func (s *Summarizer) Summarize(ctx context.Context, input SummarizeInput) (*SummarizeOutput, error) {
-	// Route to appropriate implementation based on strategy
-	if s.config.Strategy == "api" {
+	switch s.config.Strategy {
+	case StrategyCompresr:
 		return s.summarizeViaAPI(ctx, input)
+	default:
+		return s.summarizeViaLLM(ctx, input)
 	}
-	return s.summarizeViaLLM(ctx, input)
 }
 
 // summarizeViaLLM uses LLM provider for summarization (original behavior).
@@ -184,8 +183,8 @@ func (s *Summarizer) summarizeViaAPI(ctx context.Context, input SummarizeInput) 
 		return nil, fmt.Errorf("no messages to summarize")
 	}
 
-	if s.config.API == nil {
-		return nil, fmt.Errorf("API config is nil (required for strategy: api)")
+	if s.config.Compresr == nil {
+		return nil, fmt.Errorf("compresr config is nil (required for strategy: compresr)")
 	}
 
 	// Determine keep_recent count
@@ -216,12 +215,13 @@ func (s *Summarizer) summarizeViaAPI(ctx context.Context, input SummarizeInput) 
 		})
 	}
 
-	// Call Compresr API
-	client := compresr.NewClient(s.config.API.Endpoint, s.config.API.APIKey)
+	// Call Compresr API — use CompresrBaseURL (e.g., "https://api.compresr.ai"), NOT the endpoint path.
+	// The client appends "/api/compress/history/" internally.
+	client := compresr.NewClient(s.config.CompresrBaseURL, s.config.Compresr.APIKey, compresr.WithTimeout(s.config.Compresr.Timeout))
 	response, err := client.CompressHistory(compresr.CompressHistoryParams{
 		Messages:   historyMessages,
 		KeepRecent: keepRecent,
-		ModelName:  s.config.API.Model,
+		ModelName:  s.config.Compresr.Model,
 		Source:     "gateway",
 	})
 	if err != nil {

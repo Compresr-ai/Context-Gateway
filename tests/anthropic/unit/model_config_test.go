@@ -16,22 +16,22 @@ func TestModelConfigurations(t *testing.T) {
 		strategy string
 	}{
 		{
-			name:     "tool_output_cmprsr",
+			name:     "toc_espresso_v1",
 			config:   fixtures.CmprsrConfig(),
-			model:    "tool_output_cmprsr",
-			strategy: config.StrategyAPI,
+			model:    "toc_espresso_v1",
+			strategy: config.StrategyCompresr,
 		},
 		{
-			name:     "tool_output_openai",
+			name:     "toc_espresso_v1_alt",
 			config:   fixtures.OpenAIConfig(),
-			model:    "tool_output_openai",
-			strategy: config.StrategyAPI,
+			model:    "toc_espresso_v1",
+			strategy: config.StrategyCompresr,
 		},
 		{
-			name:     "tool_output_reranker",
+			name:     "toc_latte_v1",
 			config:   fixtures.RerankerConfig(),
-			model:    "tool_output_reranker",
-			strategy: config.StrategyAPI,
+			model:    "toc_latte_v1",
+			strategy: config.StrategyCompresr,
 		},
 	}
 
@@ -43,8 +43,8 @@ func TestModelConfigurations(t *testing.T) {
 			}
 
 			// Verify model
-			if tc.config.Pipes.ToolOutput.API.Model != tc.model {
-				t.Errorf("expected model %q, got %q", tc.model, tc.config.Pipes.ToolOutput.API.Model)
+			if tc.config.Pipes.ToolOutput.Compresr.Model != tc.model {
+				t.Errorf("expected model %q, got %q", tc.model, tc.config.Pipes.ToolOutput.Compresr.Model)
 			}
 
 			// Verify enabled
@@ -53,7 +53,7 @@ func TestModelConfigurations(t *testing.T) {
 			}
 
 			// Verify API endpoint is set
-			if tc.config.Pipes.ToolOutput.API.Endpoint == "" {
+			if tc.config.Pipes.ToolOutput.Compresr.Endpoint == "" {
 				t.Error("expected API endpoint to be set")
 			}
 		})
@@ -73,12 +73,12 @@ func TestPassthroughStrategyConfig(t *testing.T) {
 func TestOnlyTwoStrategiesExist(t *testing.T) {
 	// These are the only valid strategies after removing external strategies
 	validStrategies := map[string]bool{
-		config.StrategyAPI:         true,
+		config.StrategyCompresr:         true,
 		config.StrategyPassthrough: true,
 	}
 
-	if !validStrategies[config.StrategyAPI] {
-		t.Error("StrategyAPI should be valid")
+	if !validStrategies[config.StrategyCompresr] {
+		t.Error("StrategyCompresr should be valid")
 	}
 
 	if !validStrategies[config.StrategyPassthrough] {
@@ -86,8 +86,8 @@ func TestOnlyTwoStrategiesExist(t *testing.T) {
 	}
 
 	// Verify the constants have expected values
-	if config.StrategyAPI != "api" {
-		t.Errorf("expected StrategyAPI to be 'api', got %q", config.StrategyAPI)
+	if config.StrategyCompresr != "compresr" {
+		t.Errorf("expected StrategyCompresr to be 'compresr', got %q", config.StrategyCompresr)
 	}
 
 	if config.StrategyPassthrough != "passthrough" {
@@ -105,39 +105,39 @@ func TestQueryAgnosticConfiguration(t *testing.T) {
 		description   string
 	}{
 		{
-			name:          "cmprsr_is_query_agnostic",
+			name:          "espresso_is_query_agnostic",
 			config:        fixtures.CmprsrConfig(),
-			model:         "tool_output_cmprsr",
+			model:         "toc_espresso_v1",
 			queryAgnostic: true,
-			description:   "LLM-based compression doesn't need user query",
+			description:   "Lingua-based compression doesn't need user query",
 		},
 		{
-			name:          "openai_is_query_agnostic",
+			name:          "espresso_alt_is_query_agnostic",
 			config:        fixtures.OpenAIConfig(),
-			model:         "tool_output_openai",
+			model:         "toc_espresso_v1",
 			queryAgnostic: true,
-			description:   "LLM-based compression doesn't need user query",
+			description:   "Lingua-based compression doesn't need user query",
 		},
 		{
-			name:          "reranker_is_NOT_query_agnostic",
+			name:          "latte_is_NOT_query_agnostic",
 			config:        fixtures.RerankerConfig(),
-			model:         "tool_output_reranker",
+			model:         "toc_latte_v1",
 			queryAgnostic: false,
-			description:   "Reranker needs user query for relevance scoring",
+			description:   "GemFilter needs user query for relevance scoring",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Verify model
-			if tc.config.Pipes.ToolOutput.API.Model != tc.model {
-				t.Errorf("expected model %q, got %q", tc.model, tc.config.Pipes.ToolOutput.API.Model)
+			if tc.config.Pipes.ToolOutput.Compresr.Model != tc.model {
+				t.Errorf("expected model %q, got %q", tc.model, tc.config.Pipes.ToolOutput.Compresr.Model)
 			}
 
 			// Verify QueryAgnostic setting
-			if tc.config.Pipes.ToolOutput.API.QueryAgnostic != tc.queryAgnostic {
+			if tc.config.Pipes.ToolOutput.Compresr.QueryAgnostic != tc.queryAgnostic {
 				t.Errorf("expected QueryAgnostic=%v for %s (%s), got %v",
-					tc.queryAgnostic, tc.model, tc.description, tc.config.Pipes.ToolOutput.API.QueryAgnostic)
+					tc.queryAgnostic, tc.model, tc.description, tc.config.Pipes.ToolOutput.Compresr.QueryAgnostic)
 			}
 		})
 	}
@@ -146,14 +146,14 @@ func TestQueryAgnosticConfiguration(t *testing.T) {
 // TestQueryAgnosticWithCustomConfig verifies TestConfigWithModelAndQuery works correctly
 func TestQueryAgnosticWithCustomConfig(t *testing.T) {
 	// Test with query agnostic = true
-	cfgAgnostic := fixtures.TestConfigWithModelAndQuery(config.StrategyAPI, "test_model", 256, false, true)
-	if !cfgAgnostic.Pipes.ToolOutput.API.QueryAgnostic {
+	cfgAgnostic := fixtures.TestConfigWithModelAndQuery(config.StrategyCompresr, "test_model", 256, false, true)
+	if !cfgAgnostic.Pipes.ToolOutput.Compresr.QueryAgnostic {
 		t.Error("expected QueryAgnostic=true when explicitly set to true")
 	}
 
 	// Test with query agnostic = false
-	cfgNotAgnostic := fixtures.TestConfigWithModelAndQuery(config.StrategyAPI, "test_model", 256, false, false)
-	if cfgNotAgnostic.Pipes.ToolOutput.API.QueryAgnostic {
+	cfgNotAgnostic := fixtures.TestConfigWithModelAndQuery(config.StrategyCompresr, "test_model", 256, false, false)
+	if cfgNotAgnostic.Pipes.ToolOutput.Compresr.QueryAgnostic {
 		t.Error("expected QueryAgnostic=false when explicitly set to false")
 	}
 }

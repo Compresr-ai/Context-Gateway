@@ -114,7 +114,13 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleExpand retrieves raw data from shadow context.
+// Restricted to localhost to prevent external access to compressed context data.
 func (g *Gateway) handleExpand(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -125,7 +131,9 @@ func (g *Gateway) handleExpand(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ID) == 0 || len(req.ID) > 64 {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || len(req.ID) == 0 || len(req.ID) > 64 {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -134,6 +142,20 @@ func (g *Gateway) handleExpand(w http.ResponseWriter, r *http.Request) {
 	g.tracker.RecordExpand(&monitoring.ExpandEvent{
 		Timestamp: time.Now(), ShadowRefID: req.ID, Found: ok, Success: ok,
 	})
+	if g.expandLog != nil {
+		preview := data
+		if len(preview) > 100 {
+			preview = preview[:100]
+		}
+		g.expandLog.Record(monitoring.ExpandLogEntry{
+			Timestamp:      time.Now(),
+			RequestID:      g.getRequestID(r),
+			ShadowID:       req.ID,
+			Found:          ok,
+			ContentPreview: preview,
+			ContentLength:  len(data),
+		})
+	}
 
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -201,6 +223,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Build pipeline context (no universal parsing needed)
 	pipeCtx := NewPipelineContext(provider, adapter, body, r.URL.Path)
+	pipeCtx.RequestCtx = r.Context()
 	pipeCtx.CompressionThreshold = config.ParseCompressionThreshold(r.Header.Get(HeaderCompressionThreshold))
 
 	// Initialize tool session for hybrid tool discovery
@@ -222,9 +245,42 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		pipeCtx.CapturedBetaHeader = beta
 	}
 
-	// Extract model for preemptive summarization
+	// Extract model for preemptive summarization and cost-based compression decisions
 	model := adapter.ExtractModel(body)
 	pipeCtx.Model = model
+	pipeCtx.TargetModel = model // Also pass to pipe context for cost-based skip logic
+
+	// Check for /savings command - return instant synthetic response.
+	// Only triggers when the LAST user message is exactly "/savings" (the slash command).
+	// Security: this runs inside handleProxy which requires a valid LLM API request body.
+	// The report is scoped to the session via ComputeSessionID (hash of conversation),
+	// so an attacker would need the exact conversation history to retrieve session data.
+	if g.savings != nil {
+		lastUserMsg := adapter.ExtractUserQuery(body)
+		if monitoring.IsSavingsRequest(lastUserMsg) {
+			extra := g.buildUnifiedReportData()
+			// Scope report to current session using the same session ID logic as cost tracking
+			sessionID := preemptive.ComputeSessionID(body)
+			var report string
+			if sessionID != "" {
+				report = g.savings.FormatUnifiedReportForSession(sessionID, extra)
+			} else {
+				report = g.savings.FormatUnifiedReport(extra)
+			}
+			syntheticResp := monitoring.BuildSavingsResponse(report, model)
+			log.Info().
+				Str("request_id", requestID).
+				Int("response_size", len(syntheticResp)).
+				Msg("Returning /savings report (instant!)")
+
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Synthetic-Response", "true")
+			w.Header().Set("X-Savings-Report", "true")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(syntheticResp)
+			return
+		}
+	}
 
 	// Cost control: budget check (before forwarding)
 	if g.costTracker != nil {
@@ -239,6 +295,9 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Capture original body length before preemptive summarization may modify `body`
+	originalBodyLen := len(body)
 
 	// Process preemptive summarization (before compression pipeline)
 	// This may modify the body if compaction is requested and ready
@@ -307,7 +366,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 				provider:         adapter.Name(),
 				pipeType:         PipeType("precomputed"),
 				pipeStrategy:     "synthetic",
-				originalTokens:   len(body) / 4,
+				originalBodySize: len(body),
 				compressionUsed:  false,
 				statusCode:       http.StatusOK,
 				compressLatency:  0,
@@ -334,6 +393,18 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Capture pre-compaction body size BEFORE compression pipeline may further modify it.
+	// This is the original client request size (before summarization merge changed `body`).
+	// For non-compaction requests, preCompactionBodySize == len(body).
+	// For compaction requests, the original `body` was already overwritten by the merge above,
+	// but we captured originalBodyLen at entry. We use that instead.
+	preCompactionBodySize := len(body)
+	if isCompaction && len(body) != originalBodyLen {
+		// body was overwritten by compaction merge — use the original request body size
+		preCompactionBodySize = originalBodyLen
+	}
+
 	// Store preemptive headers in context for response
 	pipeCtx.PreemptiveHeaders = preemptiveHeaders
 	pipeCtx.IsCompaction = isCompaction
@@ -345,9 +416,6 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if g.toolSessions != nil && pipeCtx.ToolSessionID != "" && len(pipeCtx.DeferredTools) > 0 {
 		g.toolSessions.StoreDeferred(pipeCtx.ToolSessionID, pipeCtx.DeferredTools)
 	}
-
-	// Estimate tokens from body size (~4 chars per token)
-	originalTokens := len(body) / 4
 
 	// Inject expand_context tool if needed (now compatible with streaming!)
 	isStreaming := g.isStreamingRequest(body)
@@ -361,10 +429,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Route to streaming or non-streaming handler
 	if isStreaming {
 		g.handleStreamingWithExpand(w, r, forwardBody, pipeCtx, requestID, startTime, adapter,
-			pipeType, pipeStrategy, originalTokens, compressionUsed, compressLatency, body, expandEnabled)
+			pipeType, pipeStrategy, preCompactionBodySize, compressionUsed, compressLatency, body, expandEnabled)
 	} else {
 		g.handleNonStreaming(w, r, forwardBody, pipeCtx, requestID, startTime, adapter,
-			pipeType, pipeStrategy, originalTokens, compressionUsed, compressLatency, body, expandEnabled)
+			pipeType, pipeStrategy, preCompactionBodySize, compressionUsed, compressLatency, body, expandEnabled)
 	}
 }
 
@@ -372,7 +440,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 // Phantom tools (expand_context, gateway_search_tools) are handled internally.
 func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, forwardBody []byte,
 	pipeCtx *PipelineContext, requestID string, startTime time.Time, adapter adapters.Adapter,
-	pipeType PipeType, pipeStrategy string, originalTokens int, compressionUsed bool,
+	pipeType PipeType, pipeStrategy string, originalBodySize int, compressionUsed bool,
 	compressLatency time.Duration, originalBody []byte, expandEnabled bool) {
 
 	providerName := adapter.Name()
@@ -428,7 +496,11 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 		}
 
 		if expandEnabled {
-			handlers = append(handlers, NewExpandContextHandler(g.store))
+			ecHandler := NewExpandContextHandler(g.store)
+			if g.expandLog != nil {
+				ecHandler.WithExpandLog(g.expandLog, requestID, pipeCtx.CostSessionID)
+			}
+			handlers = append(handlers, ecHandler)
 		}
 
 		if len(handlers) > 0 {
@@ -457,7 +529,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	}
 
 	if err != nil || result == nil || result.Response == nil {
-		g.logToolDiscoveryAPIFallbacks(requestID, searchHandler)
+		g.logToolDiscoveryAPIFallbacks(requestID, searchHandler, pipeCtx.ToolDiscoveryModel)
 		var forwardLatency time.Duration
 		if result != nil {
 			forwardLatency = result.ForwardLatency
@@ -465,7 +537,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 		g.recordRequestTelemetry(telemetryParams{
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
 			clientIP: r.RemoteAddr, requestBodySize: len(originalBody), responseBodySize: 0,
-			provider: providerName, pipeType: pipeType, pipeStrategy: pipeStrategy, originalTokens: originalTokens,
+			provider: providerName, pipeType: pipeType, pipeStrategy: pipeStrategy, originalBodySize: originalBodySize,
 			compressionUsed: compressionUsed, statusCode: 502, errorMsg: "phantom loop failed",
 			compressLatency: compressLatency, forwardLatency: forwardLatency, pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody,
@@ -477,7 +549,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	}
 
 	responseBody := result.ResponseBody
-	g.logToolDiscoveryAPIFallbacks(requestID, searchHandler)
+	g.logToolDiscoveryAPIFallbacks(requestID, searchHandler, pipeCtx.ToolDiscoveryModel)
 
 	// Update pipeCtx with loop usage for logging
 	pipeCtx.ExpandLoopCount = result.LoopCount
@@ -494,7 +566,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	g.recordRequestTelemetry(telemetryParams{
 		requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
 		clientIP: r.RemoteAddr, requestBodySize: len(originalBody), responseBodySize: len(responseBody),
-		provider: providerName, pipeType: pipeType, pipeStrategy: pipeStrategy, originalTokens: originalTokens,
+		provider: providerName, pipeType: pipeType, pipeStrategy: pipeStrategy, originalBodySize: originalBodySize,
 		compressionUsed: compressionUsed, statusCode: result.Response.StatusCode,
 		compressLatency: compressLatency, forwardLatency: result.ForwardLatency,
 		expandLoops: result.LoopCount, pipeCtx: pipeCtx,
@@ -520,7 +592,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	_, _ = w.Write(responseBody)
 }
 
-func (g *Gateway) logToolDiscoveryAPIFallbacks(requestID string, searchHandler *SearchToolHandler) {
+func (g *Gateway) logToolDiscoveryAPIFallbacks(requestID string, searchHandler *SearchToolHandler, toolDiscoveryModel string) {
 	if searchHandler == nil || !g.tracker.ToolDiscoveryLogEnabled() {
 		return
 	}
@@ -532,7 +604,7 @@ func (g *Gateway) logToolDiscoveryAPIFallbacks(requestID string, searchHandler *
 			status = status + "_" + evt.Reason
 		}
 
-		g.tracker.LogToolDiscoveryComparison(monitoring.CompressionComparison{
+		comparison := monitoring.CompressionComparison{
 			RequestID:         requestID,
 			PipeType:          string(PipeToolDiscovery),
 			ToolName:          searchHandler.Name(),
@@ -542,7 +614,14 @@ func (g *Gateway) logToolDiscoveryAPIFallbacks(requestID string, searchHandler *
 			OriginalContent:   evt.Query,
 			CompressedContent: truncateLogValue(evt.Detail, 500),
 			Status:            status,
-		})
+			Model:             toolDiscoveryModel,
+		}
+		g.tracker.LogToolDiscoveryComparison(comparison)
+
+		// Record to savings tracker (API fallback = tools still filtered)
+		if g.savings != nil {
+			g.savings.RecordToolDiscovery(comparison)
+		}
 	}
 }
 
@@ -563,7 +642,7 @@ func truncateLogValue(value string, maxLen int) string {
 // keeping history clean and maximizing KV-cache prefix hits.
 func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Request, forwardBody []byte,
 	pipeCtx *PipelineContext, requestID string, startTime time.Time, adapter adapters.Adapter,
-	pipeType PipeType, pipeStrategy string, originalTokens int, compressionUsed bool,
+	pipeType PipeType, pipeStrategy string, originalBodySize int, compressionUsed bool,
 	compressLatency time.Duration, originalBody []byte, expandEnabled bool) {
 
 	provider := adapter.Name()
@@ -578,14 +657,15 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		g.recordRequestTelemetry(telemetryParams{
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
 			clientIP: r.RemoteAddr, requestBodySize: len(originalBody), responseBodySize: 0,
-			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalTokens: originalTokens,
+			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalBodySize: originalBodySize,
 			compressionUsed: compressionUsed, statusCode: 502, errorMsg: err.Error(),
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
 			requestHeaders: r.Header, responseHeaders: nil, upstreamURL: "", fallbackReason: "",
 		})
-		g.writeError(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
+		log.Error().Err(err).Str("request_id", requestID).Msg("upstream streaming request failed")
+		g.writeError(w, "upstream request failed", http.StatusBadGateway)
 		return
 	}
 
@@ -603,7 +683,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		g.recordRequestTelemetry(telemetryParams{
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
 			clientIP: r.RemoteAddr, requestBodySize: len(originalBody), responseBodySize: 0,
-			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalTokens: originalTokens,
+			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalBodySize: originalBodySize,
 			compressionUsed: compressionUsed, statusCode: resp.StatusCode,
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &sseUsage,
@@ -621,11 +701,17 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 	usageParser := newSSEUsageParser()
 	var bufferedChunks [][]byte
 
-	// Read and buffer the entire stream
+	// Read and buffer the entire stream (bounded to prevent OOM)
 	buf := make([]byte, DefaultBufferSize)
+	totalBuffered := 0
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			totalBuffered += n
+			if totalBuffered > MaxStreamBufferSize {
+				log.Warn().Int("bytes", totalBuffered).Msg("stream buffer exceeded max size, stopping buffer")
+				break
+			}
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 			bufferedChunks = append(bufferedChunks, chunk)
@@ -689,7 +775,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
 			clientIP: r.RemoteAddr, requestBodySize: len(originalBody), responseBodySize: 0,
 			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming_expanded",
-			originalTokens: originalTokens, compressionUsed: compressionUsed, statusCode: retryResp.StatusCode,
+			originalBodySize: originalBodySize, compressionUsed: compressionUsed, statusCode: retryResp.StatusCode,
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &bufferedUsage,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
@@ -707,7 +793,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		g.recordRequestTelemetry(telemetryParams{
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
 			clientIP: r.RemoteAddr, requestBodySize: len(originalBody), responseBodySize: 0,
-			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalTokens: originalTokens,
+			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalBodySize: originalBodySize,
 			compressionUsed: compressionUsed, statusCode: resp.StatusCode,
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
 			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &bufferedUsage,
@@ -1201,7 +1287,7 @@ type telemetryParams struct {
 	provider            string
 	pipeType            PipeType
 	pipeStrategy        string
-	originalTokens      int
+	originalBodySize    int // Pre-compaction request body size (captures summarization savings)
 	compressionUsed     bool
 	statusCode          int
 	errorMsg            string
@@ -1229,7 +1315,11 @@ type telemetryParams struct {
 
 // recordRequestTelemetry records a complete request event.
 func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
-	m := g.calculateMetrics(params.pipeCtx, params.originalTokens)
+	originalBodySize := params.originalBodySize
+	if originalBodySize == 0 {
+		originalBodySize = len(params.requestBody)
+	}
+	m := g.calculateMetrics(originalBodySize, len(params.forwardBody))
 
 	// Extract model and usage from request/response using adapter
 	var model string
@@ -1247,38 +1337,40 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 
 	// Build the RequestEvent with base fields
 	event := &monitoring.RequestEvent{
-		RequestID:            params.requestID,
-		Timestamp:            params.startTime,
-		Method:               params.method,
-		Path:                 params.path,
-		ClientIP:             params.clientIP,
-		Provider:             params.provider,
-		Model:                model,
-		RequestBodySize:      params.requestBodySize,
-		ResponseBodySize:     params.responseBodySize,
-		StatusCode:           params.statusCode,
-		PipeType:             monitoring.PipeType(params.pipeType),
-		PipeStrategy:         params.pipeStrategy,
-		OriginalTokens:       m.originalTokens,
-		CompressedTokens:     m.compressedTokens,
-		TokensSaved:          m.tokensSaved,
-		CompressionRatio:     m.compressionRatio,
-		CompressionUsed:      params.compressionUsed,
-		ShadowRefsCreated:    len(params.pipeCtx.ShadowRefs),
-		ExpandLoops:          params.expandLoops,
-		ExpandCallsFound:     params.expandCallsFound,
-		ExpandCallsNotFound:  params.expandCallsNotFound,
-		Success:              params.statusCode < 400,
-		Error:                params.errorMsg,
-		CompressionLatencyMs: params.compressLatency.Milliseconds(),
-		ForwardLatencyMs:     params.forwardLatency.Milliseconds(),
-		TotalLatencyMs:       time.Since(params.startTime).Milliseconds(),
-		AuthModeInitial:      params.authModeInitial,
-		AuthModeEffective:    params.authModeEffective,
-		AuthFallbackUsed:     params.authFallbackUsed,
-		InputTokens:          usage.InputTokens,
-		OutputTokens:         usage.OutputTokens,
-		TotalTokens:          usage.TotalTokens,
+		RequestID:                params.requestID,
+		Timestamp:                params.startTime,
+		Method:                   params.method,
+		Path:                     params.path,
+		ClientIP:                 params.clientIP,
+		Provider:                 params.provider,
+		Model:                    model,
+		RequestBodySize:          params.requestBodySize,
+		ResponseBodySize:         params.responseBodySize,
+		StatusCode:               params.statusCode,
+		PipeType:                 monitoring.PipeType(params.pipeType),
+		PipeStrategy:             params.pipeStrategy,
+		OriginalTokens:           m.originalTokens,
+		CompressedTokens:         m.compressedTokens,
+		TokensSaved:              m.tokensSaved,
+		CompressionRatio:         m.compressionRatio,
+		CompressionUsed:          params.compressionUsed,
+		ShadowRefsCreated:        len(params.pipeCtx.ShadowRefs),
+		ExpandLoops:              params.expandLoops,
+		ExpandCallsFound:         params.expandCallsFound,
+		ExpandCallsNotFound:      params.expandCallsNotFound,
+		Success:                  params.statusCode < 400,
+		Error:                    params.errorMsg,
+		CompressionLatencyMs:     params.compressLatency.Milliseconds(),
+		ForwardLatencyMs:         params.forwardLatency.Milliseconds(),
+		TotalLatencyMs:           time.Since(params.startTime).Milliseconds(),
+		AuthModeInitial:          params.authModeInitial,
+		AuthModeEffective:        params.authModeEffective,
+		AuthFallbackUsed:         params.authFallbackUsed,
+		InputTokens:              usage.InputTokens,
+		OutputTokens:             usage.OutputTokens,
+		CacheCreationInputTokens: usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens,
+		TotalTokens:              usage.TotalTokens,
 	}
 
 	// Add verbose payloads if enabled
@@ -1330,6 +1422,15 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 	}
 
 	g.tracker.RecordRequest(event)
+
+	// Record to savings tracker for /savings command
+	if g.savings != nil {
+		sessionID := ""
+		if params.pipeCtx != nil {
+			sessionID = params.pipeCtx.CostSessionID
+		}
+		g.savings.RecordRequestWithSession(event, sessionID)
+	}
 
 	// Record cost tracking (only when we have actual token counts from the API response).
 	// Streaming responses have empty bodies so ExtractUsage returns zeros — skip rather
@@ -1487,8 +1588,8 @@ func (g *Gateway) recordProxyInteraction(params telemetryParams, sessionID strin
 	// Estimate token counts (rough estimate: 4 chars per token)
 	clientTokens := len(params.requestBody) / 4
 	compressedTokens := len(params.forwardBody) / 4
-	if params.originalTokens > 0 {
-		clientTokens = params.originalTokens
+	if params.originalBodySize > 0 {
+		clientTokens = params.originalBodySize / 4
 	}
 
 	g.trajectory.RecordProxyInteraction(sessionID, monitoring.ProxyInteractionData{
@@ -1607,44 +1708,35 @@ type requestMetrics struct {
 	compressionRatio                              float64
 }
 
-// calculateMetrics computes compression metrics from pipeline context.
-func (g *Gateway) calculateMetrics(pipeCtx *PipelineContext, originalTokens int) requestMetrics {
-	m := requestMetrics{originalTokens: originalTokens, compressedTokens: originalTokens, compressionRatio: 1.0}
-
-	var totalOriginal, totalCompressed int
-	for _, tc := range pipeCtx.ToolOutputCompressions {
-		totalOriginal += tc.OriginalBytes
-		totalCompressed += tc.CompressedBytes
+// calculateMetrics computes compression metrics by comparing original vs forwarded body sizes.
+// This naturally captures all savings sources: tool output compression, preemptive summarization,
+// and tool discovery filtering — since all three reduce the forwarded body size.
+func (g *Gateway) calculateMetrics(originalBodySize, forwardBodySize int) requestMetrics {
+	m := requestMetrics{
+		originalTokens:   originalBodySize / 4,
+		compressedTokens: originalBodySize / 4,
+		compressionRatio: 1.0,
 	}
 
-	if saved := totalOriginal - totalCompressed; saved > 0 {
-		// Estimate tokens saved: ~4 chars per token
-		m.tokensSaved = saved / 4
-		// Ensure compressedTokens doesn't go negative
-		if m.tokensSaved > originalTokens {
-			m.tokensSaved = originalTokens
-		}
-		m.compressedTokens = originalTokens - m.tokensSaved
+	if forwardBodySize > 0 && forwardBodySize < originalBodySize {
+		m.compressedTokens = forwardBodySize / 4
+		m.tokensSaved = m.originalTokens - m.compressedTokens
+		m.compressionRatio = float64(forwardBodySize) / float64(originalBodySize)
 	}
-	if totalOriginal > 0 {
-		m.compressionRatio = float64(totalCompressed) / float64(totalOriginal)
-	}
+
 	return m
 }
 
 // logCompressionDetails logs compression comparisons if enabled.
 func (g *Gateway) logCompressionDetails(pipeCtx *PipelineContext, requestID, pipeType string, originalBody, compressedBody []byte) {
 	if pipeType == string(PipeToolDiscovery) {
-		if !g.tracker.ToolDiscoveryLogEnabled() {
-			return
-		}
 		status := "passthrough"
 		if !bytes.Equal(originalBody, compressedBody) {
 			status = "filtered"
 		}
 		allTools := extractToolNamesFromRequest(originalBody)
 		selectedTools := extractToolNamesFromRequest(compressedBody)
-		g.tracker.LogToolDiscoveryComparison(monitoring.CompressionComparison{
+		comparison := monitoring.CompressionComparison{
 			RequestID:       requestID,
 			PipeType:        pipeType,
 			OriginalBytes:   len(originalBody),
@@ -1654,7 +1746,18 @@ func (g *Gateway) logCompressionDetails(pipeCtx *PipelineContext, requestID, pip
 			AllTools:      allTools,
 			SelectedTools: selectedTools,
 			Status:        status,
-		})
+			Model:         pipeCtx.ToolDiscoveryModel,
+		}
+
+		// Log to file if enabled
+		if g.tracker.ToolDiscoveryLogEnabled() {
+			g.tracker.LogToolDiscoveryComparison(comparison)
+		}
+
+		// Always record to savings tracker
+		if g.savings != nil {
+			g.savings.RecordToolDiscovery(comparison)
+		}
 		return
 	}
 
@@ -1689,6 +1792,7 @@ func (g *Gateway) logCompressionDetails(pipeCtx *PipelineContext, requestID, pip
 			Status:            status,
 			MinThreshold:      tc.MinThreshold,
 			MaxThreshold:      tc.MaxThreshold,
+			Model:             tc.Model,
 		})
 	}
 
@@ -1775,17 +1879,268 @@ func addPreemptiveHeaders(w http.ResponseWriter, headers map[string]string) {
 }
 
 // =============================================================================
-// COST CONTROL
-// =============================================================================
+// buildUnifiedReportData gathers data from cost tracker and expand log for the /savings report.
+func (g *Gateway) buildUnifiedReportData() monitoring.UnifiedReportData {
+	var data monitoring.UnifiedReportData
 
-// handleCostDashboard serves the cost dashboard.
-func (g *Gateway) handleCostDashboard(w http.ResponseWriter, r *http.Request) {
 	if g.costTracker != nil {
-		g.costTracker.HandleDashboard(w, r)
-	} else {
-		http.Error(w, "cost tracking not initialized", http.StatusInternalServerError)
+		sessions := g.costTracker.AllSessions()
+		data.SessionCount = len(sessions)
+		for _, s := range sessions {
+			data.TotalSessionCost += s.Cost
+		}
+	}
+
+	if g.expandLog != nil {
+		summary := g.expandLog.Summary()
+		data.ExpandTotal = summary.Total
+		data.ExpandFound = summary.Found
+		data.ExpandNotFound = summary.NotFound
+	}
+
+	// Fetch account balance from Compresr API
+	if g.compresrClient != nil && g.compresrClient.HasAPIKey() {
+		if status, err := g.compresrClient.GetGatewayStatus(); err == nil {
+			data.BalanceAvailable = true
+			data.Tier = status.Tier
+			data.CreditsRemainingUSD = status.CreditsRemainingUSD
+			data.CreditsUsedThisMonth = status.CreditsUsedThisMonth
+			data.MonthlyBudgetUSD = status.MonthlyBudgetUSD
+			data.IsAdmin = status.IsAdmin
+		}
+	}
+
+	data.DashboardURL = fmt.Sprintf("http://localhost:%d/costs", g.config.Server.Port)
+	return data
+}
+
+// handleDashboardAPI returns JSON data for the React cost dashboard.
+// Restricted to localhost to prevent external access to cost/usage data.
+func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	type sessionJSON struct {
+		ID           string  `json:"id"`
+		Cost         float64 `json:"cost"`
+		Cap          float64 `json:"cap"`
+		RequestCount int     `json:"request_count"`
+		Model        string  `json:"model"`
+		CreatedAt    string  `json:"created_at"`
+		LastUpdated  string  `json:"last_updated"`
+	}
+
+	type savingsJSON struct {
+		TotalRequests      int     `json:"total_requests"`
+		CompressedRequests int     `json:"compressed_requests"`
+		TokensSaved        int     `json:"tokens_saved"`
+		TokenSavedPct      float64 `json:"token_saved_pct"`
+		CostSavedUSD       float64 `json:"cost_saved_usd"`
+		OriginalCostUSD    float64 `json:"original_cost_usd"`
+		CompressedCostUSD  float64 `json:"compressed_cost_usd"`
+		CompressionRatio   float64 `json:"compression_ratio"`
+		// Tool discovery stats
+		ToolDiscoveryRequests int     `json:"tool_discovery_requests,omitempty"`
+		OriginalToolCount     int     `json:"original_tool_count,omitempty"`
+		FilteredToolCount     int     `json:"filtered_tool_count,omitempty"`
+		ToolDiscoveryTokens   int     `json:"tool_discovery_tokens,omitempty"`
+		ToolDiscoveryPct      float64 `json:"tool_discovery_pct,omitempty"`
+	}
+
+	type expandEntryJSON struct {
+		Timestamp      string `json:"timestamp"`
+		RequestID      string `json:"request_id"`
+		ShadowID       string `json:"shadow_id"`
+		Found          bool   `json:"found"`
+		ContentPreview string `json:"content_preview,omitempty"`
+		ContentLength  int    `json:"content_length"`
+	}
+
+	type expandJSON struct {
+		Total    int               `json:"total"`
+		Found    int               `json:"found"`
+		NotFound int               `json:"not_found"`
+		Recent   []expandEntryJSON `json:"recent,omitempty"`
+	}
+
+	type gatewayStatsJSON struct {
+		Uptime             string `json:"uptime"`
+		TotalRequests      int64  `json:"total_requests"`
+		SuccessfulRequests int64  `json:"successful_requests"`
+		Compressions       int64  `json:"compressions"`
+		CacheHits          int64  `json:"cache_hits"`
+		CacheMisses        int64  `json:"cache_misses"`
+	}
+
+	type dashboardResponse struct {
+		Sessions      []sessionJSON     `json:"sessions"`
+		TotalCost     float64           `json:"total_cost"`
+		TotalRequests int               `json:"total_requests"`
+		SessionCap    float64           `json:"session_cap"`
+		GlobalCap     float64           `json:"global_cap"`
+		Enabled       bool              `json:"enabled"`
+		Savings       *savingsJSON      `json:"savings,omitempty"`
+		Expand        *expandJSON       `json:"expand,omitempty"`
+		Gateway       *gatewayStatsJSON `json:"gateway,omitempty"`
+	}
+
+	resp := dashboardResponse{}
+
+	if g.costTracker != nil {
+		sessions := g.costTracker.AllSessions()
+		cfg := g.costTracker.Config()
+		resp.Enabled = cfg.Enabled
+		resp.SessionCap = cfg.SessionCap
+		resp.GlobalCap = cfg.GlobalCap
+
+		for _, s := range sessions {
+			resp.TotalCost += s.Cost
+			resp.TotalRequests += s.RequestCount
+			resp.Sessions = append(resp.Sessions, sessionJSON{
+				ID:           s.ID,
+				Cost:         s.Cost,
+				Cap:          s.Cap,
+				RequestCount: s.RequestCount,
+				Model:        s.Model,
+				CreatedAt:    s.CreatedAt.Format(time.RFC3339),
+				LastUpdated:  s.LastUpdated.Format(time.RFC3339),
+			})
+		}
+	}
+
+	if g.savings != nil {
+		// Support session-scoped reports via ?session= query param
+		var sr monitoring.SavingsReport
+		if sessionParam := r.URL.Query().Get("session"); sessionParam != "" {
+			sr = g.savings.GetReportForSession(sessionParam)
+		} else {
+			sr = g.savings.GetReport()
+		}
+		if sr.TotalRequests > 0 {
+			resp.Savings = &savingsJSON{
+				TotalRequests:         sr.TotalRequests,
+				CompressedRequests:    sr.CompressedRequests,
+				TokensSaved:           sr.TotalTokensSaved,
+				TokenSavedPct:         sr.TotalSavedPct,
+				CostSavedUSD:          sr.CostSavedUSD,
+				OriginalCostUSD:       sr.OriginalCostUSD,
+				CompressedCostUSD:     sr.CompressedCostUSD,
+				CompressionRatio:      sr.AvgCompressionRatio,
+				ToolDiscoveryRequests: sr.ToolDiscoveryRequests,
+				OriginalToolCount:     sr.OriginalToolCount,
+				FilteredToolCount:     sr.FilteredToolCount,
+				ToolDiscoveryTokens:   sr.ToolDiscoveryTokens,
+				ToolDiscoveryPct:      sr.ToolDiscoveryPct,
+			}
+		}
+	}
+
+	// Expand context log
+	if g.expandLog != nil {
+		summary := g.expandLog.Summary()
+		resp.Expand = &expandJSON{
+			Total:    summary.Total,
+			Found:    summary.Found,
+			NotFound: summary.NotFound,
+		}
+		// Include recent entries
+		recent := g.expandLog.Recent(20)
+		for _, e := range recent {
+			resp.Expand.Recent = append(resp.Expand.Recent, expandEntryJSON{
+				Timestamp:      e.Timestamp.Format(time.RFC3339),
+				RequestID:      e.RequestID,
+				ShadowID:       e.ShadowID,
+				Found:          e.Found,
+				ContentPreview: e.ContentPreview,
+				ContentLength:  e.ContentLength,
+			})
+		}
+	}
+
+	// Gateway operational stats
+	if g.metrics != nil {
+		stats := g.metrics.Stats()
+		resp.Gateway = &gatewayStatsJSON{
+			Uptime:             time.Since(gatewayStartTime).Truncate(time.Second).String(),
+			TotalRequests:      stats["requests"],
+			SuccessfulRequests: stats["successes"],
+			Compressions:       stats["compressions"],
+			CacheHits:          stats["cache_hits"],
+			CacheMisses:        stats["cache_misses"],
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Error().Err(err).Msg("Failed to encode cost stats response")
 	}
 }
+
+// handleAccountAPI returns the user's Compresr account status (tier, balance, usage).
+// Restricted to localhost to prevent external access to account data.
+func (g *Gateway) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	type accountResponse struct {
+		Available            bool    `json:"available"`               // Whether account data is available
+		Tier                 string  `json:"tier,omitempty"`          // "free", "pro", "business", "enterprise"
+		CreditsRemainingUSD  float64 `json:"credits_remaining_usd"`   // Remaining credits
+		CreditsUsedThisMonth float64 `json:"credits_used_this_month"` // Credits used this billing period
+		MonthlyBudgetUSD     float64 `json:"monthly_budget_usd"`      // Monthly budget (0 = unlimited)
+		UsagePercent         float64 `json:"usage_percent"`           // Percentage of budget used (0-100)
+		RequestsToday        int     `json:"requests_today"`          // Compression requests today
+		RequestsThisMonth    int     `json:"requests_this_month"`     // Compression requests this month
+		IsAdmin              bool    `json:"is_admin"`                // Admin/unlimited access
+		Error                string  `json:"error,omitempty"`         // Error message if unavailable
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Check if we have a Compresr client with an API key
+	if g.compresrClient == nil || !g.compresrClient.HasAPIKey() {
+		if err := json.NewEncoder(w).Encode(accountResponse{
+			Available: false,
+			Error:     "No COMPRESR_API_KEY configured",
+		}); err != nil {
+			log.Error().Err(err).Msg("Failed to encode account response")
+		}
+		return
+	}
+
+	// Fetch account status from Compresr API
+	status, err := g.compresrClient.GetGatewayStatus()
+	if err != nil {
+		if encErr := json.NewEncoder(w).Encode(accountResponse{
+			Available: false,
+			Error:     err.Error(),
+		}); encErr != nil {
+			log.Error().Err(encErr).Msg("Failed to encode account response")
+		}
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(accountResponse{
+		Available:            true,
+		Tier:                 status.Tier,
+		CreditsRemainingUSD:  status.CreditsRemainingUSD,
+		CreditsUsedThisMonth: status.CreditsUsedThisMonth,
+		MonthlyBudgetUSD:     status.MonthlyBudgetUSD,
+		UsagePercent:         status.UsagePercent,
+		RequestsToday:        status.RequestsToday,
+		RequestsThisMonth:    status.RequestsThisMonth,
+		IsAdmin:              status.IsAdmin,
+	}); err != nil {
+		log.Error().Err(err).Msg("Failed to encode account response")
+	}
+}
+
+// COST CONTROL
+// =============================================================================
 
 // returnBudgetExceededResponse writes a synthetic response when budget is exceeded.
 // Returns HTTP 200 so agent clients display the message rather than retry.

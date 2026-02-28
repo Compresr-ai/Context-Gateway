@@ -14,12 +14,14 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/compresr/context-gateway/internal/config"
 )
 
-const (
-	// Version is set at build time via ldflags
-	Version = "v0.1.0"
+// Version is set at build time via -ldflags "-X main.Version=..."
+var Version = "v0.1.0"
 
+const (
 	// GitHub repo for updates
 	DefaultRepo = "Compresr-ai/Context-Gateway"
 
@@ -306,7 +308,7 @@ func DoUninstall() error {
 	fmt.Printf("    %srm -rf %s%s\n", colorCyan, configDir, colorReset)
 	fmt.Printf("\n")
 	fmt.Printf("  To reinstall:\n")
-	fmt.Printf("    %scurl -fsSL https://compresr.ai/install_gateway.sh | sh%s\n", colorCyan, colorReset)
+	fmt.Printf("    %scurl -fsSL %s | sh%s\n", colorCyan, config.DefaultCompresrInstallURL, colorReset)
 	fmt.Printf("\n")
 
 	return nil

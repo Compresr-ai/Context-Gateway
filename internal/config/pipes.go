@@ -15,7 +15,7 @@ import "github.com/compresr/context-gateway/internal/pipes"
 // Strategy constants - re-exported from pipes package.
 const (
 	StrategyPassthrough      = pipes.StrategyPassthrough
-	StrategyAPI              = pipes.StrategyAPI
+	StrategyCompresr         = pipes.StrategyCompresr
 	StrategyExternalProvider = pipes.StrategyExternalProvider
 	StrategyRelevance        = pipes.StrategyRelevance
 	StrategyToolSearch       = pipes.StrategyToolSearch
@@ -60,5 +60,5 @@ type ToolOutputPipeConfig = pipes.ToolOutputConfig
 // ToolDiscoveryPipeConfig is an alias for pipes.ToolDiscoveryConfig.
 type ToolDiscoveryPipeConfig = pipes.ToolDiscoveryConfig
 
-// APIConfig is an alias for pipes.APIConfig.
-type APIConfig = pipes.APIConfig
+// CompresrConfig is an alias for pipes.CompresrConfig.
+type CompresrConfig = pipes.CompresrConfig

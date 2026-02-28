@@ -280,9 +280,17 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		job.LastIndex = result.LastSummarizedIndex
 		log.Info().Str("session_id", job.SessionID).Int("summary_tokens", result.SummaryTokens).Dur("duration", result.Duration).Msg("Summarization job completed")
 		_ = w.sessions.SetSummaryReady(job.SessionID, result.Summary, result.SummaryTokens, result.LastSummarizedIndex, job.MessageCount)
-		// Log preemptive complete
+		// Log preemptive complete with original and compressed content
 		if logger := GetCompactionLogger(); logger != nil {
-			logger.LogPreemptiveComplete(job.SessionID, job.Model, result.LastSummarizedIndex+1, result.SummaryTokens, result.Duration, w.summarizerCfg.Provider, w.summarizerCfg.Model)
+			summModel, summProvider := w.summarizerCfg.EffectiveModelAndProvider()
+			var originalContent string
+			for i, msg := range job.Messages {
+				if i > 0 {
+					originalContent += "\n"
+				}
+				originalContent += string(msg)
+			}
+			logger.LogPreemptiveComplete(job.SessionID, job.Model, result.LastSummarizedIndex+1, result.SummaryTokens, result.Duration, summProvider, summModel, originalContent, result.Summary)
 		}
 	}
 

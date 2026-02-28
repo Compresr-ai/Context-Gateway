@@ -11,9 +11,11 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/compresr/context-gateway/internal/monitoring"
 	"github.com/compresr/context-gateway/internal/store"
 )
 
@@ -23,6 +25,9 @@ const ExpandContextToolName = "expand_context"
 // ExpandContextHandler implements PhantomToolHandler for expand_context.
 type ExpandContextHandler struct {
 	store       store.Store
+	expandLog   *monitoring.ExpandLog
+	requestID   string
+	sessionID   string
 	expandedIDs map[string]bool // Track expanded IDs to prevent circular expansion
 }
 
@@ -32,6 +37,14 @@ func NewExpandContextHandler(st store.Store) *ExpandContextHandler {
 		store:       st,
 		expandedIDs: make(map[string]bool),
 	}
+}
+
+// WithExpandLog sets the expand log for recording expand_context calls.
+func (h *ExpandContextHandler) WithExpandLog(el *monitoring.ExpandLog, requestID, sessionID string) *ExpandContextHandler {
+	h.expandLog = el
+	h.requestID = requestID
+	h.sessionID = sessionID
+	return h
 }
 
 // ResetExpandedIDs resets the tracking of expanded IDs.
@@ -91,6 +104,7 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 					Str("shadow_id", shadowID).
 					Msg("expand_context: shadow ID not found")
 			}
+			h.recordExpandEntry(shadowID, found, content)
 
 			contentBlocks = append(contentBlocks, map[string]any{
 				"type":        "tool_result",
@@ -126,6 +140,7 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 					Str("shadow_id", shadowID).
 					Msg("expand_context: shadow ID not found")
 			}
+			h.recordExpandEntry(shadowID, found, content)
 
 			result.ToolResults = append(result.ToolResults, map[string]any{
 				"role":         "tool",
@@ -136,6 +151,26 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 	}
 
 	return result
+}
+
+// recordExpandEntry logs an expand_context call to the in-memory expand log.
+func (h *ExpandContextHandler) recordExpandEntry(shadowID string, found bool, content string) {
+	if h.expandLog == nil {
+		return
+	}
+	preview := content
+	if len(preview) > 100 {
+		preview = preview[:100]
+	}
+	h.expandLog.Record(monitoring.ExpandLogEntry{
+		Timestamp:      time.Now(),
+		SessionID:      h.sessionID,
+		RequestID:      h.requestID,
+		ShadowID:       shadowID,
+		Found:          found,
+		ContentPreview: preview,
+		ContentLength:  len(content),
+	})
 }
 
 // FilterFromResponse removes expand_context from the final response.

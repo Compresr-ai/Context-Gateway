@@ -69,6 +69,12 @@ func (t *Tracker) GetGlobalCost() float64 {
 	return float64(atomic.LoadInt64(&t.globalCostNano)) / 1e9
 }
 
+// GetGlobalCap returns the effective global budget cap in USD. Returns 0 if unlimited.
+func (t *Tracker) GetGlobalCap() float64 {
+	_, globalCap := t.effectiveCaps()
+	return globalCap
+}
+
 // RecordUsage records actual cost from token counts (non-streaming).
 // cacheCreationTokens and cacheReadTokens are optional (Anthropic-specific).
 func (t *Tracker) RecordUsage(sessionID, model string, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int) {

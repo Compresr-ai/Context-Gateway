@@ -41,7 +41,7 @@ go.work.sum
 logs/*.jsonl
 
 # Context-Gateway specific
-.claude/
+#.claude/
 logs/
 *.log
 *.pid
@@ -63,7 +63,7 @@ docs/
 .gocache/
 .gomodcache/
 
-# Node
-node_modules/
-.vite/
-dist/
+web/dashboard/node_modules/
+web/dashboard/dist/
+web/dashboard/.vite/
+

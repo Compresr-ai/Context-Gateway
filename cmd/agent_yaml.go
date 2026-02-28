@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/compresr/context-gateway/internal/config"
+	"github.com/compresr/context-gateway/internal/pipes"
+	"github.com/compresr/context-gateway/internal/preemptive"
 	"github.com/compresr/context-gateway/internal/tui"
 )
 
@@ -19,6 +22,8 @@ func saveConfig(state *ConfigState) string {
 		state.SlackEnabled,
 		state.TriggerThreshold,
 		state.CostCap,
+		state.CompactStrategy,
+		state.CompactCompresrModel,
 		state.ToolDiscoveryEnabled,
 		state.ToolDiscoveryStrategy,
 		state.ToolDiscoveryMinTools,
@@ -57,7 +62,7 @@ func saveConfig(state *ConfigState) string {
 
 	fmt.Printf("\n%s✓%s Config saved: %s\n", tui.ColorGreen, tui.ColorReset, configPath)
 	if state.CostCap > 0 {
-		fmt.Printf("  %sCost dashboard will be available at http://localhost:<port>/costs%s\n", tui.ColorCyan, tui.ColorReset)
+		fmt.Printf("  %sCost dashboard will be available at http://localhost:<port>/costs/%s\n", tui.ColorCyan, tui.ColorReset)
 	}
 	return state.Name
 }
@@ -68,6 +73,8 @@ func generateCustomConfigYAML(
 	enableSlack bool,
 	triggerThreshold float64,
 	costCap float64,
+	compactStrategy string,
+	compactCompresrModel string,
 	toolDiscoveryEnabled bool,
 	toolDiscoveryStrategy string,
 	toolDiscoveryMinTools int,
@@ -110,12 +117,12 @@ func generateCustomConfigYAML(
 	// Determine which provider to use for tool_output
 	// Only use specified toolOutputProvider if enabled and using external_provider strategy
 	effectiveToolOutputProvider := provider // Default to main provider
-	if toolOutputEnabled && toolOutputStrategy == "external_provider" && toolOutputProvider != "" {
+	if toolOutputEnabled && toolOutputStrategy == pipes.StrategyExternalProvider && toolOutputProvider != "" {
 		effectiveToolOutputProvider = toolOutputProvider
 	}
 
-	if toolOutputStrategy == "api" {
-		toolOutputEndpoint = "${COMPRESR_BASE_URL:-https://api.compresr.com}/v1/tool-output/compress"
+	if toolOutputStrategy == pipes.StrategyCompresr {
+		toolOutputEndpoint = fmt.Sprintf("${COMPRESR_BASE_URL:-%s}/v1/tool-output/compress", config.DefaultCompresrAPIBaseURL)
 		toolOutputAPIKey = "${COMPRESR_API_KEY:-}" // #nosec G101 -- env var reference, not a credential
 	} else {
 		switch effectiveToolOutputProvider {
@@ -134,21 +141,44 @@ func generateCustomConfigYAML(
     api_key: "%s"
     model: "%s"`, provider, apiKey, model)
 
-	if toolOutputEnabled && toolOutputStrategy == "external_provider" && effectiveToolOutputProvider != "" && effectiveToolOutputProvider != provider {
+	if toolOutputEnabled && toolOutputStrategy == pipes.StrategyExternalProvider && effectiveToolOutputProvider != "" && effectiveToolOutputProvider != provider {
 		providersSection += fmt.Sprintf(`
   %s:
     api_key: "%s"
     model: "%s"`, effectiveToolOutputProvider, toolOutputAPIKey, toolOutputModel)
 	}
 
+	// Build preemptive summarizer section based on compact strategy
+	var summarizerSection string
+	if compactStrategy == preemptive.StrategyCompresr {
+		summarizerSection = fmt.Sprintf(`  summarizer:
+    strategy: "%s"
+    max_tokens: 4096
+    timeout: 60s
+    token_estimate_ratio: 4
+    compresr:
+      endpoint: "/api/compress/history/"
+      api_key: "${COMPRESR_API_KEY:-}"
+      model: "%s"
+      timeout: 60s`, preemptive.StrategyCompresr, compactCompresrModel)
+	} else {
+		summarizerSection = fmt.Sprintf(`  summarizer:
+    strategy: "%s"
+    provider: "%s"
+    endpoint: "%s"
+    max_tokens: 4096
+    timeout: 60s
+    token_estimate_ratio: 4`, preemptive.StrategyExternalProvider, provider, endpoint)
+	}
+
 	// Build tool_output section based on strategy
 	var toolOutputSection string
-	if toolOutputStrategy == "api" {
-		// API strategy: use Compresr API endpoint, no provider field
+	if toolOutputStrategy == pipes.StrategyCompresr {
+		// Compresr strategy: use Compresr API endpoint, no provider field
 		toolOutputSection = fmt.Sprintf(`  tool_output:
     enabled: %t
     strategy: "%s"
-    api:
+    compresr:
       endpoint: "%s"
       api_key: "%s"
       model: "%s"
@@ -190,7 +220,7 @@ server:
 
 urls:
   gateway: "http://localhost:${GATEWAY_PORT:-18080}"
-  compresr: "${COMPRESR_BASE_URL:-https://api.compresr.com}"
+  compresr: "${COMPRESR_BASE_URL:-%s}"
 
 %s
 
@@ -200,14 +230,9 @@ preemptive:
   add_response_headers: true
   log_dir: "${SESSION_DIR:-logs}"
   compaction_log_path: "${SESSION_COMPACTION_LOG:-logs/history_compaction.jsonl}"
-  
-  summarizer:
-    provider: "%s"
-    endpoint: "%s"
-    max_tokens: 4096
-    timeout: 60s
-    token_estimate_ratio: 4
-  
+
+%s
+
   session:
     summary_ttl: 3h
     hash_message_count: 3
@@ -222,8 +247,8 @@ pipes:
   tool_discovery:
     enabled: %t
     strategy: "%s"
-    api:
-      endpoint: "${COMPRESR_BASE_URL:-https://api.compresr.com}/api/compress/tool-discovery/"
+    compresr:
+      endpoint: "${COMPRESR_BASE_URL:-%s}/api/compress/tool-discovery/"
       api_key: "${COMPRESR_API_KEY:-}"
       model: "%s"
       timeout: 10s
@@ -252,9 +277,9 @@ monitoring:
   telemetry_path: "${SESSION_TELEMETRY_LOG:-logs/telemetry.jsonl}"
   compression_log_path: "${SESSION_COMPRESSION_LOG:-logs/tool_output_compression.jsonl}"
   tool_discovery_log_path: "${SESSION_TOOL_DISCOVERY_LOG:-logs/tool_discovery.jsonl}"
-`, name, name, providersSection, triggerThreshold, provider, endpoint, costCapEnabled, costCap,
+`, name, name, config.DefaultCompresrAPIBaseURL, providersSection, triggerThreshold, summarizerSection, costCapEnabled, costCap,
 		toolOutputSection,
-		toolDiscoveryEnabled, toolDiscoveryStrategy, toolDiscoveryModel, toolDiscoveryMinTools, toolDiscoveryMaxTools,
+		toolDiscoveryEnabled, toolDiscoveryStrategy, config.DefaultCompresrAPIBaseURL, toolDiscoveryModel, toolDiscoveryMinTools, toolDiscoveryMaxTools,
 		toolDiscoveryTargetRatio, toolDiscoverySearchFallback, slackEnabled, telemetryEnabled)
 }
 

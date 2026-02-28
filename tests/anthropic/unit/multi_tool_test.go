@@ -35,12 +35,12 @@ func TestMultiTool_AllToolsCompressed(t *testing.T) {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            config.StrategyAPI,
+				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    config.StrategyPassthrough,
 				MinBytes:            50,
 				MaxBytes:            1024 * 1024,
 				EnableExpandContext: true,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,
 				},
@@ -86,12 +86,12 @@ func TestMultiTool_MixedSizes(t *testing.T) {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            config.StrategyAPI,
+				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    config.StrategyPassthrough,
 				MinBytes:            100,
 				MaxBytes:            1024 * 1024,
 				EnableExpandContext: true,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,
 				},

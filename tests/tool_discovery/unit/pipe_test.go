@@ -17,7 +17,7 @@ import (
 // =============================================================================
 
 func TestPipe_Name(t *testing.T) {
-	pipe := tooldiscovery.New(testConfig("relevance", 5, 25, 0.8, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, 25, 0.8, nil))
 	assert.Equal(t, "tool_discovery", pipe.Name())
 }
 
@@ -41,12 +41,12 @@ func TestPipe_Strategy(t *testing.T) {
 
 func TestPipe_Enabled(t *testing.T) {
 	t.Run("enabled", func(t *testing.T) {
-		pipe := tooldiscovery.New(testConfig("relevance", 5, 25, 0.8, nil))
+		pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, 25, 0.8, nil))
 		assert.True(t, pipe.Enabled())
 	})
 
 	t.Run("disabled", func(t *testing.T) {
-		cfg := testConfig("relevance", 5, 25, 0.8, nil)
+		cfg := testConfig(config.StrategyRelevance, 5, 25, 0.8, nil)
 		cfg.Pipes.ToolDiscovery.Enabled = false
 		pipe := tooldiscovery.New(cfg)
 		assert.False(t, pipe.Enabled())
@@ -58,7 +58,7 @@ func TestPipe_Enabled(t *testing.T) {
 // =============================================================================
 
 func TestPipe_Process_Disabled(t *testing.T) {
-	cfg := testConfig("relevance", 5, 25, 0.8, nil)
+	cfg := testConfig(config.StrategyRelevance, 5, 25, 0.8, nil)
 	cfg.Pipes.ToolDiscovery.Enabled = false
 	pipe := tooldiscovery.New(cfg)
 
@@ -73,7 +73,7 @@ func TestPipe_Process_Disabled(t *testing.T) {
 }
 
 func TestPipe_Process_Passthrough(t *testing.T) {
-	pipe := tooldiscovery.New(testConfig("passthrough", 5, 25, 0.8, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyPassthrough, 5, 25, 0.8, nil))
 
 	body := openAIRequestWithTools(10)
 	ctx := newOpenAIPipeContext(body)
@@ -91,7 +91,7 @@ func TestPipe_Process_Passthrough(t *testing.T) {
 
 func TestPipe_Process_BelowMinTools(t *testing.T) {
 	// MinTools=5, so 3 tools should not be filtered
-	pipe := tooldiscovery.New(testConfig("relevance", 5, 25, 0.8, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, 25, 0.8, nil))
 
 	body := openAIRequestWithTools(3)
 	ctx := newOpenAIPipeContext(body)
@@ -105,7 +105,7 @@ func TestPipe_Process_BelowMinTools(t *testing.T) {
 
 func TestPipe_Process_ExactlyMinTools(t *testing.T) {
 	// MinTools=5, so exactly 5 tools should not be filtered (<=)
-	pipe := tooldiscovery.New(testConfig("relevance", 5, 25, 0.8, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, 25, 0.8, nil))
 
 	body := openAIRequestWithTools(5)
 	ctx := newOpenAIPipeContext(body)
@@ -123,7 +123,7 @@ func TestPipe_Process_ExactlyMinTools(t *testing.T) {
 
 func TestPipe_Process_FiltersTools_OpenAI(t *testing.T) {
 	// MaxTools=3, MinTools=2, TargetRatio=0.5 → keep 50% of 10 = 5, capped at 3
-	pipe := tooldiscovery.New(testConfig("relevance", 2, 3, 0.5, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 3, 0.5, nil))
 
 	body := openAIRequestWithToolsAndQuery(10, "read the file contents")
 	ctx := newOpenAIPipeContext(body)
@@ -143,7 +143,7 @@ func TestPipe_Process_FiltersTools_OpenAI(t *testing.T) {
 
 func TestPipe_Process_FiltersTools_Anthropic(t *testing.T) {
 	// MaxTools=3, MinTools=2, TargetRatio=0.5
-	pipe := tooldiscovery.New(testConfig("relevance", 2, 3, 0.5, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 3, 0.5, nil))
 
 	body := anthropicRequestWithToolsAndQuery(10, "search for code patterns")
 	ctx := newAnthropicPipeContext(body)
@@ -162,7 +162,7 @@ func TestPipe_Process_FiltersTools_Anthropic(t *testing.T) {
 }
 
 func TestPipe_Process_Relevance_DoesNotInjectSearchTool(t *testing.T) {
-	cfg := testConfig("relevance", 1, 2, 0.3, nil)
+	cfg := testConfig(config.StrategyRelevance, 1, 2, 0.3, nil)
 	cfg.Pipes.ToolDiscovery.EnableSearchFallback = true // Should be ignored for relevance
 	pipe := tooldiscovery.New(cfg)
 
@@ -183,7 +183,7 @@ func TestPipe_Process_Relevance_DoesNotInjectSearchTool(t *testing.T) {
 func TestPipe_Process_API_ReplacesWithSearchToolOnly(t *testing.T) {
 	// API strategy now filters directly (no phantom tool).
 	// Without a valid API endpoint, it returns original request unchanged.
-	cfg := testConfig("api", 1, 10, 0.8, []string{"run_tests"})
+	cfg := testConfig(config.StrategyCompresr, 1, 10, 0.8, []string{"run_tests"})
 	pipe := tooldiscovery.New(cfg)
 
 	body := openAIRequestWithToolsAndQuery(6, "search for code")
@@ -200,7 +200,7 @@ func TestPipe_Process_API_ReplacesWithSearchToolOnly(t *testing.T) {
 }
 
 func TestPipe_Process_ToolSearch_ReplacesWithSearchToolOnly(t *testing.T) {
-	cfg := testConfig("tool-search", 1, 10, 0.8, []string{"run_tests"})
+	cfg := testConfig(config.StrategyToolSearch, 1, 10, 0.8, []string{"run_tests"})
 	pipe := tooldiscovery.New(cfg)
 
 	body := openAIRequestWithToolsAndQuery(6, "search for code")
@@ -226,7 +226,7 @@ func TestPipe_Process_ToolSearch_ReplacesWithSearchToolOnly(t *testing.T) {
 
 func TestPipe_Process_RecentlyUsedToolsScoreHigher(t *testing.T) {
 	// MaxTools=2, keep only 2 of 6 tools (int(6*0.4)=2)
-	pipe := tooldiscovery.New(testConfig("relevance", 1, 2, 0.4, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, 2, 0.4, nil))
 
 	// Request with tool results for "read_file" in conversation history
 	body := []byte(`{
@@ -272,7 +272,7 @@ func TestPipe_Process_RecentlyUsedToolsScoreHigher(t *testing.T) {
 
 func TestPipe_Process_KeywordMatchScoring(t *testing.T) {
 	// MaxTools=2, keep only 2 of 6
-	pipe := tooldiscovery.New(testConfig("relevance", 1, 2, 0.3, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, 2, 0.3, nil))
 
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -312,7 +312,7 @@ func TestPipe_Process_KeywordMatchScoring(t *testing.T) {
 func TestPipe_Process_AlwaysKeepList(t *testing.T) {
 	// MaxTools=2, but always_keep includes "run_tests"
 	alwaysKeep := []string{"run_tests"}
-	pipe := tooldiscovery.New(testConfig("relevance", 1, 2, 0.3, alwaysKeep))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, 2, 0.3, alwaysKeep))
 
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -351,7 +351,7 @@ func TestPipe_Process_AlwaysKeepList(t *testing.T) {
 
 func TestPipe_Process_TargetRatioDeterminesCount(t *testing.T) {
 	// 10 tools, target_ratio=0.6 → keep 6, capped at MaxTools=8
-	pipe := tooldiscovery.New(testConfig("relevance", 2, 8, 0.6, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 8, 0.6, nil))
 
 	body := openAIRequestWithToolsAndQuery(10, "test query")
 	ctx := newOpenAIPipeContext(body)
@@ -370,7 +370,7 @@ func TestPipe_Process_TargetRatioDeterminesCount(t *testing.T) {
 
 func TestPipe_Process_MaxToolsCapsCount(t *testing.T) {
 	// 20 tools, target_ratio=0.8 → keep 16, but MaxTools=5 caps it
-	pipe := tooldiscovery.New(testConfig("relevance", 2, 5, 0.8, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 5, 0.8, nil))
 
 	body := openAIRequestWithToolsAndQuery(20, "test query")
 	ctx := newOpenAIPipeContext(body)
@@ -389,7 +389,7 @@ func TestPipe_Process_MaxToolsCapsCount(t *testing.T) {
 
 func TestPipe_Process_MinToolsFloor(t *testing.T) {
 	// 10 tools, target_ratio=0.1 → keep 1, but MinTools=3 floors it
-	pipe := tooldiscovery.New(testConfig("relevance", 3, 25, 0.1, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 3, 25, 0.1, nil))
 
 	body := openAIRequestWithToolsAndQuery(10, "test query")
 	ctx := newOpenAIPipeContext(body)
@@ -411,7 +411,7 @@ func TestPipe_Process_MinToolsFloor(t *testing.T) {
 // =============================================================================
 
 func TestPipe_Process_NoAdapter(t *testing.T) {
-	pipe := tooldiscovery.New(testConfig("relevance", 2, 5, 0.5, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 5, 0.5, nil))
 
 	body := openAIRequestWithTools(10)
 	ctx := &pipes.PipeContext{
@@ -426,7 +426,7 @@ func TestPipe_Process_NoAdapter(t *testing.T) {
 }
 
 func TestPipe_Process_EmptyBody(t *testing.T) {
-	pipe := tooldiscovery.New(testConfig("relevance", 2, 5, 0.5, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 5, 0.5, nil))
 
 	ctx := newOpenAIPipeContext(nil)
 
@@ -438,7 +438,7 @@ func TestPipe_Process_EmptyBody(t *testing.T) {
 
 func TestPipe_Process_NoQuery(t *testing.T) {
 	// When no user query exists, should still work (using only recently-used and always-keep signals)
-	pipe := tooldiscovery.New(testConfig("relevance", 1, 3, 0.3, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, 3, 0.3, nil))
 
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -467,7 +467,7 @@ func TestPipe_Process_NoQuery(t *testing.T) {
 
 func TestPipe_Process_KeepCountExceedsTotalSkips(t *testing.T) {
 	// target_ratio=1.0 would keep all tools, so no filtering should happen
-	pipe := tooldiscovery.New(testConfig("relevance", 2, 100, 1.0, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 100, 1.0, nil))
 
 	body := openAIRequestWithToolsAndQuery(10, "test query")
 	ctx := newOpenAIPipeContext(body)
@@ -493,7 +493,7 @@ func TestToolDiscoveryConfig_Validate_Disabled(t *testing.T) {
 func TestToolDiscoveryConfig_Validate_Passthrough(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Pipes.ToolDiscovery.Enabled = true
-	cfg.Pipes.ToolDiscovery.Strategy = "passthrough"
+	cfg.Pipes.ToolDiscovery.Strategy = config.StrategyPassthrough
 	err := cfg.Pipes.ToolDiscovery.Validate()
 	assert.NoError(t, err)
 }
@@ -501,7 +501,7 @@ func TestToolDiscoveryConfig_Validate_Passthrough(t *testing.T) {
 func TestToolDiscoveryConfig_Validate_Relevance(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Pipes.ToolDiscovery.Enabled = true
-	cfg.Pipes.ToolDiscovery.Strategy = "relevance"
+	cfg.Pipes.ToolDiscovery.Strategy = config.StrategyRelevance
 	err := cfg.Pipes.ToolDiscovery.Validate()
 	assert.NoError(t, err)
 }
@@ -509,7 +509,7 @@ func TestToolDiscoveryConfig_Validate_Relevance(t *testing.T) {
 func TestToolDiscoveryConfig_Validate_APIMissingEndpoint(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Pipes.ToolDiscovery.Enabled = true
-	cfg.Pipes.ToolDiscovery.Strategy = "api"
+	cfg.Pipes.ToolDiscovery.Strategy = config.StrategyCompresr
 	err := cfg.Pipes.ToolDiscovery.Validate()
 	assert.Error(t, err)
 }
@@ -517,7 +517,7 @@ func TestToolDiscoveryConfig_Validate_APIMissingEndpoint(t *testing.T) {
 func TestToolDiscoveryConfig_Validate_APIWithProvider(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Pipes.ToolDiscovery.Enabled = true
-	cfg.Pipes.ToolDiscovery.Strategy = "api"
+	cfg.Pipes.ToolDiscovery.Strategy = config.StrategyCompresr
 	cfg.Pipes.ToolDiscovery.Provider = "some_provider"
 	err := cfg.Pipes.ToolDiscovery.Validate()
 	assert.NoError(t, err)

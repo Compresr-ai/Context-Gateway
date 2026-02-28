@@ -40,7 +40,7 @@ func e2eFullConfig() *config.Config {
 	compresrKey := os.Getenv("COMPRESR_API_KEY")
 	compresrURL := os.Getenv("COMPRESR_API_URL")
 	if compresrURL == "" {
-		compresrURL = "https://api.compresr.ai"
+		compresrURL = config.DefaultCompresrAPIBaseURL
 	}
 
 	return &config.Config{
@@ -56,16 +56,16 @@ func e2eFullConfig() *config.Config {
 			// PIPE 1: Tool Output Compression via Compresr API
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            "api",
+				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    "passthrough",
 				MinBytes:            500,
 				MaxBytes:            100000,
 				TargetRatio:         0.3,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint:  "/api/compress/tool-output/",
-					APISecret: compresrKey,
+					APIKey: compresrKey,
 					Model:     "toc_latte_v1",
 					Timeout:   30 * time.Second,
 				},
@@ -73,14 +73,14 @@ func e2eFullConfig() *config.Config {
 			// PIPE 2: Tool Discovery via Compresr API
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:              true,
-				Strategy:             "api",
+				Strategy:             config.StrategyCompresr,
 				MinTools:             3,
 				MaxTools:             10,
 				TargetRatio:          0.5,
 				EnableSearchFallback: true,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint:  "/api/compress/tool-discovery/",
-					APISecret: compresrKey,
+					APIKey: compresrKey,
 					Model:     "tdc_coldbrew_v1",
 					Timeout:   30 * time.Second,
 				},
@@ -91,8 +91,8 @@ func e2eFullConfig() *config.Config {
 			Enabled:          true,
 			TriggerThreshold: 50.0, // Trigger early for testing
 			Summarizer: preemptive.SummarizerConfig{
-				Strategy: "api",
-				API: &preemptive.APIConfig{
+				Strategy: preemptive.StrategyCompresr,
+				Compresr: &preemptive.CompresrConfig{
 					Endpoint: "/api/compress/history/",
 					APIKey:   compresrKey,
 					Model:    "hcc_espresso_v1",

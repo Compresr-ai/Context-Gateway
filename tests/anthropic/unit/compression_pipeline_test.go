@@ -58,14 +58,14 @@ func TestIntegration_CompressionPipeline_WithMockAPI(t *testing.T) {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            config.StrategyAPI,
+				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    config.StrategyPassthrough,
 				MinBytes:            100,
 				MaxBytes:            1024 * 1024,
 				TargetRatio:         0.5,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,
 				},
@@ -99,7 +99,7 @@ func TestIntegration_CompressionPipeline_WithMockAPI(t *testing.T) {
 }
 
 func TestIntegration_CompressionPipeline_BelowThreshold(t *testing.T) {
-	pipe := tooloutput.New(fixtures.APICompressionConfig(), fixtures.TestStore())
+	pipe := tooloutput.New(fixtures.CompresrCompressionConfig(), fixtures.TestStore())
 
 	// Content below minBytes (256 by default)
 	smallContent := "small"
@@ -121,7 +121,7 @@ func TestIntegration_CompressionPipeline_CacheHit(t *testing.T) {
 	st := fixtures.TestStore()
 
 	// Create pipe
-	cfg := fixtures.APICompressionConfig()
+	cfg := fixtures.CompresrCompressionConfig()
 	cfg.Pipes.ToolOutput.MinBytes = 50
 	pipe := tooloutput.New(cfg, st)
 
@@ -158,13 +158,13 @@ func TestIntegration_CompressionPipeline_MultipleToolOutputs(t *testing.T) {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            config.StrategyAPI,
+				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    config.StrategyPassthrough,
 				MinBytes:            50,
 				MaxBytes:            1024 * 1024,
 				TargetRatio:         0.5,
 				EnableExpandContext: true,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,
 				},

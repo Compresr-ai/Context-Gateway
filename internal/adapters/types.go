@@ -134,8 +134,8 @@ type UsageInfo struct {
 	InputTokens              int
 	OutputTokens             int
 	TotalTokens              int
-	CacheCreationInputTokens int // Anthropic: tokens written to cache (1.25x input price)
-	CacheReadInputTokens     int // Anthropic: tokens read from cache (0.1x input price)
+	CacheCreationInputTokens int // Tokens written to cache (Anthropic: 1.25x input price)
+	CacheReadInputTokens     int // Tokens read from cache (Anthropic: 0.1x, OpenAI: 0.5x)
 }
 
 // =============================================================================

@@ -67,7 +67,7 @@ func TestC2_AllToolsCompressed(t *testing.T) {
 	st.SetCompressed(shadowID2, "compressed2")
 	st.SetCompressed(shadowID3, "compressed3")
 
-	cfg := fixtures.TestConfig(config.StrategyAPI, 50, true)
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 50, true)
 	pipe := tooloutput.New(cfg, st)
 
 	// Create request body with multiple tool outputs
@@ -98,7 +98,7 @@ func TestC6_CacheLookupBeforeCompression(t *testing.T) {
 	st.SetCompressed(shadowID, compressed)
 	st.Set(shadowID, content)
 
-	cfg := fixtures.TestConfig(config.StrategyAPI, 50, true)
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 50, true)
 	pipe := tooloutput.New(cfg, st)
 
 	// Create request body

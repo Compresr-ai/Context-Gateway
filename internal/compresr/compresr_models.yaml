@@ -28,6 +28,10 @@ compresr:
     default_model: "hcc_espresso_v1"
     description: "Lingua-based history compression"
     input_price_per_1m: 0.20
+    models:
+      - name: "hcc_espresso_v1"
+        description: "Lingua-based history compression"
+        recommended: true
 
   # Tool Output Compression - GemFilter backbone (attention-based, query-specific)
   tool_output:

@@ -1,7 +1,7 @@
 # Claude Code Agent Configuration
 # ================================
 # Anthropic Claude via official CLI with gateway compression
-# Uses default_config.yaml with dual-model support:
+# Uses fast_setup.yaml with all optimizations enabled:
 #   - Lingua: Semantic summarization
 #   - Compresr: Tool output & discovery
 
@@ -9,7 +9,7 @@ agent:
   name: "claude_code"
   display_name: "Claude Code (CLI)"
   description: "Anthropic Claude via official CLI with Compresr compression"
-  config: "default_config.yaml"
+  config: "fast_setup.yaml"
 
   environment:
     - name: "ANTHROPIC_BASE_URL"

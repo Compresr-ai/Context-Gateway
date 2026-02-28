@@ -61,9 +61,11 @@ type RequestEvent struct {
 	AuthModeEffective    string    `json:"auth_mode_effective,omitempty"` // Actual auth sent upstream
 	AuthFallbackUsed     bool      `json:"auth_fallback_used,omitempty"`  // True when subscription->api_key fallback happened
 	// Usage from API response (extracted by adapter)
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
-	TotalTokens  int `json:"total_tokens,omitempty"`
+	InputTokens              int `json:"input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	TotalTokens              int `json:"total_tokens,omitempty"`
 
 	// VERBOSE PAYLOADS (populated when monitoring.verbose_payloads=true)
 	RequestHeaders      map[string]string `json:"request_headers,omitempty"`       // Sanitized headers (no secrets)
@@ -121,24 +123,26 @@ type ExpandEvent struct {
 // CompressionComparison captures before/after compression comparison.
 // StepID links to trajectory step for correlation.
 type CompressionComparison struct {
-	RequestID         string   `json:"request_id"`
-	StepID            int      `json:"step_id,omitempty"`
-	Timestamp         string   `json:"timestamp,omitempty"`
-	PipeType          string   `json:"pipe_type"`
-	ToolName          string   `json:"tool_name,omitempty"`
-	ShadowID          string   `json:"shadow_id,omitempty"`
-	OriginalBytes     int      `json:"original_bytes"`
-	CompressedBytes   int      `json:"compressed_bytes"`
-	CompressionRatio  float64  `json:"compression_ratio"`
-	OriginalContent   string   `json:"original_content,omitempty"`
-	CompressedContent string   `json:"compressed_content,omitempty"`
+	RequestID        string  `json:"request_id"`
+	StepID           int     `json:"step_id,omitempty"`
+	Timestamp        string  `json:"timestamp,omitempty"`
+	PipeType         string  `json:"pipe_type"`
+	ToolName         string  `json:"tool_name,omitempty"`
+	ShadowID         string  `json:"shadow_id,omitempty"`
+	OriginalBytes    int     `json:"original_bytes"`
+	CompressedBytes  int     `json:"compressed_bytes"`
+	CompressionRatio float64 `json:"compression_ratio"`
+	CacheHit         bool    `json:"cache_hit"`
+	IsLastTool       bool    `json:"is_last_tool,omitempty"`
+	Status           string  `json:"status"`                  // compressed, passthrough_small, passthrough_large, cache_hit
+	MinThreshold     int     `json:"min_threshold,omitempty"` // Min byte threshold used
+	MaxThreshold     int     `json:"max_threshold,omitempty"` // Max byte threshold used
+	Model            string  `json:"model,omitempty"`         // Compression model used (e.g., "toc_latte_v1", "tdc_coldbrew_v1")
+	// Large/variable fields at end for readability
 	AllTools          []string `json:"all_tools,omitempty"`
 	SelectedTools     []string `json:"selected_tools,omitempty"`
-	CacheHit          bool     `json:"cache_hit"`
-	IsLastTool        bool     `json:"is_last_tool,omitempty"`
-	Status            string   `json:"status"`                  // compressed, passthrough_small, passthrough_large, cache_hit
-	MinThreshold      int      `json:"min_threshold,omitempty"` // Min byte threshold used
-	MaxThreshold      int      `json:"max_threshold,omitempty"` // Max byte threshold used
+	OriginalContent   string   `json:"original_content,omitempty"`
+	CompressedContent string   `json:"compressed_content,omitempty"`
 }
 
 // =============================================================================

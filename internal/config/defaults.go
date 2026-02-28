@@ -4,7 +4,11 @@
 // This makes configuration more maintainable and auditable.
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/compresr/context-gateway/internal/compresr"
+)
 
 // =============================================================================
 // TOKEN ESTIMATION
@@ -83,6 +87,10 @@ const MaxRequestBodySize = 50 * 1024 * 1024
 // MaxResponseSize is the maximum allowed upstream response body (50MB).
 const MaxResponseSize = 50 * 1024 * 1024
 
+// MaxStreamBufferSize is the maximum bytes to buffer when capturing streaming
+// responses for expand_context detection. Prevents OOM on very large streams.
+const MaxStreamBufferSize = 50 * 1024 * 1024
+
 // MaxErrorBodyLogLen limits error response body in logs to prevent bloat.
 const MaxErrorBodyLogLen = 500
 
@@ -134,3 +142,23 @@ const MaxGatewayPorts = 10
 
 // DefaultCostSessionTTL is how long cost sessions are tracked.
 const DefaultCostSessionTTL = 24 * time.Hour
+
+// =============================================================================
+// COMPRESR PLATFORM URLS
+// =============================================================================
+
+// DefaultCompresrAPIBaseURL is the production Compresr API base URL.
+// Re-exported from compresr package where the canonical definition lives.
+const DefaultCompresrAPIBaseURL = compresr.DefaultCompresrAPIBaseURL
+
+// DefaultCompresrFrontendBaseURL is the production Compresr frontend URL.
+const DefaultCompresrFrontendBaseURL = "https://compresr.ai"
+
+// DefaultCompresrDocsURL is the gateway documentation URL.
+const DefaultCompresrDocsURL = "https://docs.compresr.ai/gateway"
+
+// DefaultCompresrInstallURL is the gateway install script URL.
+const DefaultCompresrInstallURL = DefaultCompresrFrontendBaseURL + "/install_gateway.sh"
+
+// DefaultCompresrDashboardURL is the API key dashboard URL.
+const DefaultCompresrDashboardURL = DefaultCompresrFrontendBaseURL + "/dashboard"

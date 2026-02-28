@@ -1,13 +1,13 @@
 # Cursor IDE Agent Configuration
 # ===============================
 # Routes Cursor's LLM requests through the gateway
-# Uses default_config.yaml with dual-model support
+# Uses fast_setup.yaml with all optimizations enabled
 
 agent:
   name: "cursor"
   display_name: "Cursor IDE"
   description: "Cursor IDE with Compresr compression"
-  config: "default_config.yaml"
+  config: "fast_setup.yaml"
 
   environment:
     # Cursor uses OpenAI-compatible API format

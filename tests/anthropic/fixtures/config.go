@@ -50,7 +50,7 @@ func TestConfig(strategy string, minBytes int, enableExpand bool) *config.Config
 				TargetRatio:         0.5,
 				IncludeExpandHint:   enableExpand,
 				EnableExpandContext: enableExpand,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint: "/api/compress",
 					Timeout:  5 * time.Second,
 				},
@@ -67,9 +67,9 @@ func PassthroughConfig() *config.Config {
 	return TestConfig(config.StrategyPassthrough, 256, false)
 }
 
-// APICompressionConfig creates an API compression config
-func APICompressionConfig() *config.Config {
-	return TestConfig(config.StrategyAPI, 256, true)
+// CompresrCompressionConfig creates a Compresr API compression config
+func CompresrCompressionConfig() *config.Config {
+	return TestConfig(config.StrategyCompresr, 256, true)
 }
 
 // DisabledConfig creates a config with tool_output disabled
@@ -96,7 +96,7 @@ func TestConfigWithModelAndQuery(strategy string, model string, minBytes int, en
 				TargetRatio:         0.5,
 				IncludeExpandHint:   enableExpand,
 				EnableExpandContext: enableExpand,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint:      "/api/compress/tool-output",
 					Model:         model,
 					Timeout:       5 * time.Second,
@@ -110,19 +110,19 @@ func TestConfigWithModelAndQuery(strategy string, model string, minBytes int, en
 	}
 }
 
-// CmprsrConfig creates a config using tool_output_cmprsr model (query agnostic)
+// CmprsrConfig creates a config using toc_espresso_v1 model (query agnostic)
 func CmprsrConfig() *config.Config {
-	return TestConfigWithModelAndQuery(config.StrategyAPI, "tool_output_cmprsr", 256, true, true)
+	return TestConfigWithModelAndQuery(config.StrategyCompresr, "toc_espresso_v1", 256, true, true)
 }
 
-// OpenAIConfig creates a config using tool_output_openai model (query agnostic)
+// OpenAIConfig creates a config using toc_espresso_v1 model (query agnostic)
 func OpenAIConfig() *config.Config {
-	return TestConfigWithModelAndQuery(config.StrategyAPI, "tool_output_openai", 256, true, true)
+	return TestConfigWithModelAndQuery(config.StrategyCompresr, "toc_espresso_v1", 256, true, true)
 }
 
-// RerankerConfig creates a config using tool_output_reranker model (NOT query agnostic - needs user query)
+// RerankerConfig creates a config using toc_latte_v1 model (query specific - needs user query)
 func RerankerConfig() *config.Config {
-	return TestConfigWithModelAndQuery(config.StrategyAPI, "tool_output_reranker", 256, true, false)
+	return TestConfigWithModelAndQuery(config.StrategyCompresr, "toc_latte_v1", 256, true, false)
 }
 
 // TestStore creates a memory store for testing

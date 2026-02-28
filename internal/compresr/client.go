@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,10 @@ const (
 	DefaultHistoryModel       = "hcc_espresso_v1"
 )
 
+// DefaultCompresrAPIBaseURL is the production Compresr API base URL.
+// The canonical definition lives here. config.DefaultCompresrAPIBaseURL re-exports it.
+const DefaultCompresrAPIBaseURL = "https://api.compresr.ai"
+
 // =============================================================================
 // Client
 // =============================================================================
@@ -32,6 +37,11 @@ type Client struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+
+	// Cached gateway status to avoid slow external calls on every dashboard refresh
+	statusMu    sync.RWMutex
+	statusCache *GatewayStatus
+	statusTime  time.Time
 }
 
 // ClientOption configures the Client.
@@ -58,7 +68,7 @@ func NewClient(baseURL, apiKey string, opts ...ClientOption) *Client {
 		baseURL = os.Getenv("COMPRESR_BASE_URL")
 	}
 	if baseURL == "" {
-		baseURL = "https://api.compresr.ai"
+		baseURL = DefaultCompresrAPIBaseURL
 	}
 
 	if apiKey == "" {
@@ -69,7 +79,7 @@ func NewClient(baseURL, apiKey string, opts ...ClientOption) *Client {
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 5 * time.Second,
 		},
 	}
 
@@ -108,6 +118,53 @@ func (c *Client) GetSubscription() (*SubscriptionData, error) {
 	if !resp.Success {
 		return nil, fmt.Errorf("API error: %s", resp.Message)
 	}
+
+	return &resp.Data, nil
+}
+
+// GetGatewayStatus fetches the user's current usage status for display in the CLI.
+// This is a lightweight endpoint designed for frequent polling.
+// Uses a 30s cache to avoid excessive API calls.
+func (c *Client) GetGatewayStatus() (*GatewayStatus, error) {
+	return c.getGatewayStatus(false)
+}
+
+// GetGatewayStatusFresh fetches fresh status, bypassing the cache.
+// Use this for explicit refresh calls (e.g., exit summary) where stale data is unacceptable.
+func (c *Client) GetGatewayStatusFresh() (*GatewayStatus, error) {
+	return c.getGatewayStatus(true)
+}
+
+func (c *Client) getGatewayStatus(bypassCache bool) (*GatewayStatus, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("no API key configured")
+	}
+
+	// Return cached result if fresh (30s TTL) and not bypassing
+	if !bypassCache {
+		c.statusMu.RLock()
+		if c.statusCache != nil && time.Since(c.statusTime) < 30*time.Second {
+			cached := c.statusCache
+			c.statusMu.RUnlock()
+			return cached, nil
+		}
+		c.statusMu.RUnlock()
+	}
+
+	var resp APIResponse[GatewayStatus]
+	if err := c.get("/api/gateway/status", &resp); err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("API error: %s", resp.Message)
+	}
+
+	// Cache the result
+	c.statusMu.Lock()
+	c.statusCache = &resp.Data
+	c.statusTime = time.Now()
+	c.statusMu.Unlock()
 
 	return &resp.Data, nil
 }

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/compresr/context-gateway/internal/config"
 )
 
 // =============================================================================
@@ -130,6 +132,7 @@ type CompresrConfig struct {
 	DefaultBaseURL string
 	ToolDiscovery  CompresrServiceInfo
 	ToolOutput     CompresrServiceInfo
+	History        CompresrServiceInfo // HCC models for compact/preemptive
 }
 
 // compresrModelsConfig represents the compresr_models.yaml configuration
@@ -155,6 +158,14 @@ type compresrModelsConfig struct {
 				Recommended bool   `yaml:"recommended"`
 			} `yaml:"models"`
 		} `yaml:"tool_output"`
+		SemanticSummarization struct {
+			DefaultModel string `yaml:"default_model"`
+			Models       []struct {
+				Name        string `yaml:"name"`
+				Description string `yaml:"description"`
+				Recommended bool   `yaml:"recommended"`
+			} `yaml:"models"`
+		} `yaml:"semantic_summarization"`
 	} `yaml:"compresr"`
 }
 
@@ -163,7 +174,7 @@ var DefaultCompresrConfig = CompresrConfig{
 	DisplayName:    "Compresr",
 	EnvVar:         "COMPRESR_API_KEY",
 	BaseURLEnv:     "COMPRESR_BASE_URL",
-	DefaultBaseURL: "https://api.compresr.ai",
+	DefaultBaseURL: config.DefaultCompresrAPIBaseURL,
 	ToolDiscovery: CompresrServiceInfo{
 		DefaultModel: "tool-selector-v1",
 		Models: []CompresrModelInfo{
@@ -178,6 +189,12 @@ var DefaultCompresrConfig = CompresrConfig{
 			{Name: "compressor-v1", Description: "Balanced compression", Recommended: true},
 			{Name: "compressor-lite", Description: "Fast, basic compression"},
 			{Name: "compressor-pro", Description: "Best compression ratio"},
+		},
+	},
+	History: CompresrServiceInfo{
+		DefaultModel: "hcc_espresso_v1",
+		Models: []CompresrModelInfo{
+			{Name: "hcc_espresso_v1", Description: "Lingua-based history compression", Recommended: true},
 		},
 	},
 }
@@ -220,6 +237,16 @@ func loadCompresrModels() CompresrConfig {
 		result.ToolOutput.DefaultModel = cfg.Compresr.ToolOutput.DefaultModel
 		for _, m := range cfg.Compresr.ToolOutput.Models {
 			result.ToolOutput.Models = append(result.ToolOutput.Models, CompresrModelInfo{
+				Name:        m.Name,
+				Description: m.Description,
+				Recommended: m.Recommended,
+			})
+		}
+
+		// History / Semantic Summarization models
+		result.History.DefaultModel = cfg.Compresr.SemanticSummarization.DefaultModel
+		for _, m := range cfg.Compresr.SemanticSummarization.Models {
+			result.History.Models = append(result.History.Models, CompresrModelInfo{
 				Name:        m.Name,
 				Description: m.Description,
 				Recommended: m.Recommended,

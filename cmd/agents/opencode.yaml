@@ -1,7 +1,7 @@
 # OpenCode Agent Configuration
 # ============================
 # OpenCode AI coding assistant with gateway compression
-# Uses default_config.yaml with dual-model support:
+# Uses fast_setup.yaml with all optimizations enabled:
 #   - Lingua: Semantic summarization
 #   - Compresr: Tool output & discovery
 # https://github.com/opencode-ai/opencode
@@ -10,7 +10,7 @@ agent:
   name: "opencode"
   display_name: "OpenCode"
   description: "Open-source AI coding assistant with Compresr compression"
-  config: "default_config.yaml"
+  config: "fast_setup.yaml"
 
   environment:
     - name: "ANTHROPIC_BASE_URL"

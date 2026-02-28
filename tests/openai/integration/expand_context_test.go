@@ -28,7 +28,7 @@ import (
 
 const (
 	expandCtxOpenaiBaseURL = "https://api.openai.com"
-	expandCtxOpenaiModel   = "gpt-4o-mini"
+	expandCtxOpenaiModel   = "gpt-4o" // gpt-4o ($2.5/MTok) triggers compression; gpt-4o-mini skipped as budget model
 	expandCtxTestTimeout   = 60 * time.Second
 )
 

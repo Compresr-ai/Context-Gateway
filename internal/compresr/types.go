@@ -149,3 +149,21 @@ type ModelWithAvailability struct {
 	ModelInfo
 	Available bool // True if model is available for current subscription
 }
+
+// =============================================================================
+// Gateway Status Types (for CLI status bar)
+// =============================================================================
+
+// GatewayStatus contains usage status for display in the gateway CLI.
+// Returned by GET /api/gateway/status.
+type GatewayStatus struct {
+	Tier                 string  `json:"tier"`                    // Subscription tier: "free", "pro", "business"
+	CreditsRemainingUSD  float64 `json:"credits_remaining_usd"`   // Total remaining credits (subscription + wallet)
+	CreditsUsedThisMonth float64 `json:"credits_used_this_month"` // Credits used this billing month
+	MonthlyBudgetUSD     float64 `json:"monthly_budget_usd"`      // Monthly budget/allocation (0 = unlimited)
+	UsagePercent         float64 `json:"usage_percent"`           // Percentage of monthly budget used (0-100)
+	RequestsToday        int     `json:"requests_today"`          // Compression requests today
+	RequestsThisMonth    int     `json:"requests_this_month"`     // Compression requests this month
+	DailyRequestLimit    *int    `json:"daily_request_limit"`     // Daily request limit (nil = unlimited)
+	IsAdmin              bool    `json:"is_admin"`                // Whether user has admin/unlimited access
+}

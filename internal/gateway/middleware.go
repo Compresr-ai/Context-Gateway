@@ -184,6 +184,12 @@ func (g *Gateway) loggingMiddleware(next http.Handler) http.Handler {
 		// Check for high latency
 		g.alerts.FlagHighLatency(requestID, latency, "", r.URL.Path)
 
+		// Update CLI status (if configured)
+		if g.statusReporter != nil {
+			g.statusReporter.IncrementRequests()
+			g.statusReporter.MaybeRefreshCompact()
+		}
+
 		// Legacy log for compatibility
 		log.Info().
 			Str("id", requestID).
@@ -234,7 +240,14 @@ func (g *Gateway) security(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'")
+
+		// Dashboard routes need scripts, styles, fonts, and API access
+		if strings.HasPrefix(r.URL.Path, "/costs") || strings.HasPrefix(r.URL.Path, "/api/dashboard") {
+			w.Header().Set("Content-Security-Policy",
+				"default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'")
+		} else {
+			w.Header().Set("Content-Security-Policy", "default-src 'none'")
+		}
 
 		// CORS: restrict to configured origins (default: none for API-only use)
 		origin := r.Header.Get("Origin")
@@ -276,6 +289,12 @@ func (g *Gateway) getClientIP(r *http.Request) string {
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return ip
+}
+
+// isLoopback returns true if the remote address is a loopback (localhost) connection.
+func isLoopback(remoteAddr string) bool {
+	ip, _, _ := net.SplitHostPort(remoteAddr)
+	return ip == "127.0.0.1" || ip == "::1"
 }
 
 // isAllowedHost checks if the host is in the allowlist for SSRF protection.

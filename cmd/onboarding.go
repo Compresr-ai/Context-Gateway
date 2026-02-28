@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
+
+	"github.com/compresr/context-gateway/internal/auth"
+	"github.com/compresr/context-gateway/internal/compresr"
+	"github.com/compresr/context-gateway/internal/config"
+	"github.com/compresr/context-gateway/internal/tui"
 )
 
 // CredentialScope determines where credentials are persisted.
@@ -39,20 +46,12 @@ func setupAnthropicAPIKey(agentName string) bool {
 
 	// For claude_code, API key is optional - we can capture from /login credentials
 	if agentName == "claude_code" {
-		fmt.Println("  You can provide an API key OR use your Claude Max/Pro subscription.")
+		printInfo("Using credentials from Claude Code /login (no API key prompt)")
 		fmt.Println()
-		fmt.Println("  Option 1: Enter an API key (from console.anthropic.com)")
-		fmt.Println("  Option 2: Skip and use /login in Claude Code (Max/Pro/Teams)")
+		fmt.Println("  Note: Make sure you're logged into Claude Code with /login")
+		fmt.Println("  The gateway will capture your auth token automatically.")
 		fmt.Println()
-
-		if !promptYesNo("Do you have an Anthropic API key to enter?", false) {
-			printInfo("Skipped - will use credentials from Claude Code /login")
-			fmt.Println()
-			fmt.Println("  Note: Make sure you're logged into Claude Code with /login")
-			fmt.Println("  The gateway will capture your auth token automatically.")
-			fmt.Println()
-			return true
-		}
+		return true
 	} else {
 		fmt.Println("  ANTHROPIC_API_KEY is required to use Context Gateway.")
 		fmt.Println("  Get your key at: https://console.anthropic.com/settings/keys")
@@ -83,6 +82,210 @@ func setupAnthropicAPIKey(agentName string) bool {
 	printSuccess("API key configured")
 
 	return true
+}
+
+// =============================================================================
+// COMPRESR API KEY ONBOARDING
+// =============================================================================
+
+const (
+	compresrAPIKeyEnvVar = "COMPRESR_API_KEY" // #nosec G101 -- env var name, not a secret
+
+	// Frontend URLs - derived from config.DefaultCompresrFrontendBaseURL
+	compresrFrontendBaseURL = config.DefaultCompresrFrontendBaseURL
+	compresrTokenURL        = compresrFrontendBaseURL + "/dashboard/tokens" // #nosec G101 -- URL, not credentials
+
+	// Backend base URL - WebSocket auth endpoint lives here
+	compresrBackendBaseURL = "http://localhost:8000"
+)
+
+// isCompresrAPIKeySet checks if the Compresr API key is configured.
+func isCompresrAPIKeySet() bool {
+	return os.Getenv(compresrAPIKeyEnvVar) != ""
+}
+
+// runCompresrOnboarding runs the initial Compresr API key setup flow.
+// This is shown to first-time users before any other configuration.
+// Tries OAuth flow first, falls back to manual copy-paste if OAuth fails.
+// Returns true if successful, false if user cancelled.
+func runCompresrOnboarding() bool {
+	fmt.Println()
+	printHeader("Welcome to Context Gateway")
+	fmt.Println()
+	fmt.Println("  Context Gateway optimizes your AI coding experience by:")
+	fmt.Println()
+	fmt.Printf("    %s•%s Preemptive summarization - keeps context fresh\n", tui.ColorGreen, tui.ColorReset)
+	fmt.Printf("    %s•%s Tool output compression - reduces token usage\n", tui.ColorGreen, tui.ColorReset)
+	fmt.Printf("    %s•%s Tool discovery optimization - faster responses\n", tui.ColorGreen, tui.ColorReset)
+	fmt.Println()
+	fmt.Printf("  %sTo get started, you need a Compresr API key.%s\n", tui.ColorBold, tui.ColorReset)
+	fmt.Println()
+
+	// Try OAuth flow first
+	apiKey := tryOAuthFlow()
+
+	// If OAuth failed or timed out, fall back to manual flow
+	if apiKey == "" {
+		printInfo("Switching to manual setup...")
+		fmt.Println()
+		apiKey = manualAPIKeyFlow()
+		if apiKey == "" {
+			return false
+		}
+	}
+
+	// Validate the API key
+	fmt.Println()
+	printStep("Validating API key...")
+	client := compresr.NewClient("", apiKey)
+	tier, err := client.ValidateAPIKey()
+	if err != nil {
+		printError(fmt.Sprintf("Invalid API key: %v", err))
+		fmt.Println()
+		printWarn("Please run with --reset-api-key to try again")
+		return false
+	}
+
+	// Save to global config
+	persistCredential(compresrAPIKeyEnvVar, apiKey, ScopeGlobal)
+
+	// Set for current session
+	_ = os.Setenv(compresrAPIKeyEnvVar, apiKey)
+
+	fmt.Println()
+	printSuccess(fmt.Sprintf("API key validated! (tier: %s)", tier))
+	fmt.Println()
+
+	return true
+}
+
+// tryOAuthFlow attempts to authorize via WebSocket auth client.
+// Connects outbound to the backend which pushes the token when OAuth completes.
+// Returns the API key if successful, empty string if failed or timed out.
+func tryOAuthFlow() string {
+	fmt.Printf("  %sAttempting secure authorization...%s\n", tui.ColorCyan, tui.ColorReset)
+	fmt.Println()
+
+	// Create auth client (WebSocket-based, works from VMs and remote machines)
+	client, err := auth.NewAuthClient(compresrBackendBaseURL)
+	if err != nil {
+		printWarn(fmt.Sprintf("Could not create auth client: %v", err))
+		return ""
+	}
+	defer func() { _ = client.Close() }()
+
+	// Connect to backend and get the authorize URL
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	authorizeURL, err := client.Connect(ctx)
+	cancel()
+	if err != nil {
+		printWarn(fmt.Sprintf("Could not connect to auth server: %v", err))
+		return ""
+	}
+
+	fmt.Printf("  Opening browser in %s2 seconds%s...\n", tui.ColorCyan, tui.ColorReset)
+	time.Sleep(2 * time.Second)
+
+	// Open browser to authorization page
+	openBrowser(authorizeURL)
+
+	fmt.Println()
+	fmt.Printf("  %sBrowser opened:%s %s\n", tui.ColorDim, tui.ColorReset, authorizeURL)
+	fmt.Println()
+	fmt.Println("  1. Sign in or create an account")
+	fmt.Println("  2. Click 'Authorize' to grant access")
+	fmt.Println()
+	fmt.Printf("  %sWaiting for authorization...%s (5 minute timeout)\n", tui.ColorCyan, tui.ColorReset)
+	fmt.Println()
+
+	// Wait for token via WebSocket (5 minute timeout)
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	token, err := client.WaitForToken(ctx)
+	if err != nil {
+		printWarn(fmt.Sprintf("Authorization timed out or failed: %v", err))
+		return ""
+	}
+
+	printSuccess("Authorization successful!")
+	return token
+}
+
+// manualAPIKeyFlow prompts the user to manually copy-paste an API key.
+// Returns the API key if entered, empty string if cancelled.
+func manualAPIKeyFlow() string {
+	fmt.Printf("  Opening browser in %s2 seconds%s...\n", tui.ColorCyan, tui.ColorReset)
+	time.Sleep(2 * time.Second)
+
+	// Open browser to token generation page
+	openBrowser(compresrTokenURL)
+
+	fmt.Println()
+	fmt.Printf("  %sBrowser opened:%s %s\n", tui.ColorDim, tui.ColorReset, compresrTokenURL)
+	fmt.Println()
+	fmt.Println("  1. Sign in or create an account")
+	fmt.Println("  2. Generate a new API token")
+	fmt.Println("  3. Copy the token and paste it below")
+	fmt.Println()
+
+	// Prompt for API key
+	apiKey := tui.PromptInput("  Enter your Compresr API key: ")
+	if apiKey == "" {
+		printWarn("No API key entered. You can set it later with --reset-api-key")
+		return ""
+	}
+
+	return apiKey
+}
+
+// resetCompresrAPIKey removes the existing API key and re-runs onboarding.
+func resetCompresrAPIKey() bool {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		printError("Could not determine home directory")
+		return false
+	}
+
+	envPath := filepath.Join(homeDir, ".config", "context-gateway", ".env")
+
+	// Remove the key from global .env
+	removeCredentialFromEnvFile(envPath, compresrAPIKeyEnvVar)
+
+	// Clear from environment
+	_ = os.Unsetenv(compresrAPIKeyEnvVar)
+
+	printInfo("Compresr API key removed")
+	fmt.Println()
+
+	// Re-run onboarding
+	return runCompresrOnboarding()
+}
+
+// removeCredentialFromEnvFile removes a key from an .env file.
+func removeCredentialFromEnvFile(envPath, key string) {
+	// #nosec G304 -- env file constructed from known paths
+	file, err := os.Open(envPath)
+	if err != nil {
+		return // File doesn't exist, nothing to remove
+	}
+	defer func() { _ = file.Close() }()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, key+"=") {
+			lines = append(lines, line)
+		}
+	}
+
+	// Write back without the removed key
+	output := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		output += "\n"
+	}
+	_ = os.WriteFile(envPath, []byte(output), 0600)
 }
 
 // =============================================================================
@@ -396,17 +599,6 @@ func promptOptional(prompt string) string {
 	fmt.Print(prompt)
 	input, _ := reader.ReadString('\n')
 	return strings.TrimSpace(input)
-}
-
-// promptYesNo prompts for a yes/no response using arrow-key selection.
-func promptYesNo(question string, defaultYes bool) bool {
-	options := []string{"Yes", "No"}
-	idx, err := selectFromList(question, options)
-	if err != nil {
-		// User cancelled or error - return default
-		return defaultYes
-	}
-	return idx == 0 // Yes is at index 0
 }
 
 // promptCredentialScope prompts user to choose where to save credentials.

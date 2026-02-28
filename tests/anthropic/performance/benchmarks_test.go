@@ -57,9 +57,9 @@ func BenchmarkExtraction_Anthropic(b *testing.B) {
 }
 
 func BenchmarkPipeline_WithCompression(b *testing.B) {
-	cfg := fixtures.TestConfig(config.StrategyAPI, 50, true)
-	cfg.Pipes.ToolOutput.API.Endpoint = "http://localhost:9999/compress" // Will fail fast
-	cfg.Pipes.ToolOutput.API.Timeout = 1                                 // Very short timeout
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 50, true)
+	cfg.Pipes.ToolOutput.Compresr.Endpoint = "http://localhost:9999/compress" // Will fail fast
+	cfg.Pipes.ToolOutput.Compresr.Timeout = 1                                 // Very short timeout
 
 	pipe := tooloutput.New(cfg, fixtures.TestStore())
 	content := strings.Repeat("content ", 500)

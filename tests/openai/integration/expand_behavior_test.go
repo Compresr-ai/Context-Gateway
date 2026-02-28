@@ -923,17 +923,17 @@ func configWithExpandEnabledOpenAI(mockAPIURL string) *config.Config {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            "api",
+				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    "passthrough",
 				MinBytes:            300,
 				MaxBytes:            65536,
 				TargetRatio:         0.2,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true, // ENABLED
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint:  apiEndpoint,
-					APISecret: os.Getenv("COMPRESR_API_KEY"),
-					Model:     "tool_output_openai",
+					APIKey: os.Getenv("COMPRESR_API_KEY"),
+					Model:     "toc_espresso_v1",
 					Timeout:   30 * time.Second,
 				},
 			},
@@ -970,9 +970,9 @@ func configWithExpandDisabledOpenAI() *config.Config {
 				TargetRatio:         0.2,
 				IncludeExpandHint:   false, // No hint
 				EnableExpandContext: false, // DISABLED
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint:  "",
-					APISecret: "",
+					APIKey: "",
 					Model:     "",
 					Timeout:   30 * time.Second,
 				},

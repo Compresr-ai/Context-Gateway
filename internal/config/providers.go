@@ -172,6 +172,9 @@ func (cfg *Config) ResolveProvider(providerName string) (*ResolvedProvider, erro
 func (cfg *Config) ResolvePreemptiveProvider() PreemptiveConfig {
 	resolved := cfg.Preemptive
 
+	// Always inject Compresr base URL for API strategy
+	resolved.Summarizer.CompresrBaseURL = cfg.URLs.Compresr
+
 	if resolved.Summarizer.Provider == "" {
 		return resolved // No provider reference, use inline settings
 	}

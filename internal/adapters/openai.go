@@ -705,7 +705,12 @@ func (a *OpenAIAdapter) ExtractUserQuery(body []byte) string {
 // =============================================================================
 
 // ExtractUsage extracts token usage from OpenAI API response.
-// OpenAI format: {"usage": {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}}
+// OpenAI format: {"usage": {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N,
+//
+//	"prompt_tokens_details": {"cached_tokens": N}}}
+//
+// Note: OpenAI's prompt_tokens INCLUDES cached tokens, so we normalize by subtracting
+// cached_tokens from InputTokens to match the convention that InputTokens = non-cached only.
 func (a *OpenAIAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 	if len(responseBody) == 0 {
 		return UsageInfo{}
@@ -713,19 +718,26 @@ func (a *OpenAIAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 
 	var resp struct {
 		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			TotalTokens         int `json:"total_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(responseBody, &resp); err != nil {
 		return UsageInfo{}
 	}
 
+	cachedTokens := resp.Usage.PromptTokensDetails.CachedTokens
+	nonCachedInput := resp.Usage.PromptTokens - cachedTokens
+
 	return UsageInfo{
-		InputTokens:  resp.Usage.PromptTokens,
-		OutputTokens: resp.Usage.CompletionTokens,
-		TotalTokens:  resp.Usage.TotalTokens,
+		InputTokens:          nonCachedInput,
+		OutputTokens:         resp.Usage.CompletionTokens,
+		TotalTokens:          resp.Usage.TotalTokens,
+		CacheReadInputTokens: cachedTokens,
 	}
 }
 

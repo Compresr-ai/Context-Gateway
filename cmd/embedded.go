@@ -35,6 +35,15 @@ func getEmbeddedAgent(name string) ([]byte, error) {
 	return agentsFS.ReadFile(filepath.Join("agents", name))
 }
 
+// getEmbeddedHook returns the raw bytes of an embedded hook script.
+// name can be with or without the .sh extension.
+func getEmbeddedHook(name string) ([]byte, error) {
+	if !strings.HasSuffix(name, ".sh") {
+		name += ".sh"
+	}
+	return hooksFS.ReadFile(filepath.Join("hooks", name))
+}
+
 // listEmbeddedConfigs returns the names of all embedded config files (without extension).
 func listEmbeddedConfigs() ([]string, error) {
 	entries, err := configsFS.ReadDir("configs")
@@ -67,13 +76,4 @@ func listEmbeddedAgents() ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
-}
-
-// getEmbeddedHook returns the raw bytes of an embedded hook script.
-// name can be with or without the .sh extension.
-func getEmbeddedHook(name string) ([]byte, error) {
-	if !strings.HasSuffix(name, ".sh") {
-		name += ".sh"
-	}
-	return hooksFS.ReadFile(filepath.Join("hooks", name))
 }

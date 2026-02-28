@@ -509,7 +509,7 @@ func TestGateway_CompressionFailure_FallsBackToPassthrough(t *testing.T) {
 	defer mockLLM.Close()
 
 	cfg := compressionConfig(mockCompressionAPI.URL)
-	cfg.Pipes.ToolOutput.FallbackStrategy = "passthrough"
+	cfg.Pipes.ToolOutput.FallbackStrategy = config.StrategyPassthrough
 	gw := gateway.New(cfg)
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
@@ -589,14 +589,14 @@ func compressionConfig(compressionAPIURL string) *config.Config {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            "api",
+				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    "passthrough",
 				MinBytes:            256,
 				MaxBytes:            65536,
 				TargetRatio:         0.5,
 				IncludeExpandHint:   false,
 				EnableExpandContext: false,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,
 				},

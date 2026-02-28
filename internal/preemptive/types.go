@@ -19,6 +19,12 @@ import (
 	"github.com/compresr/context-gateway/internal/adapters"
 )
 
+// Strategy constants for preemptive summarization.
+const (
+	StrategyExternalProvider = "external_provider" // Use LLM provider for summarization
+	StrategyCompresr         = "compresr"          // Use Compresr API for history compression
+)
+
 // CodexDetectorConfig for Codex detection.
 type CodexDetectorConfig struct {
 	Enabled        bool     `yaml:"enabled"`
@@ -60,10 +66,10 @@ type Config struct {
 
 // SummarizerConfig configures the summarization service.
 type SummarizerConfig struct {
-	// Strategy: "provider" (LLM) or "api" (Compresr API)
+	// Strategy: "external_provider" (LLM) or "compresr" (Compresr API with hcc_espresso_v1)
 	Strategy string `yaml:"strategy"`
 
-	// Provider reference (for strategy: "provider")
+	// Provider reference (for strategy: "external_provider")
 	// References a provider defined in the top-level "providers" section.
 	// For Bedrock, set to "bedrock" — uses SigV4 signing instead of API key.
 	Provider string `yaml:"provider,omitempty"`
@@ -79,12 +85,16 @@ type SummarizerConfig struct {
 	TokenEstimateRatio int           `yaml:"token_estimate_ratio"` // Bytes per token for estimation
 	SystemPrompt       string        `yaml:"system_prompt,omitempty"`
 
-	// API config (for strategy: "api")
-	API *APIConfig `yaml:"api,omitempty"`
+	// Compresr config (for strategy: "compresr")
+	Compresr *CompresrConfig `yaml:"compresr,omitempty"`
+
+	// CompresrBaseURL is the Compresr platform base URL (e.g., "https://api.compresr.ai").
+	// Injected from cfg.URLs.Compresr at startup — not from YAML directly.
+	CompresrBaseURL string `yaml:"-"`
 }
 
-// APIConfig for Compresr API compression.
-type APIConfig struct {
+// CompresrConfig for Compresr API compression.
+type CompresrConfig struct {
 	Endpoint string        `yaml:"endpoint"` // e.g., "/api/compress/history/"
 	APIKey   string        `yaml:"api_key"`
 	Model    string        `yaml:"model"` // e.g., "hcc_espresso_v1"
@@ -132,15 +142,15 @@ func (c *Config) Validate() error {
 
 	// Validate strategy
 	if c.Summarizer.Strategy == "" {
-		c.Summarizer.Strategy = "provider" // default to provider (backward compat)
+		c.Summarizer.Strategy = StrategyExternalProvider // default to provider (backward compat)
 	}
-	if c.Summarizer.Strategy != "provider" && c.Summarizer.Strategy != "api" {
-		return fmt.Errorf("summarizer.strategy must be 'provider' or 'api'")
+	if c.Summarizer.Strategy != StrategyExternalProvider && c.Summarizer.Strategy != StrategyCompresr {
+		return fmt.Errorf("summarizer.strategy must be 'external_provider' or 'compresr'")
 	}
 
 	// Strategy-specific validation
 	switch c.Summarizer.Strategy {
-	case "provider":
+	case StrategyExternalProvider:
 		// Model is required unless using provider reference
 		if c.Summarizer.Provider == "" && c.Summarizer.Model == "" {
 			return fmt.Errorf("summarizer.model is required (or use provider reference)")
@@ -154,22 +164,22 @@ func (c *Config) Validate() error {
 		if c.Summarizer.Timeout <= 0 {
 			return fmt.Errorf("summarizer.timeout must be positive")
 		}
-	case "api":
+	case StrategyCompresr:
 		// API config validation
-		if c.Summarizer.API == nil {
-			return fmt.Errorf("summarizer.api is required when strategy is 'api'")
+		if c.Summarizer.Compresr == nil {
+			return fmt.Errorf("summarizer.compresr is required when strategy is 'compresr'")
 		}
-		if c.Summarizer.API.Endpoint == "" {
-			return fmt.Errorf("summarizer.api.endpoint is required")
+		if c.Summarizer.Compresr.Endpoint == "" {
+			return fmt.Errorf("summarizer.compresr.endpoint is required")
 		}
-		if c.Summarizer.API.APIKey == "" {
-			return fmt.Errorf("summarizer.api.api_key is required")
+		if c.Summarizer.Compresr.APIKey == "" {
+			return fmt.Errorf("summarizer.compresr.api_key is required")
 		}
-		if c.Summarizer.API.Model == "" {
-			return fmt.Errorf("summarizer.api.model is required")
+		if c.Summarizer.Compresr.Model == "" {
+			return fmt.Errorf("summarizer.compresr.model is required")
 		}
-		if c.Summarizer.API.Timeout <= 0 {
-			return fmt.Errorf("summarizer.api.timeout must be positive")
+		if c.Summarizer.Compresr.Timeout <= 0 {
+			return fmt.Errorf("summarizer.compresr.timeout must be positive")
 		}
 	}
 
@@ -180,6 +190,21 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("session.hash_message_count must be positive")
 	}
 	return nil
+}
+
+// EffectiveModelAndProvider returns the model and provider names based on the active strategy.
+// For "compresr" strategy, model comes from API.Model and provider is "compresr_api".
+// For "external_provider" strategy, model and provider come from the inline fields.
+func (sc *SummarizerConfig) EffectiveModelAndProvider() (model, provider string) {
+	switch sc.Strategy {
+	case StrategyCompresr:
+		if sc.Compresr != nil {
+			return sc.Compresr.Model, "compresr_api"
+		}
+		return "", "compresr_api"
+	default:
+		return sc.Model, sc.Provider
+	}
 }
 
 // =============================================================================

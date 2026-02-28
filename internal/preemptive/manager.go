@@ -418,7 +418,8 @@ func (m *Manager) triggerIfNeeded(session *Session, req *request, usage float64)
 	}
 
 	log.Info().Str("session", req.sessionID).Float64("usage", usage).Int("messages", len(req.messages)).Msg("Triggering preemptive summarization")
-	logPreemptiveTrigger(req.sessionID, req.model, len(req.messages), usage, m.config.TriggerThreshold, m.config.Summarizer.Provider, m.config.Summarizer.Model)
+	summModel, summProvider := m.config.Summarizer.EffectiveModelAndProvider()
+	logPreemptiveTrigger(req.sessionID, req.model, len(req.messages), usage, m.config.TriggerThreshold, summProvider, summModel)
 
 	m.worker.Submit(req.sessionID, req.messages, req.model, JobAuthParams{
 		Token:     req.authToken,
@@ -500,7 +501,7 @@ func logCompactionDetected(sessionID, model string, detection DetectionResult) {
 
 func logCompactionApplied(sessionID, model string, wasPrecomputed bool, result *summaryResult) {
 	if l := GetCompactionLogger(); l != nil {
-		l.LogCompactionApplied(sessionID, model, wasPrecomputed, result.lastIndex+1, result.tokens, 0, nil)
+		l.LogCompactionApplied(sessionID, model, wasPrecomputed, result.lastIndex+1, result.tokens, 0, nil, result.summary)
 	}
 }
 

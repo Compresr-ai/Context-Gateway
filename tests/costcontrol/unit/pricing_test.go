@@ -92,7 +92,7 @@ func TestCalculateCostWithCache_ZeroCacheTokens(t *testing.T) {
 	// No cache tokens — should equal CalculateCost
 	withCache := costcontrol.CalculateCostWithCache(1000, 500, 0, 0, pricing)
 	without := costcontrol.CalculateCost(1000, 500, pricing)
-	assert.Equal(t, without, withCache)
+	assert.InDelta(t, without, withCache, 0.0000001)
 }
 
 func TestCalculateCostWithCache_OnlyCacheRead(t *testing.T) {

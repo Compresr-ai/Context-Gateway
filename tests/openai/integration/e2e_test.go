@@ -807,17 +807,17 @@ func compressionConfigOpenAI() *config.Config {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            "api",
+				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    "passthrough",
 				MinBytes:            500,
 				MaxBytes:            65536,
 				TargetRatio:         0.3,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true,
-				API: config.APIConfig{
+				Compresr: config.CompresrConfig{
 					Endpoint:  os.Getenv("COMPRESR_API_URL") + "/api/compress/tool-output",
-					APISecret: os.Getenv("COMPRESR_API_KEY"),
-					Model:     "tool_output_openai",
+					APIKey: os.Getenv("COMPRESR_API_KEY"),
+					Model:     "toc_espresso_v1",
 					Timeout:   30 * time.Second,
 				},
 			},

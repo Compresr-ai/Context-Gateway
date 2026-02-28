@@ -24,6 +24,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/utils"
 )
 
@@ -250,20 +251,20 @@ func (h *SearchToolHandler) HandleCalls(calls []PhantomToolCall, isAnthropic boo
 // resolveMatches picks search backend by strategy.
 func (h *SearchToolHandler) resolveMatches(deferred []adapters.ExtractedContent, query string) []adapters.ExtractedContent {
 	switch h.strategy {
-	case "tool-search":
+	case config.StrategyToolSearch:
 		// Local regex-based search
 		return h.searchByRegex(deferred, query)
-	case "api":
+	case config.StrategyCompresr:
 		if h.apiEndpoint == "" {
-			h.recordAPIFallback(query, "missing_api_endpoint", "api endpoint is empty", len(deferred), len(deferred))
-			log.Warn().Msg("search_tool(api): api endpoint is empty, restoring all deferred tools")
+			h.recordAPIFallback(query, "missing_api_endpoint", "compresr endpoint is empty", len(deferred), len(deferred))
+			log.Warn().Msg("search_tool(compresr): compresr endpoint is empty, restoring all deferred tools")
 			return deferred
 		}
 
 		result, err := h.searchViaAPI(deferred, query)
 		if err != nil {
 			h.recordAPIFallback(query, "api_error", err.Error(), len(deferred), len(deferred))
-			log.Warn().Err(err).Msg("search_tool(api): API failed, restoring all deferred tools")
+			log.Warn().Err(err).Msg("search_tool(compresr): API failed, restoring all deferred tools")
 			return deferred
 		}
 		if !result.Meaningful {
@@ -271,7 +272,7 @@ func (h *SearchToolHandler) resolveMatches(deferred []adapters.ExtractedContent,
 			log.Warn().
 				Str("reason", result.Reason).
 				Str("detail", result.Detail).
-				Msg("search_tool(api): API returned non-meaningful selection, restoring all deferred tools")
+				Msg("search_tool(compresr): API returned non-meaningful selection, restoring all deferred tools")
 			return deferred
 		}
 		return result.Matches

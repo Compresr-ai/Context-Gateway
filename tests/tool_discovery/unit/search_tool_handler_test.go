@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/gateway"
 )
 
@@ -27,7 +28,7 @@ func TestSearchToolHandler_APINonMeaningfulFallbackKeepsAllTools(t *testing.T) {
 	}
 
 	h := gateway.NewSearchToolHandler("gateway_search_tools", 5, nil, gateway.SearchToolHandlerOptions{
-		Strategy:    "api",
+		Strategy:    config.StrategyCompresr,
 		APIEndpoint: server.URL,
 	})
 	h.SetRequestContext("session-1", deferred)
@@ -70,7 +71,7 @@ func TestSearchToolHandler_APIMeaningfulSelection(t *testing.T) {
 	}
 
 	h := gateway.NewSearchToolHandler("gateway_search_tools", 5, nil, gateway.SearchToolHandlerOptions{
-		Strategy:    "api",
+		Strategy:    config.StrategyCompresr,
 		APIEndpoint: server.URL,
 	})
 	h.SetRequestContext("session-1", deferred)
@@ -96,7 +97,7 @@ func TestSearchToolHandler_APIEmptyQueryFallbackKeepsAllTools(t *testing.T) {
 	}
 
 	h := gateway.NewSearchToolHandler("gateway_search_tools", 5, nil, gateway.SearchToolHandlerOptions{
-		Strategy:    "api",
+		Strategy:    config.StrategyCompresr,
 		APIEndpoint: "https://example.com/v1/tool-discovery/search",
 	})
 	h.SetRequestContext("session-1", deferred)

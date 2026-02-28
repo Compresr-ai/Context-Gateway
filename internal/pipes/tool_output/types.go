@@ -16,12 +16,12 @@
 package tooloutput
 
 import (
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
+	"github.com/compresr/context-gateway/internal/pipes"
 	"github.com/compresr/context-gateway/internal/store"
 	"github.com/rs/zerolog/log"
 )
@@ -75,15 +75,15 @@ type Pipe struct {
 	enableExpandContext bool    // Enable expand_context feature (tool injection, hint, expand loop)
 	store               store.Store
 
-	// Compresr API client (used when strategy=api)
+	// Compresr API client (used when strategy=compresr)
 	compresrClient *compresr.Client
 
-	// API strategy config (strategy=api or strategy=external_provider)
-	apiEndpoint      string
-	apiKey           string
-	apiModel         string
-	apiTimeout       time.Duration
-	apiQueryAgnostic bool // If true, don't send user query. If false, send query for relevance
+	// Compresr strategy config (strategy=compresr or strategy=external_provider)
+	compresrEndpoint      string
+	compresrKey           string
+	compresrModel         string
+	compresrTimeout       time.Duration
+	compresrQueryAgnostic bool // If true, don't send user query. If false, send query for relevance
 
 	// V2: Rate limiting (C11)
 	maxConcurrent int
@@ -176,35 +176,31 @@ func minFloat(a, b float64) float64 {
 // V2: Initializes rate limiting, metrics, and dual-TTL caching.
 func New(cfg *config.Config, st store.Store) *Pipe {
 	// Resolve provider settings (endpoint, api_key, model) from providers section
-	var apiEndpoint, apiKey, apiModel string
+	var compresrEndpoint, compresrKey, compresrModel string
 	if cfg.Pipes.ToolOutput.Provider != "" {
 		if resolved, err := cfg.ResolveProvider(cfg.Pipes.ToolOutput.Provider); err == nil {
-			apiEndpoint = resolved.Endpoint
-			apiKey = resolved.APIKey
-			apiModel = resolved.Model
+			compresrEndpoint = resolved.Endpoint
+			compresrKey = resolved.APIKey
+			compresrModel = resolved.Model
 		} else {
 			log.Warn().Err(err).Str("provider", cfg.Pipes.ToolOutput.Provider).
-				Msg("tool_output: failed to resolve provider, falling back to inline API config")
+				Msg("tool_output: failed to resolve provider, falling back to inline compresr config")
 		}
 	}
 
-	// Inline API config overrides provider settings
-	if cfg.Pipes.ToolOutput.API.Endpoint != "" {
+	// Inline compresr config overrides provider settings
+	if cfg.Pipes.ToolOutput.Compresr.Endpoint != "" {
 		if cfg.Pipes.ToolOutput.Strategy == config.StrategyExternalProvider {
-			apiEndpoint = cfg.Pipes.ToolOutput.API.Endpoint
+			compresrEndpoint = cfg.Pipes.ToolOutput.Compresr.Endpoint
 		} else {
-			apiEndpoint = cfg.URLs.Compresr + cfg.Pipes.ToolOutput.API.Endpoint
-			// Clean up double slashes (except in http://)
-			apiEndpoint = strings.Replace(apiEndpoint, "://", "::SCHEME::", 1)
-			apiEndpoint = strings.ReplaceAll(apiEndpoint, "//", "/")
-			apiEndpoint = strings.Replace(apiEndpoint, "::SCHEME::", "://", 1)
+			compresrEndpoint = pipes.NormalizeEndpointURL(cfg.URLs.Compresr, cfg.Pipes.ToolOutput.Compresr.Endpoint)
 		}
 	}
-	if cfg.Pipes.ToolOutput.API.APISecret != "" {
-		apiKey = cfg.Pipes.ToolOutput.API.APISecret
+	if cfg.Pipes.ToolOutput.Compresr.APIKey != "" {
+		compresrKey = cfg.Pipes.ToolOutput.Compresr.APIKey
 	}
-	if cfg.Pipes.ToolOutput.API.Model != "" {
-		apiModel = cfg.Pipes.ToolOutput.API.Model
+	if cfg.Pipes.ToolOutput.Compresr.Model != "" {
+		compresrModel = cfg.Pipes.ToolOutput.Compresr.Model
 	}
 
 	// Use config fields with sensible defaults
@@ -220,7 +216,7 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 
 	targetRatio := cfg.Pipes.ToolOutput.TargetRatio
 	if targetRatio == 0 {
-		targetRatio = 0.5 // default: compress to 50%
+		targetRatio = 0.9 // default: discard compression if savings < 10%
 	}
 
 	fallbackStrategy := cfg.Pipes.ToolOutput.FallbackStrategy
@@ -245,10 +241,10 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 	// Store skip categories from config
 	skipCategories := cfg.Pipes.ToolOutput.SkipTools
 
-	// API timeout default
-	apiTimeout := cfg.Pipes.ToolOutput.API.Timeout
-	if apiTimeout == 0 {
-		apiTimeout = 30 * time.Second
+	// Compresr timeout default
+	compresrTimeout := cfg.Pipes.ToolOutput.Compresr.Timeout
+	if compresrTimeout == 0 {
+		compresrTimeout = 30 * time.Second
 	}
 
 	p := &Pipe{
@@ -262,12 +258,12 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 		enableExpandContext: cfg.Pipes.ToolOutput.EnableExpandContext,
 		store:               st,
 
-		// API strategy config (used by both api and external_provider strategies)
-		apiEndpoint:      apiEndpoint,
-		apiKey:           apiKey,
-		apiModel:         apiModel,
-		apiTimeout:       apiTimeout,
-		apiQueryAgnostic: cfg.Pipes.ToolOutput.API.QueryAgnostic,
+		// Compresr strategy config (used by both compresr and external_provider strategies)
+		compresrEndpoint:      compresrEndpoint,
+		compresrKey:           compresrKey,
+		compresrModel:         compresrModel,
+		compresrTimeout:       compresrTimeout,
+		compresrQueryAgnostic: cfg.Pipes.ToolOutput.Compresr.QueryAgnostic,
 
 		// V2: Rate limiting
 		maxConcurrent: maxConcurrent,
@@ -283,16 +279,16 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 		skipCategories: skipCategories,
 	}
 
-	// Initialize Compresr client when strategy is 'api'
-	if cfg.Pipes.ToolOutput.Strategy == config.StrategyAPI {
+	// Initialize Compresr client when strategy is 'compresr'
+	if cfg.Pipes.ToolOutput.Strategy == config.StrategyCompresr {
 		// Use Compresr base URL from config, or fall back to default
 		baseURL := cfg.URLs.Compresr
-		p.compresrClient = compresr.NewClient(baseURL, apiKey, compresr.WithTimeout(apiTimeout))
-		log.Info().Str("base_url", baseURL).Str("model", apiModel).Dur("timeout", apiTimeout).Msg("tool_output: initialized Compresr client for API strategy")
+		p.compresrClient = compresr.NewClient(baseURL, compresrKey, compresr.WithTimeout(compresrTimeout))
+		log.Info().Str("base_url", baseURL).Str("model", compresrModel).Dur("timeout", compresrTimeout).Msg("tool_output: initialized Compresr client for compresr strategy")
 	}
 
 	// Log warning if no API key configured (will rely on captured Bearer token from requests)
-	if p.apiKey == "" && cfg.Pipes.ToolOutput.Strategy == config.StrategyExternalProvider {
+	if p.compresrKey == "" && cfg.Pipes.ToolOutput.Strategy == config.StrategyExternalProvider {
 		log.Info().Msg("tool_output: no API key configured, will use captured Bearer token from incoming requests")
 	}
 	if len(skipCategories) > 0 {
@@ -340,7 +336,7 @@ func (p *Pipe) IsIdempotent(toolName string) bool {
 // Query-agnostic models (LLM/cmprsr) don't need the user query.
 // Query-dependent models (reranker) need the user query for relevance scoring.
 func (p *Pipe) IsQueryAgnostic() bool {
-	return p.apiQueryAgnostic
+	return p.compresrQueryAgnostic
 }
 
 // compressionTask holds data for parallel compression

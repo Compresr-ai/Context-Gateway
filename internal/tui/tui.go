@@ -79,6 +79,17 @@ func PrintStep(msg string) {
 	fmt.Printf("%s>>>%s %s\n", ColorCyan, ColorReset, msg)
 }
 
+// SetTerminalTitle sets the terminal window/tab title using OSC escape sequence.
+// This persists across scrolling, keeping status info always visible.
+func SetTerminalTitle(title string) {
+	fmt.Printf("\033]0;%s\007", title)
+}
+
+// ClearTerminalTitle resets the terminal title to default.
+func ClearTerminalTitle() {
+	fmt.Print("\033]0;\007")
+}
+
 // =============================================================================
 // MENU SELECTION
 // =============================================================================

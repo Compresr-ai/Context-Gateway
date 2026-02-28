@@ -14,6 +14,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/auth"
+	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/costcontrol"
 	"github.com/compresr/context-gateway/internal/monitoring"
@@ -45,6 +47,7 @@ const (
 const (
 	MaxRequestBodySize     = config.MaxRequestBodySize
 	MaxResponseSize        = config.MaxResponseSize
+	MaxStreamBufferSize    = config.MaxStreamBufferSize
 	DefaultRateLimit       = config.DefaultRateLimit
 	MaxRateLimitBuckets    = config.MaxRateLimitBuckets
 	DefaultBufferSize      = config.DefaultBufferSize
@@ -143,6 +146,7 @@ type Gateway struct {
 	router      *Router
 	store       store.Store
 	tracker     *monitoring.Tracker
+	savings     *monitoring.SavingsTracker // Real-time compression savings
 	trajectory  *monitoring.TrajectoryManager
 	httpClient  *http.Client
 	server      *http.Server
@@ -167,11 +171,29 @@ type Gateway struct {
 	// AWS Bedrock support
 	bedrockSigner *BedrockSigner
 
+	// Expand context log (in-memory ring buffer for dashboard)
+	expandLog *monitoring.ExpandLog
+
 	// Logging components
 	logger        *monitoring.Logger
 	requestLogger *monitoring.RequestLogger
 	metrics       *monitoring.MetricsCollector
 	alerts        *monitoring.AlertManager
+
+	// Optional status reporter (CLI display)
+	statusReporter StatusReporter
+
+	// Embedded dashboard SPA (optional, set via SetDashboardFS)
+	dashboardFS http.Handler
+
+	// Compresr API client for account status (optional)
+	compresrClient *compresr.Client
+}
+
+// StatusReporter allows the gateway to update a CLI status display.
+type StatusReporter interface {
+	IncrementRequests()
+	MaybeRefreshCompact() bool
 }
 
 // New creates a new gateway.
@@ -270,25 +292,28 @@ func New(cfg *config.Config) *Gateway {
 	}
 
 	g := &Gateway{
-		config:        cfg,
-		registry:      registry,
-		router:        r,
-		store:         st,
-		tracker:       tracker,
-		trajectory:    trajectoryMgr,
-		expander:      tooloutput.NewExpander(st, tracker), // Legacy for streaming
-		httpClient:    &http.Client{Timeout: clientTimeout, Transport: transport},
-		rateLimiter:   newRateLimiter(DefaultRateLimit),
-		costTracker:   costcontrol.NewTracker(cfg.CostControl),
-		preemptive:    preemptive.NewManager(cfg.ResolvePreemptiveProviderWithLogging(cfg.Monitoring.TelemetryEnabled)),
-		toolSessions:  toolSessions,
-		authMode:      newAuthFallbackStore(time.Hour),
-		authRegistry:  authRegistry,
-		bedrockSigner: bedrockSigner,
-		logger:        logger,
-		requestLogger: requestLogger,
-		metrics:       metrics,
-		alerts:        alerts,
+		config:         cfg,
+		registry:       registry,
+		router:         r,
+		store:          st,
+		tracker:        tracker,
+		savings:        monitoring.NewSavingsTracker(),
+		trajectory:     trajectoryMgr,
+		expander:       tooloutput.NewExpander(st, tracker), // Legacy for streaming
+		httpClient:     &http.Client{Timeout: clientTimeout, Transport: transport},
+		rateLimiter:    newRateLimiter(DefaultRateLimit),
+		costTracker:    costcontrol.NewTracker(cfg.CostControl),
+		preemptive:     preemptive.NewManager(cfg.ResolvePreemptiveProviderWithLogging(cfg.Monitoring.TelemetryEnabled)),
+		toolSessions:   toolSessions,
+		authMode:       newAuthFallbackStore(time.Hour),
+		authRegistry:   authRegistry,
+		bedrockSigner:  bedrockSigner,
+		expandLog:      monitoring.NewExpandLog(),
+		logger:         logger,
+		requestLogger:  requestLogger,
+		metrics:        metrics,
+		alerts:         alerts,
+		compresrClient: compresr.NewClient("", ""), // Uses env vars COMPRESR_BASE_URL, COMPRESR_API_KEY
 	}
 
 	mux := http.NewServeMux()
@@ -315,18 +340,42 @@ func New(cfg *config.Config) *Gateway {
 	return g
 }
 
+// CostTracker returns the gateway's cost tracker (for CLI status display).
+func (g *Gateway) CostTracker() *costcontrol.Tracker {
+	return g.costTracker
+}
+
+// SavingsTracker returns the gateway's savings tracker (for CLI summary display).
+func (g *Gateway) SavingsTracker() *monitoring.SavingsTracker {
+	return g.savings
+}
+
+// SetStatusReporter attaches a status reporter for CLI usage display.
+func (g *Gateway) SetStatusReporter(sr StatusReporter) {
+	g.statusReporter = sr
+}
+
+// SetDashboardFS sets the embedded filesystem for the React cost dashboard SPA.
+func (g *Gateway) SetDashboardFS(fsys fs.FS) {
+	g.dashboardFS = http.FileServerFS(fsys)
+}
+
 // setupRoutes configures the HTTP routes for the gateway.
 func (g *Gateway) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", g.handleHealth)
 	mux.HandleFunc("/expand", g.handleExpand)
-	mux.HandleFunc("/costs", g.handleCostDashboard)
+	mux.HandleFunc("/api/dashboard", g.handleDashboardAPI)
+	mux.HandleFunc("/api/account", g.handleAccountAPI)
+	mux.HandleFunc("/costs", g.handleCostDashboard)  // exact match, redirects to /costs/
+	mux.HandleFunc("/costs/", g.handleCostDashboard) // prefix match for SPA + assets
+	mux.HandleFunc("/stats", g.handleStats)
 	mux.HandleFunc("/", g.handleProxy)
 }
 
 // Start starts the gateway.
 func (g *Gateway) Start() error {
 	log.Info().Int("port", g.config.Server.Port).Msg("gateway starting")
-	log.Info().Str("url", fmt.Sprintf("http://localhost:%d/costs", g.config.Server.Port)).Msg("cost dashboard")
+	log.Info().Str("url", fmt.Sprintf("http://localhost:%d/costs/", g.config.Server.Port)).Msg("cost dashboard")
 	return g.server.ListenAndServe()
 }
 
@@ -358,6 +407,11 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	// Stop metrics collector
 	if g.metrics != nil {
 		g.metrics.Stop()
+	}
+
+	// Stop savings tracker cleanup goroutine
+	if g.savings != nil {
+		g.savings.Stop()
 	}
 
 	// Close all trajectory trackers (writes final trajectory files per session)

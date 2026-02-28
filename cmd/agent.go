@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/gateway"
 	"github.com/compresr/context-gateway/internal/preemptive"
@@ -27,11 +28,13 @@ func runAgentCommand(args []string) {
 	// Parse flags
 	var (
 		configFlag      string
+		showConfigMenu  bool
 		debugFlag       bool
 		portFlag        string
 		proxyMode       string
 		logDir          string
 		listFlag        bool
+		resetAPIKeyFlag bool
 		agentArg        string
 		passthroughArgs []string
 	)
@@ -50,12 +53,13 @@ parseLoop:
 			listFlag = true
 			i++
 		case "-c", "--config":
-			if i+1 < len(args) {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				configFlag = args[i+1]
 				i += 2
 			} else {
-				fmt.Fprintln(os.Stderr, "Error: --config requires a value")
-				os.Exit(1)
+				// -c without value → show config management menu
+				showConfigMenu = true
+				i++
 			}
 		case "-d", "--debug":
 			debugFlag = true
@@ -76,6 +80,9 @@ parseLoop:
 				fmt.Fprintln(os.Stderr, "Error: --proxy requires a value")
 				os.Exit(1)
 			}
+		case "--reset-api-key":
+			resetAPIKeyFlag = true
+			i++
 		case "--":
 			passthroughArgs = args[i+1:]
 			break parseLoop
@@ -92,10 +99,20 @@ parseLoop:
 	// Load .env files
 	loadEnvFiles()
 
+	// Handle --reset-api-key flag
+	if resetAPIKeyFlag {
+		printBanner()
+		if !resetCompresrAPIKey() {
+			os.Exit(1)
+		}
+		// Continue with normal flow after reset
+	}
+
 	// Find available port early so ${GATEWAY_PORT} expands correctly in agent configs
 	// Port range: 18080-18089 (max 10 concurrent terminals)
 	basePort := 18080
 	maxPorts := 10
+
 	var gatewayPort int
 
 	if portFlag != "" {
@@ -128,9 +145,19 @@ parseLoop:
 		return
 	}
 
-	// =============================================================================
-	// STEP 1: AGENT SELECTION
-	// =============================================================================
+	// Handle --config list (doesn't require API key)
+	if configFlag == "list" {
+		listAvailableConfigsPrint()
+		return
+	}
+
+	// Check if this is first run (no Compresr API key set)
+	if !isCompresrAPIKeySet() {
+		if !runCompresrOnboarding() {
+			// User cancelled onboarding
+			os.Exit(0)
+		}
+	}
 
 	var ac *AgentConfig
 	var configData []byte
@@ -175,7 +202,7 @@ mainSelectionLoop:
 				Value: "__exit__",
 			})
 
-			idx, selectErr := tui.SelectMenu("Step 1: Select Agent", agentMenuItems)
+			idx, selectErr := tui.SelectMenu("Select Agent", agentMenuItems)
 			if selectErr != nil {
 				os.Exit(0)
 			}
@@ -202,95 +229,92 @@ mainSelectionLoop:
 			os.Exit(1)
 		}
 
-		// =============================================================================
-		// STEP 2: CONFIG SELECTION
-		// =============================================================================
+		if proxyMode != "skip" && showConfigMenu && configFlag == "" {
+		configSelectionLoop:
+			for {
+				configs := listAvailableConfigs()
 
-	configSelectionLoop:
-		for proxyMode != "skip" && configFlag == "" {
-			configs := listAvailableConfigs()
-
-			// Build menu: existing configs + create new + delete + back
-			configMenuItems := []tui.MenuItem{}
-			for _, c := range configs {
-				desc := ""
-				if isUserConfig(c) {
-					desc = "custom"
-				} else {
-					desc = "predefined"
+				// Build menu: existing configs + create new + edit + delete + back
+				configMenuItems := []tui.MenuItem{}
+				for _, c := range configs {
+					desc := ""
+					if isUserConfig(c) {
+						desc = "custom"
+					} else {
+						desc = "predefined"
+					}
+					configMenuItems = append(configMenuItems, tui.MenuItem{Label: c, Description: desc, Value: c})
 				}
-				configMenuItems = append(configMenuItems, tui.MenuItem{Label: c, Description: desc, Value: c})
-			}
-			configMenuItems = append(configMenuItems, tui.MenuItem{
-				Label:       "[+] Create new configuration",
-				Description: "custom compression settings",
-				Value:       "__create_new__",
-			})
-			// Edit available for all configs
-			configMenuItems = append(configMenuItems, tui.MenuItem{
-				Label:       "[✎] Edit configuration",
-				Description: "modify any config",
-				Value:       "__edit__",
-			})
-			// Delete only for custom configs
-			if hasUserConfigs() {
 				configMenuItems = append(configMenuItems, tui.MenuItem{
-					Label:       "[-] Delete configuration",
-					Description: "remove custom config",
-					Value:       "__delete__",
+					Label:       "[+] Create new configuration",
+					Description: "custom compression settings",
+					Value:       "__create_new__",
 				})
-			}
-			configMenuItems = append(configMenuItems, tui.MenuItem{
-				Label: "← Back",
-				Value: "__back__",
-			})
+				configMenuItems = append(configMenuItems, tui.MenuItem{
+					Label:       "[\u270e] Edit configuration",
+					Description: "modify any config",
+					Value:       "__edit__",
+				})
+				if hasUserConfigs() {
+					configMenuItems = append(configMenuItems, tui.MenuItem{
+						Label:       "[-] Delete configuration",
+						Description: "remove custom config",
+						Value:       "__delete__",
+					})
+				}
+				configMenuItems = append(configMenuItems, tui.MenuItem{
+					Label: "\u2190 Back",
+					Value: "__back__",
+				})
 
-			idx, selectErr := tui.SelectMenu("Step 2: Select Configuration", configMenuItems)
-			if selectErr != nil {
-				os.Exit(0)
-			}
+				idx, selectErr := tui.SelectMenu("Select Configuration", configMenuItems)
+				if selectErr != nil {
+					os.Exit(0)
+				}
 
-			selectedValue := configMenuItems[idx].Value
+				selectedValue := configMenuItems[idx].Value
 
-			if selectedValue == "__back__" {
-				// Go back to Step 1
-				agentArg = ""                 // Reset agent selection
-				fmt.Print("\033[1A\033[2K\r") // Clear confirmation line
-				continue mainSelectionLoop
-			}
+				if selectedValue == "__back__" {
+					agentArg = ""
+					fmt.Print("\033[1A\033[2K\r")
+					continue mainSelectionLoop
+				}
 
-			if selectedValue == "__delete__" {
-				// Show delete menu
-				deleteConfig()
-				fmt.Print("\033[1A\033[2K\r") // Clear confirmation line
-				continue configSelectionLoop
-			}
-
-			if selectedValue == "__edit__" {
-				// Show edit menu
-				editConfig(agentArg)
-				fmt.Print("\033[1A\033[2K\r") // Clear confirmation line
-				continue configSelectionLoop
-			}
-
-			if selectedValue == "__create_new__" {
-				// User chose to create new config - go to Step 3
-				configFlag = runConfigCreationWizard(agentArg, ac)
-				if configFlag == "__back__" {
-					configFlag = "" // Reset and loop back to config selection
-					// Clear the "← Back" confirmation line before re-showing menu
+				if selectedValue == "__delete__" {
+					deleteConfig()
 					fmt.Print("\033[1A\033[2K\r")
 					continue configSelectionLoop
 				}
-				if configFlag == "" {
-					os.Exit(0) // User cancelled
+
+				if selectedValue == "__edit__" {
+					editConfig(agentArg)
+					fmt.Print("\033[1A\033[2K\r")
+					continue configSelectionLoop
 				}
-				createdNewConfig = true // Config wizard already handled API key/auth setup
-			} else {
-				configFlag = configs[idx]
+
+				if selectedValue == "__create_new__" {
+					configFlag = runConfigCreationWizard(agentArg, ac)
+					if configFlag == "__back__" {
+						configFlag = ""
+						fmt.Print("\033[1A\033[2K\r")
+						continue configSelectionLoop
+					}
+					if configFlag == "" {
+						os.Exit(0)
+					}
+					createdNewConfig = true
+				} else {
+					configFlag = configs[idx]
+				}
+				break configSelectionLoop
 			}
-			break configSelectionLoop
 		}
+
+		// Default path: no -c flag → auto-use fast_setup
+		if proxyMode != "skip" && configFlag == "" {
+			configFlag = "fast_setup"
+		}
+
 		break mainSelectionLoop
 	}
 
@@ -303,19 +327,11 @@ mainSelectionLoop:
 		}
 	}
 
-	// =============================================================================
-	// STEP 4: API KEY SETUP (if needed, skip if wizard handled it)
-	// =============================================================================
-
 	if !createdNewConfig {
 		if !setupAnthropicAPIKey(agentArg) {
 			os.Exit(1)
 		}
 	}
-
-	// =============================================================================
-	// STEP 5: START GATEWAY
-	// =============================================================================
 
 	// Export agent environment variables
 	exportAgentEnv(ac)
@@ -324,10 +340,8 @@ mainSelectionLoop:
 	// Each agent invocation gets its own session directory for logs
 	var gw *gateway.Gateway
 	var sessionDir string
+	var statusBar *tui.StatusBar
 	if proxyMode != "skip" && configData != nil {
-		fmt.Println()
-		printHeader("Starting Gateway")
-
 		// gatewayPort was already found early (before agent config loading)
 		// Verify it's still available (unlikely to change but be safe)
 		if isPortInUse(gatewayPort) {
@@ -379,7 +393,6 @@ mainSelectionLoop:
 
 		printSuccess("Agent Session: " + filepath.Base(sessionDir))
 		printInfo(fmt.Sprintf("Gateway port: %d", gatewayPort))
-		printInfo(fmt.Sprintf("Cost dashboard: http://localhost:%d/costs", gatewayPort))
 
 		// Save a copy of the config used for this session (do this regardless of gateway reuse)
 		if sessionDir != "" && len(configData) > 0 {
@@ -440,6 +453,11 @@ mainSelectionLoop:
 
 		gw = gateway.New(cfg)
 
+		// Attach embedded React dashboard SPA
+		if dashFS, err := getDashboardFS(); err == nil {
+			gw.SetDashboardFS(dashFS)
+		}
+
 		// Re-assert our logging setup in case monitoring.Global() overrode it
 		// (e.g. if the log file couldn't be opened and it fell back to stdout)
 		setupLogging(debugFlag, gatewayLogFile)
@@ -469,25 +487,33 @@ mainSelectionLoop:
 			printSuccess(fmt.Sprintf("Gateway ready on port %d", gatewayPort))
 		}
 
+		// Display usage status bar (if API key is configured)
+		statusBar = showGatewayStatusBar(gatewayPort, filepath.Base(sessionDir), gw.CostTracker())
+		if gw != nil && statusBar != nil {
+			gw.SetStatusReporter(statusBar)
+			statusBar.SetSavingsSource(gw.SavingsTracker())
+		}
+
 		// Log the config used for this session (use resolved config to get inherited model)
 		resolvedPreemptive := cfg.ResolvePreemptiveProvider()
+		summModel, summProvider := resolvedPreemptive.Summarizer.EffectiveModelAndProvider()
 		preemptive.LogSessionConfig(
 			configFlag,
 			configSource,
-			resolvedPreemptive.Summarizer.Provider,
-			resolvedPreemptive.Summarizer.Model,
+			summProvider,
+			summModel,
 		)
 	} else if proxyMode == "skip" {
 		printInfo("Skipping gateway (--proxy skip)")
 	}
 
 	// OpenClaw special handling
+	// Model selection is delegated to OpenClaw's own TUI — we just use the default
+	// model for the proxy config. Calling selectModelInteractive here caused a freeze
+	// because the status bar was already running and competing for terminal control.
 	var openclawCmd *exec.Cmd
 	if agentArg == "openclaw" {
-		fmt.Println()
-		printHeader("Step 2: OpenClaw Model Selection")
-
-		selectedModel := selectModelInteractive(ac)
+		selectedModel := ac.Agent.DefaultModel
 
 		if proxyMode == "skip" {
 			createOpenClawConfigDirect(selectedModel)
@@ -497,10 +523,6 @@ mainSelectionLoop:
 
 		openclawCmd = startOpenClawGateway()
 	}
-
-	// Start agent
-	fmt.Println()
-	printHeader("Step 3: Start Agent")
 
 	displayName := ac.Agent.DisplayName
 	if displayName == "" {
@@ -575,7 +597,65 @@ mainSelectionLoop:
 		_ = gw.Shutdown(ctx)
 	}
 
-	if sessionDir != "" {
-		fmt.Printf("\n\033[0;36mSession logs: %s\033[0m\n\n", sessionDir)
+	// Reset terminal title
+	tui.ClearTerminalTitle()
+
+	// Show session summary with actual spend
+	fmt.Println()
+	if statusBar != nil {
+		statusBar.StopAutoRefresh()
 	}
+	printHeader("Session Summary")
+	if statusBar != nil {
+		_ = statusBar.Refresh() // Get latest credits
+		statusBar.RenderSummary()
+	} else if gw != nil {
+		cost := gw.CostTracker().GetGlobalCost()
+		printInfo(fmt.Sprintf("Session spend: $%.4f", cost))
+	}
+
+	if sessionDir != "" {
+		fmt.Printf("\033[0;36mSession logs: %s\033[0m\n\n", sessionDir)
+	}
+}
+
+// showGatewayStatusBar displays the usage/balance status bar at startup
+// and sets the terminal title with persistent status info.
+func showGatewayStatusBar(port int, session string, costSource tui.CostSource) *tui.StatusBar {
+	apiKey := os.Getenv("COMPRESR_API_KEY")
+	if apiKey == "" {
+		// No API key configured, set basic title only
+		tui.SetTerminalTitle(fmt.Sprintf("Context Gateway | :%d", port))
+		return nil
+	}
+
+	baseURL := os.Getenv("COMPRESR_BASE_URL")
+	if baseURL == "" {
+		baseURL = config.DefaultCompresrAPIBaseURL
+	}
+
+	client := compresr.NewClient(baseURL, apiKey)
+	statusBar := tui.NewStatusBar(client)
+	statusBar.SetDashboardPort(port)
+	statusBar.EnableFooter(true)
+
+	// Wire cost source before rendering so the box includes local spend
+	if costSource != nil {
+		statusBar.SetCostSource(costSource)
+	}
+
+	// Fetch and display status (non-blocking on error)
+	if err := statusBar.Refresh(); err != nil {
+		// API failed — still render cost box if available
+		statusBar.RenderBox()
+		tui.SetTerminalTitle(fmt.Sprintf("Context Gateway | :%d", port))
+		return statusBar
+	}
+
+	statusBar.RenderBox()
+
+	// Set terminal title with persistent status info
+	tui.SetTerminalTitle(statusBar.FormatTitleStatus(port, session))
+	statusBar.StartAutoRefresh(tui.AutoRefreshInterval)
+	return statusBar
 }

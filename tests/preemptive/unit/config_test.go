@@ -153,6 +153,132 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 // =============================================================================
+// API STRATEGY CONFIG VALIDATION (hcc_espresso_v1 via Compresr API)
+// =============================================================================
+
+func TestConfig_Validate_ValidAPIStrategy(t *testing.T) {
+	cfg := preemptive.Config{
+		Enabled:          true,
+		TriggerThreshold: 85.0,
+		Summarizer: preemptive.SummarizerConfig{
+			Strategy: preemptive.StrategyCompresr,
+			Compresr: &preemptive.CompresrConfig{
+				Endpoint: "/api/compress/history/",
+				APIKey:   "cmp_test-key",
+				Model:    "hcc_espresso_v1",
+				Timeout:  60 * time.Second,
+			},
+		},
+		Session: preemptive.SessionConfig{
+			SummaryTTL:       3 * time.Hour,
+			HashMessageCount: 3,
+		},
+	}
+
+	err := cfg.Validate()
+	assert.NoError(t, err)
+	assert.Equal(t, preemptive.StrategyCompresr, cfg.Summarizer.Strategy)
+}
+
+func TestConfig_Validate_APIStrategyMissingConfig(t *testing.T) {
+	cfg := validConfig()
+	cfg.Summarizer = preemptive.SummarizerConfig{
+		Strategy: preemptive.StrategyCompresr,
+		Compresr: nil,
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "summarizer.compresr is required")
+}
+
+func TestConfig_Validate_APIStrategyMissingEndpoint(t *testing.T) {
+	cfg := validConfig()
+	cfg.Summarizer = preemptive.SummarizerConfig{
+		Strategy: preemptive.StrategyCompresr,
+		Compresr: &preemptive.CompresrConfig{
+			Endpoint: "",
+			APIKey:   "cmp_test-key",
+			Model:    "hcc_espresso_v1",
+			Timeout:  60 * time.Second,
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "endpoint")
+}
+
+func TestConfig_Validate_APIStrategyMissingAPIKey(t *testing.T) {
+	cfg := validConfig()
+	cfg.Summarizer = preemptive.SummarizerConfig{
+		Strategy: preemptive.StrategyCompresr,
+		Compresr: &preemptive.CompresrConfig{
+			Endpoint: "/api/compress/history/",
+			APIKey:   "",
+			Model:    "hcc_espresso_v1",
+			Timeout:  60 * time.Second,
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "api_key")
+}
+
+func TestConfig_Validate_APIStrategyMissingModel(t *testing.T) {
+	cfg := validConfig()
+	cfg.Summarizer = preemptive.SummarizerConfig{
+		Strategy: preemptive.StrategyCompresr,
+		Compresr: &preemptive.CompresrConfig{
+			Endpoint: "/api/compress/history/",
+			APIKey:   "cmp_test-key",
+			Model:    "",
+			Timeout:  60 * time.Second,
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "model")
+}
+
+func TestConfig_Validate_APIStrategyMissingTimeout(t *testing.T) {
+	cfg := validConfig()
+	cfg.Summarizer = preemptive.SummarizerConfig{
+		Strategy: preemptive.StrategyCompresr,
+		Compresr: &preemptive.CompresrConfig{
+			Endpoint: "/api/compress/history/",
+			APIKey:   "cmp_test-key",
+			Model:    "hcc_espresso_v1",
+			Timeout:  0,
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout")
+}
+
+func TestConfig_Validate_InvalidStrategy(t *testing.T) {
+	cfg := validConfig()
+	cfg.Summarizer.Strategy = "invalid"
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "strategy")
+}
+
+func TestConfig_Validate_StrategyDefaultsToProvider(t *testing.T) {
+	cfg := validConfig()
+	cfg.Summarizer.Strategy = "" // empty should default to "external_provider"
+
+	err := cfg.Validate()
+	assert.NoError(t, err)
+	assert.Equal(t, "external_provider", cfg.Summarizer.Strategy)
+}
+
+// =============================================================================
 // HELPERS
 // =============================================================================
 

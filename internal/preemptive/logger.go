@@ -36,6 +36,8 @@ type CompactionEvent struct {
 	DurationMs         int64                  `json:"duration_ms,omitempty"`
 	Error              string                 `json:"error,omitempty"`
 	Details            map[string]interface{} `json:"details,omitempty"`
+	OriginalContent    string                 `json:"original_content,omitempty"`
+	CompressedContent  string                 `json:"compressed_content,omitempty"`
 }
 
 var (
@@ -130,7 +132,7 @@ func (cl *CompactionLogger) LogPreemptiveTrigger(sessionID, model string, msgCou
 }
 
 // LogPreemptiveComplete logs when background summarization finishes.
-func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsSummarized, tokens int, duration time.Duration, summarizerProvider, summarizerModel string) {
+func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsSummarized, tokens int, duration time.Duration, summarizerProvider, summarizerModel string, originalContent, compressedContent string) {
 	cl.Log(CompactionEvent{
 		Event:              "preemptive_complete",
 		SessionID:          sessionID,
@@ -142,6 +144,8 @@ func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsS
 			"summarizer_provider": summarizerProvider,
 			"summarizer_model":    summarizerModel,
 		},
+		OriginalContent:   originalContent,
+		CompressedContent: compressedContent,
 	})
 }
 
@@ -157,7 +161,7 @@ func (cl *CompactionLogger) LogCompactionDetected(sessionID, model, detectedBy s
 }
 
 // LogCompactionApplied logs when compaction is applied.
-func (cl *CompactionLogger) LogCompactionApplied(sessionID, model string, precomputed bool, msgsSummarized, tokens, size int, details map[string]interface{}) {
+func (cl *CompactionLogger) LogCompactionApplied(sessionID, model string, precomputed bool, msgsSummarized, tokens, size int, details map[string]interface{}, compressedContent string) {
 	if details == nil {
 		details = make(map[string]interface{})
 	}
@@ -170,6 +174,7 @@ func (cl *CompactionLogger) LogCompactionApplied(sessionID, model string, precom
 		MessagesSummarized: msgsSummarized,
 		SummaryTokens:      tokens,
 		Details:            details,
+		CompressedContent:  compressedContent,
 	})
 }
 
