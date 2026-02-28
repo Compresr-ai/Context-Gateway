@@ -62,3 +62,8 @@ docs/
 .aider*
 .gocache/
 .gomodcache/
+
+# Node
+node_modules/
+.vite/
+dist/
