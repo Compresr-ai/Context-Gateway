@@ -20,6 +20,7 @@ type MonitoringConfig struct {
 
 	// Additional log files
 	CompressionLogPath   string `yaml:"compression_log_path"`    // Log original vs compressed
+	ToolDiscoveryLogPath string `yaml:"tool_discovery_log_path"` // Log tool discovery filtering details
 	FailedRequestLogPath string `yaml:"failed_request_log_path"` // Log failed requests
 
 	// Trajectory logging (ATIF format)

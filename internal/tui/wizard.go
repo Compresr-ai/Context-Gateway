@@ -59,17 +59,15 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 		return nil, fmt.Errorf("all fields skipped")
 	}
 
-	// Check if we're in a TTY
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return runWizardFallback(title, activeFields)
 	}
 
-	// Save terminal state and set raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		return runWizardFallback(title, activeFields)
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
 
 	current := 0 // Current field index
 	editing := false
@@ -182,6 +180,14 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 			return nil, err
 		}
 
+		// Handle Ctrl+C in any mode
+		if b == 3 {
+			fmt.Print("\033[?25h") // Show cursor
+			_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			fmt.Println("\n\nInterrupted.")
+			os.Exit(130)
+		}
+
 		if editing {
 			f := &activeFields[current]
 			switch b {
@@ -285,9 +291,8 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 					editSelected = f.ValueIndex
 					renderEditOptions(f.Options, editSelected)
 				case FieldTypeText, FieldTypePassword:
-					// Switch to text input mode
-					fmt.Print("\033[?25h") // Show cursor
-					term.Restore(int(os.Stdin.Fd()), oldState)
+					fmt.Print("\033[?25h")
+					_ = term.Restore(int(os.Stdin.Fd()), oldState)
 
 					prompt := fmt.Sprintf("\n  %s: ", f.Label)
 					var val string

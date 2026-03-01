@@ -65,7 +65,7 @@ func TestExpandContext_Anthropic_FullFlow(t *testing.T) {
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	requestBody := fixtures.AnthropicToolResultRequest("claude-haiku-4-5-20251001", fixtures.LargeToolOutput)
+	requestBody := fixtures.AnthropicToolResultRequest("claude-sonnet-4-5", fixtures.LargeToolOutput)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(requestBody))
 	require.NoError(t, err)
@@ -127,7 +127,7 @@ func TestExpandContext_Anthropic_NoExpand(t *testing.T) {
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	requestBody := fixtures.AnthropicToolResultRequest("claude-haiku-4-5-20251001", fixtures.LargeToolOutput)
+	requestBody := fixtures.AnthropicToolResultRequest("claude-sonnet-4-5", fixtures.LargeToolOutput)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(requestBody))
 	require.NoError(t, err)
@@ -167,7 +167,7 @@ func TestExpandContext_Disabled_Anthropic(t *testing.T) {
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	requestBody := fixtures.AnthropicToolResultRequest("claude-haiku-4-5-20251001", fixtures.LargeToolOutput)
+	requestBody := fixtures.AnthropicToolResultRequest("claude-sonnet-4-5", fixtures.LargeToolOutput)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(requestBody))
 	require.NoError(t, err)
@@ -202,7 +202,7 @@ func TestExpandContext_SmallContent_NoCompression(t *testing.T) {
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	requestBody := fixtures.AnthropicToolResultRequest("claude-haiku-4-5-20251001", fixtures.SmallToolOutput)
+	requestBody := fixtures.AnthropicToolResultRequest("claude-sonnet-4-5", fixtures.SmallToolOutput)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(requestBody))
 	require.NoError(t, err)
@@ -269,7 +269,7 @@ func TestExpandContext_TrajectoryCorrect(t *testing.T) {
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	requestBody := fixtures.AnthropicToolResultRequest("claude-haiku-4-5-20251001", fixtures.LargeToolOutput)
+	requestBody := fixtures.AnthropicToolResultRequest("claude-sonnet-4-5", fixtures.LargeToolOutput)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(requestBody))
 	require.NoError(t, err)

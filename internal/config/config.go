@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -21,14 +22,86 @@ import (
 // Config is the root configuration for the Context Gateway.
 // All fields are required - no defaults are applied.
 type Config struct {
-	Server     ServerConfig     `yaml:"server"`     // HTTP server settings
-	URLs       URLsConfig       `yaml:"urls"`       // Upstream URLs
-	Providers  ProvidersConfig  `yaml:"providers"`  // LLM provider configurations
-	Pipes      PipesConfig      `yaml:"pipes"`      // Compression pipelines
-	Store      StoreConfig      `yaml:"store"`      // Shadow context store
-	Monitoring MonitoringConfig `yaml:"monitoring"` // Telemetry and logging
-	Preemptive PreemptiveConfig `yaml:"preemptive"` // Preemptive summarization settings
-	Bedrock    BedrockConfig    `yaml:"bedrock"`    // AWS Bedrock support (opt-in)
+	Server      ServerConfig      `yaml:"server"`       // HTTP server settings
+	URLs        URLsConfig        `yaml:"urls"`         // Upstream URLs
+	Providers   ProvidersConfig   `yaml:"providers"`    // LLM provider configurations
+	Pipes       PipesConfig       `yaml:"pipes"`        // Compression pipelines
+	Store       StoreConfig       `yaml:"store"`        // Shadow context store
+	Monitoring  MonitoringConfig  `yaml:"monitoring"`   // Telemetry and logging
+	Preemptive  PreemptiveConfig  `yaml:"preemptive"`   // Preemptive summarization settings
+	Bedrock     BedrockConfig     `yaml:"bedrock"`      // AWS Bedrock support (opt-in)
+	CostControl CostControlConfig `yaml:"cost_control"` // Cost control (session/global budget enforcement)
+
+	// Runtime-only fields (not loaded from YAML)
+	AgentFlags *AgentFlags `yaml:"-"` // Agent CLI flags, set at runtime by cmd/agent.go
+}
+
+// AgentFlags stores passthrough args from the gateway CLI.
+// These are flags intended for the agent (Claude Code, Codex, etc.) that the
+// gateway also needs to be aware of for behavior adjustments.
+type AgentFlags struct {
+	AgentName string   // Which agent these flags are for (e.g., "claude_code")
+	Raw       []string // Original passthrough args (e.g., ["--dangerously-skip-permissions"])
+}
+
+// NewAgentFlags creates AgentFlags from passthrough args.
+func NewAgentFlags(agentName string, args []string) *AgentFlags {
+	if len(args) == 0 {
+		return nil
+	}
+	return &AgentFlags{
+		AgentName: agentName,
+		Raw:       args,
+	}
+}
+
+// HasFlag checks if a specific flag is present in the args.
+func (f *AgentFlags) HasFlag(name string) bool {
+	if f == nil {
+		return false
+	}
+	for _, arg := range f.Raw {
+		if arg == name {
+			return true
+		}
+	}
+	return false
+}
+
+// GetFlagValue returns the value of a flag (e.g., --model claude-3-opus → "claude-3-opus").
+func (f *AgentFlags) GetFlagValue(name string) string {
+	if f == nil {
+		return ""
+	}
+	for i, arg := range f.Raw {
+		// --flag value
+		if arg == name && i+1 < len(f.Raw) {
+			return f.Raw[i+1]
+		}
+		// --flag=value
+		if strings.HasPrefix(arg, name+"=") {
+			return arg[len(name)+1:]
+		}
+	}
+	return ""
+}
+
+// IsAutoApproveMode returns true if the agent is running in auto-approve/skip-permissions mode.
+// This is provider-agnostic: maps different agent flags to the same semantic behavior.
+func (f *AgentFlags) IsAutoApproveMode() bool {
+	if f == nil {
+		return false
+	}
+	switch f.AgentName {
+	case "claude_code":
+		return f.HasFlag("--dangerously-skip-permissions") || f.HasFlag("-y")
+	case "codex":
+		// Codex uses --full-auto for autonomous mode
+		return f.HasFlag("--full-auto")
+	default:
+		// Generic detection for common flags
+		return f.HasFlag("--auto-approve") || f.HasFlag("-y")
+	}
 }
 
 // BedrockConfig controls AWS Bedrock provider support.
@@ -92,7 +165,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config file path is required")
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- user-specified config path
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file '%s': %w", path, err)
 	}
@@ -132,6 +205,12 @@ func ExpandEnvWithDefaults(s string) string {
 // This allows external systems (Harbor, Daytona) to redirect log paths
 // without modifying the base config files.
 func (c *Config) applyEnvOverrides() {
+	c.ApplySessionEnvOverrides()
+}
+
+// ApplySessionEnvOverrides applies SESSION_* environment variable overrides.
+// Exported so agent.go can call it after setting session env vars.
+func (c *Config) ApplySessionEnvOverrides() {
 	// SESSION_TELEMETRY_LOG overrides the telemetry log path
 	if envPath := os.Getenv("SESSION_TELEMETRY_LOG"); envPath != "" {
 		c.Monitoring.TelemetryPath = envPath
@@ -140,6 +219,11 @@ func (c *Config) applyEnvOverrides() {
 	// SESSION_COMPRESSION_LOG overrides the compression log path
 	if envPath := os.Getenv("SESSION_COMPRESSION_LOG"); envPath != "" {
 		c.Monitoring.CompressionLogPath = envPath
+	}
+
+	// SESSION_TOOL_DISCOVERY_LOG overrides the tool discovery log path
+	if envPath := os.Getenv("SESSION_TOOL_DISCOVERY_LOG"); envPath != "" {
+		c.Monitoring.ToolDiscoveryLogPath = envPath
 	}
 
 	// SESSION_TRAJECTORY_LOG overrides the trajectory log path
@@ -193,6 +277,11 @@ func (c *Config) Validate() error {
 
 	// Preemptive summarization validation
 	if err := c.Preemptive.Validate(); err != nil {
+		return err
+	}
+
+	// Cost control validation
+	if err := c.CostControl.Validate(); err != nil {
 		return err
 	}
 

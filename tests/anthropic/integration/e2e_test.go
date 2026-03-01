@@ -1575,18 +1575,18 @@ func compressionConfigAnthropicDirect(apiKey string) *config.Config {
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:             true,
-				Strategy:            "api", // Uses Compresr API for compression
+				Strategy:            config.StrategyCompresr, // Uses Compresr API for compression
 				FallbackStrategy:    "passthrough",
 				MinBytes:            500,
 				MaxBytes:            65536,
 				TargetRatio:         0.3,
 				IncludeExpandHint:   false,
 				EnableExpandContext: false,
-				API: config.APIConfig{
-					Endpoint: "/api/compress/tool-output",
-					APIKey:   os.Getenv("COMPRESR_API_KEY"),
-					Model:    "tool_output_openai", // Use OpenAI model via API
-					Timeout:  30 * time.Second,
+				Compresr: config.CompresrConfig{
+					Endpoint:  "/api/compress/tool-output",
+					APIKey:    os.Getenv("COMPRESR_API_KEY"),
+					Model:     "toc_espresso_v1", // Use OpenAI model via API
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

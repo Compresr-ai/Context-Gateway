@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
+
+	"github.com/compresr/context-gateway/internal/auth"
+	"github.com/compresr/context-gateway/internal/compresr"
+	"github.com/compresr/context-gateway/internal/config"
+	"github.com/compresr/context-gateway/internal/tui"
 )
 
 // CredentialScope determines where credentials are persisted.
@@ -39,20 +46,12 @@ func setupAnthropicAPIKey(agentName string) bool {
 
 	// For claude_code, API key is optional - we can capture from /login credentials
 	if agentName == "claude_code" {
-		fmt.Println("  You can provide an API key OR use your Claude Max/Pro subscription.")
+		printInfo("Using credentials from Claude Code /login (no API key prompt)")
 		fmt.Println()
-		fmt.Println("  Option 1: Enter an API key (from console.anthropic.com)")
-		fmt.Println("  Option 2: Skip and use /login in Claude Code (Max/Pro/Teams)")
+		fmt.Println("  Note: Make sure you're logged into Claude Code with /login")
+		fmt.Println("  The gateway will capture your auth token automatically.")
 		fmt.Println()
-
-		if !promptYesNo("Do you have an Anthropic API key to enter?", false) {
-			printInfo("Skipped - will use credentials from Claude Code /login")
-			fmt.Println()
-			fmt.Println("  Note: Make sure you're logged into Claude Code with /login")
-			fmt.Println("  The gateway will capture your auth token automatically.")
-			fmt.Println()
-			return true
-		}
+		return true
 	} else {
 		fmt.Println("  ANTHROPIC_API_KEY is required to use Context Gateway.")
 		fmt.Println("  Get your key at: https://console.anthropic.com/settings/keys")
@@ -79,11 +78,214 @@ func setupAnthropicAPIKey(agentName string) bool {
 	scope := promptCredentialScope("Save API key for")
 	persistCredential("ANTHROPIC_API_KEY", apiKey, scope)
 
-	// Set for current session regardless
-	os.Setenv("ANTHROPIC_API_KEY", apiKey)
+	_ = os.Setenv("ANTHROPIC_API_KEY", apiKey)
 	printSuccess("API key configured")
 
 	return true
+}
+
+// =============================================================================
+// COMPRESR API KEY ONBOARDING
+// =============================================================================
+
+const (
+	compresrAPIKeyEnvVar = "COMPRESR_API_KEY" // #nosec G101 -- env var name, not a secret
+
+	// Frontend URLs - derived from config.DefaultCompresrFrontendBaseURL
+	compresrFrontendBaseURL = config.DefaultCompresrFrontendBaseURL
+	compresrTokenURL        = compresrFrontendBaseURL + "/dashboard/tokens" // #nosec G101 -- URL, not credentials
+
+	// Backend base URL - WebSocket auth endpoint lives here
+	compresrBackendBaseURL = "http://localhost:8000"
+)
+
+// isCompresrAPIKeySet checks if the Compresr API key is configured.
+func isCompresrAPIKeySet() bool {
+	return os.Getenv(compresrAPIKeyEnvVar) != ""
+}
+
+// runCompresrOnboarding runs the initial Compresr API key setup flow.
+// This is shown to first-time users before any other configuration.
+// Tries OAuth flow first, falls back to manual copy-paste if OAuth fails.
+// Returns true if successful, false if user cancelled.
+func runCompresrOnboarding() bool {
+	fmt.Println()
+	printHeader("Welcome to Context Gateway")
+	fmt.Println()
+	fmt.Println("  Context Gateway optimizes your AI coding experience by:")
+	fmt.Println()
+	fmt.Printf("    %s•%s Preemptive summarization - keeps context fresh\n", tui.ColorGreen, tui.ColorReset)
+	fmt.Printf("    %s•%s Tool output compression - reduces token usage\n", tui.ColorGreen, tui.ColorReset)
+	fmt.Printf("    %s•%s Tool discovery optimization - faster responses\n", tui.ColorGreen, tui.ColorReset)
+	fmt.Println()
+	fmt.Printf("  %sTo get started, you need a Compresr API key.%s\n", tui.ColorBold, tui.ColorReset)
+	fmt.Println()
+
+	// Try OAuth flow first
+	apiKey := tryOAuthFlow()
+
+	// If OAuth failed or timed out, fall back to manual flow
+	if apiKey == "" {
+		printInfo("Switching to manual setup...")
+		fmt.Println()
+		apiKey = manualAPIKeyFlow()
+		if apiKey == "" {
+			return false
+		}
+	}
+
+	// Validate the API key
+	fmt.Println()
+	printStep("Validating API key...")
+	client := compresr.NewClient("", apiKey)
+	tier, err := client.ValidateAPIKey()
+	if err != nil {
+		printError(fmt.Sprintf("Invalid API key: %v", err))
+		fmt.Println()
+		printWarn("Please run with --reset-api-key to try again")
+		return false
+	}
+
+	// Save to global config
+	persistCredential(compresrAPIKeyEnvVar, apiKey, ScopeGlobal)
+
+	// Set for current session
+	_ = os.Setenv(compresrAPIKeyEnvVar, apiKey)
+
+	fmt.Println()
+	printSuccess(fmt.Sprintf("API key validated! (tier: %s)", tier))
+	fmt.Println()
+
+	return true
+}
+
+// tryOAuthFlow attempts to authorize via WebSocket auth client.
+// Connects outbound to the backend which pushes the token when OAuth completes.
+// Returns the API key if successful, empty string if failed or timed out.
+func tryOAuthFlow() string {
+	fmt.Printf("  %sAttempting secure authorization...%s\n", tui.ColorCyan, tui.ColorReset)
+	fmt.Println()
+
+	// Create auth client (WebSocket-based, works from VMs and remote machines)
+	client, err := auth.NewAuthClient(compresrBackendBaseURL)
+	if err != nil {
+		printWarn(fmt.Sprintf("Could not create auth client: %v", err))
+		return ""
+	}
+	defer func() { _ = client.Close() }()
+
+	// Connect to backend and get the authorize URL
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	authorizeURL, err := client.Connect(ctx)
+	cancel()
+	if err != nil {
+		printWarn(fmt.Sprintf("Could not connect to auth server: %v", err))
+		return ""
+	}
+
+	fmt.Printf("  Opening browser in %s2 seconds%s...\n", tui.ColorCyan, tui.ColorReset)
+	time.Sleep(2 * time.Second)
+
+	// Open browser to authorization page
+	openBrowser(authorizeURL)
+
+	fmt.Println()
+	fmt.Printf("  %sBrowser opened:%s %s\n", tui.ColorDim, tui.ColorReset, authorizeURL)
+	fmt.Println()
+	fmt.Println("  1. Sign in or create an account")
+	fmt.Println("  2. Click 'Authorize' to grant access")
+	fmt.Println()
+	fmt.Printf("  %sWaiting for authorization...%s (5 minute timeout)\n", tui.ColorCyan, tui.ColorReset)
+	fmt.Println()
+
+	// Wait for token via WebSocket (5 minute timeout)
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	token, err := client.WaitForToken(ctx)
+	if err != nil {
+		printWarn(fmt.Sprintf("Authorization timed out or failed: %v", err))
+		return ""
+	}
+
+	printSuccess("Authorization successful!")
+	return token
+}
+
+// manualAPIKeyFlow prompts the user to manually copy-paste an API key.
+// Returns the API key if entered, empty string if cancelled.
+func manualAPIKeyFlow() string {
+	fmt.Printf("  Opening browser in %s2 seconds%s...\n", tui.ColorCyan, tui.ColorReset)
+	time.Sleep(2 * time.Second)
+
+	// Open browser to token generation page
+	openBrowser(compresrTokenURL)
+
+	fmt.Println()
+	fmt.Printf("  %sBrowser opened:%s %s\n", tui.ColorDim, tui.ColorReset, compresrTokenURL)
+	fmt.Println()
+	fmt.Println("  1. Sign in or create an account")
+	fmt.Println("  2. Generate a new API token")
+	fmt.Println("  3. Copy the token and paste it below")
+	fmt.Println()
+
+	// Prompt for API key
+	apiKey := tui.PromptInput("  Enter your Compresr API key: ")
+	if apiKey == "" {
+		printWarn("No API key entered. You can set it later with --reset-api-key")
+		return ""
+	}
+
+	return apiKey
+}
+
+// resetCompresrAPIKey removes the existing API key and re-runs onboarding.
+func resetCompresrAPIKey() bool {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		printError("Could not determine home directory")
+		return false
+	}
+
+	envPath := filepath.Join(homeDir, ".config", "context-gateway", ".env")
+
+	// Remove the key from global .env
+	removeCredentialFromEnvFile(envPath, compresrAPIKeyEnvVar)
+
+	// Clear from environment
+	_ = os.Unsetenv(compresrAPIKeyEnvVar)
+
+	printInfo("Compresr API key removed")
+	fmt.Println()
+
+	// Re-run onboarding
+	return runCompresrOnboarding()
+}
+
+// removeCredentialFromEnvFile removes a key from an .env file.
+func removeCredentialFromEnvFile(envPath, key string) {
+	// #nosec G304 -- env file constructed from known paths
+	file, err := os.Open(envPath)
+	if err != nil {
+		return // File doesn't exist, nothing to remove
+	}
+	defer func() { _ = file.Close() }()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, key+"=") {
+			lines = append(lines, line)
+		}
+	}
+
+	// Write back without the removed key
+	output := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		output += "\n"
+	}
+	_ = os.WriteFile(envPath, []byte(output), 0600)
 }
 
 // =============================================================================
@@ -97,45 +299,6 @@ type SlackConfig struct {
 	BotToken   string // Bot token (legacy)
 	ChannelID  string // Channel ID (only needed for bot token)
 	Scope      CredentialScope
-}
-
-// setupSlackNotifications interactively prompts for Slack notification setup.
-// Only called for claude_code agent. Returns the config (Enabled=false if skipped).
-// nolint:unused // Will be used in future Slack wizard integration
-func setupSlackNotifications() SlackConfig {
-	config := SlackConfig{Enabled: false}
-
-	// Check if already configured (webhook or bot token)
-	if os.Getenv("SLACK_WEBHOOK_URL") != "" {
-		if isSlackHookInstalled() {
-			printInfo("Slack notifications already configured (webhook)")
-			config.Enabled = true
-			config.WebhookURL = os.Getenv("SLACK_WEBHOOK_URL")
-			return config
-		}
-	} else if os.Getenv("SLACK_BOT_TOKEN") != "" && os.Getenv("SLACK_CHANNEL_ID") != "" {
-		if isSlackHookInstalled() {
-			printInfo("Slack notifications already configured (bot token)")
-			config.Enabled = true
-			config.BotToken = os.Getenv("SLACK_BOT_TOKEN")
-			config.ChannelID = os.Getenv("SLACK_CHANNEL_ID")
-			return config
-		}
-	}
-
-	fmt.Println()
-	printHeader("Slack Notifications (Optional)")
-	fmt.Println()
-	fmt.Println("  Get notified when Claude needs your input or finishes a task.")
-	fmt.Println()
-
-	// Ask if user wants Slack notifications
-	if !promptYesNo("Enable Slack notifications?", false) {
-		printInfo("Slack notifications skipped")
-		return config
-	}
-
-	return promptSlackCredentials()
 }
 
 // promptSlackCredentials prompts for Slack webhook URL (simple flow).
@@ -179,8 +342,7 @@ func promptSlackCredentials() SlackConfig {
 	// Persist credential
 	persistCredential("SLACK_WEBHOOK_URL", webhookURL, scope)
 
-	// Set for current session
-	os.Setenv("SLACK_WEBHOOK_URL", webhookURL)
+	_ = os.Setenv("SLACK_WEBHOOK_URL", webhookURL)
 
 	config.Enabled = true
 	config.WebhookURL = webhookURL
@@ -231,7 +393,7 @@ func installClaudeCodeHooks() error {
 		return fmt.Errorf("failed to read embedded hook script: %w", err)
 	}
 
-	// #nosec G306 -- hook script needs to be executable
+	// #nosec G306 -- hook script must be executable (0700)
 	if err := os.WriteFile(hookScript, scriptData, 0700); err != nil {
 		return fmt.Errorf("failed to write hook script: %w", err)
 	}
@@ -256,7 +418,7 @@ func updateClaudeSettings(settingsPath, hookScript string) error {
 	var settings map[string]interface{}
 
 	// Read existing settings or create new
-	data, err := os.ReadFile(settingsPath)
+	data, err := os.ReadFile(settingsPath) // #nosec G304 -- known settings path under ~/.claude
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -345,7 +507,7 @@ func isSlackHookInstalled() bool {
 	}
 
 	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
-	data, err := os.ReadFile(settingsPath)
+	data, err := os.ReadFile(settingsPath) // #nosec G304 -- known settings path
 	if err != nil {
 		return false
 	}
@@ -399,6 +561,7 @@ func appendToEnvFile(envPath, key, value string) {
 	var lines []string
 	found := false
 
+	// #nosec G304 -- env file constructed from known paths
 	file, err := os.Open(envPath)
 	if err == nil {
 		scanner := bufio.NewScanner(file)
@@ -412,10 +575,9 @@ func appendToEnvFile(envPath, key, value string) {
 				lines = append(lines, line)
 			}
 		}
-		file.Close()
+		_ = file.Close()
 	}
 
-	// Append if not found
 	if !found {
 		lines = append(lines, fmt.Sprintf("%s=%s", key, value))
 	}
@@ -437,17 +599,6 @@ func promptOptional(prompt string) string {
 	fmt.Print(prompt)
 	input, _ := reader.ReadString('\n')
 	return strings.TrimSpace(input)
-}
-
-// promptYesNo prompts for a yes/no response using arrow-key selection.
-func promptYesNo(question string, defaultYes bool) bool {
-	options := []string{"Yes", "No"}
-	idx, err := selectFromList(question, options)
-	if err != nil {
-		// User cancelled or error - return default
-		return defaultYes
-	}
-	return idx == 0 // Yes is at index 0
 }
 
 // promptCredentialScope prompts user to choose where to save credentials.

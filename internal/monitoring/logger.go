@@ -10,6 +10,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -30,9 +31,15 @@ type Logger struct {
 func New(cfg LoggerConfig) *Logger {
 	zerolog.TimeFieldFormat = time.RFC3339
 
-	level, err := zerolog.ParseLevel(cfg.Level)
-	if err != nil {
-		level = zerolog.InfoLevel
+	level := zerolog.InfoLevel
+	levelName := strings.ToLower(strings.TrimSpace(cfg.Level))
+	if levelName == "off" || levelName == "none" || levelName == "disabled" {
+		level = zerolog.Disabled
+	} else {
+		parsed, err := zerolog.ParseLevel(cfg.Level)
+		if err == nil {
+			level = parsed
+		}
 	}
 
 	var writer io.Writer

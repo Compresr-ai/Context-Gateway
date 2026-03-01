@@ -15,20 +15,17 @@
 package tooloutput
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"sync"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/external"
 	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/pipes"
 )
@@ -44,6 +41,16 @@ func (p *Pipe) Process(ctx *pipes.PipeContext) ([]byte, error) {
 	// Passthrough = do nothing
 	if p.strategy == config.StrategyPassthrough {
 		log.Debug().Msg("tool_output: passthrough mode, skipping")
+		return ctx.OriginalRequest, nil
+	}
+
+	// Skip compression for cheap models (not economically viable)
+	// This check is automatic - no configuration required
+	if ShouldSkipCompressionForCost(ctx.TargetModel) {
+		log.Info().
+			Str("target_model", ctx.TargetModel).
+			Str("cost_tier", GetModelCostTier(ctx.TargetModel)).
+			Msg("tool_output: skipping compression for budget model")
 		return ctx.OriginalRequest, nil
 	}
 
@@ -89,7 +96,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 		// Query-agnostic models (cmprsr, LLM-based): no query needed
 		query = ""
 		log.Debug().
-			Str("model", p.apiModel).
+			Str("model", p.compresrModel).
 			Bool("query_agnostic", true).
 			Msg("tool_output: query-agnostic model, using empty query")
 	} else {
@@ -100,7 +107,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 			query = "process this tool output"
 		}
 		log.Debug().
-			Str("model", p.apiModel).
+			Str("model", p.compresrModel).
 			Bool("query_agnostic", false).
 			Int("query_len", len(query)).
 			Msg("tool_output: using user query for relevance scoring")
@@ -128,6 +135,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				MappingStatus:   "skipped_by_config",
 				MinThreshold:    p.minBytes,
 				MaxThreshold:    p.maxBytes,
+				Model:           p.getEffectiveModel(),
 			})
 			continue
 		}
@@ -150,6 +158,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				MappingStatus:   "passthrough_small",
 				MinThreshold:    p.minBytes,
 				MaxThreshold:    p.maxBytes,
+				Model:           p.getEffectiveModel(),
 			})
 			continue
 		}
@@ -168,6 +177,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				MappingStatus:   "passthrough_large",
 				MinThreshold:    p.minBytes,
 				MaxThreshold:    p.maxBytes,
+				Model:           p.getEffectiveModel(),
 			})
 			continue
 		}
@@ -198,6 +208,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 					MappingStatus:     "cache_hit",
 					MinThreshold:      p.minBytes,
 					MaxThreshold:      p.maxBytes,
+					Model:             p.getEffectiveModel(),
 				})
 				results = append(results, adapters.CompressedResult{
 					ID:         ext.ID,
@@ -208,14 +219,13 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				ctx.OutputCompressed = true
 				continue
 			}
-			p.store.DeleteCompressed(shadowID)
+			_ = p.store.DeleteCompressed(shadowID)
 		}
 
 		p.recordCacheMiss()
 
-		// Store original for expand_context retrieval
 		if p.store != nil {
-			p.store.Set(shadowID, ext.Content)
+			_ = p.store.Set(shadowID, ext.Content)
 		}
 
 		// Queue for compression
@@ -236,7 +246,11 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 
 	if len(tasks) > 0 {
 		// Process compressions with rate limiting (V2: C11)
-		compResults := p.compressBatch(query, provider, ctx.CapturedBearerToken, ctx.CapturedBetaHeader, tasks)
+		reqCtx := ctx.RequestCtx
+		if reqCtx == nil {
+			reqCtx = context.Background()
+		}
+		compResults := p.compressBatch(reqCtx, query, provider, ctx.CapturedBearerToken, ctx.CapturedBetaHeader, tasks)
 
 		// Apply results
 		for result := range compResults {
@@ -256,32 +270,37 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 					ToolCallID:        result.toolCallID,
 					ShadowID:          result.shadowID,
 					OriginalContent:   result.originalContent,
-					CompressedContent: result.originalContent,
+					CompressedContent: result.compressedContent,
 					OriginalBytes:     len(result.originalContent),
 					CompressedBytes:   len(result.originalContent),
 					CacheHit:          false,
 					MappingStatus:     "passthrough",
+					Model:             p.getEffectiveModel(),
 				})
 				continue
 			}
 
-			// Only use compression if it made content smaller
-			if len(result.compressedContent) >= len(result.originalContent) {
+			// Only use compression if savings exceed threshold
+			compressionRatio := float64(len(result.compressedContent)) / float64(len(result.originalContent))
+			if compressionRatio > p.targetRatio {
 				log.Warn().
+					Float64("ratio", compressionRatio).
+					Float64("max_ratio", p.targetRatio).
 					Int("original", len(result.originalContent)).
 					Int("compressed", len(result.compressedContent)).
 					Str("tool", result.toolName).
-					Msg("tool_output: compression made content larger, skipping")
+					Msg("tool_output: compression ratio exceeds threshold, using original")
 				ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, pipes.ToolOutputCompression{
 					ToolName:          result.toolName,
 					ToolCallID:        result.toolCallID,
 					ShadowID:          result.shadowID,
 					OriginalContent:   result.originalContent,
-					CompressedContent: result.originalContent,
+					CompressedContent: result.compressedContent,
 					OriginalBytes:     len(result.originalContent),
-					CompressedBytes:   len(result.originalContent),
+					CompressedBytes:   len(result.compressedContent),
 					CacheHit:          false,
 					MappingStatus:     "expansion_skipped",
+					Model:             p.getEffectiveModel(),
 				})
 				continue
 			}
@@ -304,11 +323,12 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				OriginalContent:   result.originalContent,
 				CompressedContent: prefixedContent,
 				OriginalBytes:     len(result.originalContent),
-				CompressedBytes:   len(prefixedContent),
+				CompressedBytes:   len(result.compressedContent),
 				CacheHit:          false,
 				MappingStatus:     "compressed",
 				MinThreshold:      p.minBytes,
 				MaxThreshold:      p.maxBytes,
+				Model:             p.getEffectiveModel(),
 			})
 
 			results = append(results, adapters.CompressedResult{
@@ -344,7 +364,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 }
 
 // compressBatch processes compression tasks with rate limiting (V2: C11).
-func (p *Pipe) compressBatch(query, provider, capturedBearerToken, capturedBetaHeader string, tasks []compressionTask) <-chan compressionResult {
+func (p *Pipe) compressBatch(reqCtx context.Context, query, provider, capturedBearerToken, capturedBetaHeader string, tasks []compressionTask) <-chan compressionResult {
 	results := make(chan compressionResult, len(tasks))
 
 	go func() {
@@ -383,7 +403,7 @@ func (p *Pipe) compressBatch(query, provider, capturedBearerToken, capturedBetaH
 					}
 				}()
 
-				result := p.compressOne(query, provider, capturedBearerToken, capturedBetaHeader, t)
+				result := p.compressOne(reqCtx, query, provider, capturedBearerToken, capturedBetaHeader, t)
 				results <- result
 			}(task)
 		}
@@ -397,15 +417,15 @@ func (p *Pipe) compressBatch(query, provider, capturedBearerToken, capturedBetaH
 }
 
 // compressOne compresses a single tool output.
-func (p *Pipe) compressOne(query, provider, capturedBearerToken, capturedBetaHeader string, t compressionTask) compressionResult {
+func (p *Pipe) compressOne(reqCtx context.Context, query, provider, capturedBearerToken, capturedBetaHeader string, t compressionTask) compressionResult {
 	var compressed string
 	var err error
 
 	switch p.strategy {
-	case config.StrategyAPI:
-		compressed, err = p.compressViaAPI(query, t.original, t.toolName, provider)
+	case config.StrategyCompresr:
+		compressed, err = p.compressViaCompresr(query, t.original, t.toolName, provider)
 	case config.StrategyExternalProvider:
-		compressed, err = p.compressViaExternalProvider(query, t.original, t.toolName, capturedBearerToken, capturedBetaHeader)
+		compressed, err = p.compressViaExternalProvider(reqCtx, query, t.original, t.toolName, capturedBearerToken, capturedBetaHeader)
 	case "simple":
 		// TEMPORARY: Simple first-words compression for testing expand_context
 		compressed = p.CompressSimpleContent(t.original)
@@ -437,7 +457,7 @@ func (p *Pipe) compressOne(query, provider, capturedBearerToken, capturedBetaHea
 		}
 
 		if p.store != nil {
-			p.store.Delete(t.shadowID)
+			_ = p.store.Delete(t.shadowID)
 		}
 		return compressionResult{index: t.index, success: false, err: err}
 	}
@@ -471,7 +491,7 @@ func normalizeContent(content string) string {
 // touchOriginal extends the TTL of original content before LLM call (V2)
 func (p *Pipe) touchOriginal(shadowID string) {
 	if original, ok := p.store.Get(shadowID); ok {
-		p.store.Set(shadowID, original)
+		_ = p.store.Set(shadowID, original)
 	}
 }
 
@@ -507,28 +527,32 @@ func (p *Pipe) recordRateLimited() {
 	p.mu.Unlock()
 }
 
+// getEffectiveModel returns the compression model name with fallback to default.
+func (p *Pipe) getEffectiveModel() string {
+	if p.compresrModel != "" {
+		return p.compresrModel
+	}
+	return compresr.DefaultToolOutputModel // toc_latte_v1
+}
+
 // ============================================================================
 // COMPRESSION STRATEGIES
 // ============================================================================
 
-// compressViaAPI calls the compression API with query + tool output.
-func (p *Pipe) compressViaAPI(query, content, toolName, provider string) (string, error) {
-	// Use configured model, fallback to default if not set
-	modelName := p.apiModel
-	if modelName == "" {
-		modelName = "cmprsr_tool_output_v1"
+// compressViaCompresr calls the Compresr API via the centralized client.
+func (p *Pipe) compressViaCompresr(query, content, toolName, provider string) (string, error) {
+	// Use the centralized Compresr client
+	if p.compresrClient == nil {
+		return "", fmt.Errorf("compresr client not initialized")
 	}
+
+	// Use configured model, fallback to default if not set
+	modelName := p.getEffectiveModel()
 
 	// Build source string: gateway:anthropic or gateway:openai
 	source := "gateway:" + provider
 
-	payload := struct {
-		ToolOutput string `json:"tool_output"`
-		UserQuery  string `json:"user_query"`
-		ToolName   string `json:"tool_name"`
-		ModelName  string `json:"compression_model_name"`
-		Source     string `json:"source"`
-	}{
+	params := compresr.CompressToolOutputParams{
 		ToolOutput: content,
 		UserQuery:  query,
 		ToolName:   toolName,
@@ -536,67 +560,26 @@ func (p *Pipe) compressViaAPI(query, content, toolName, provider string) (string
 		Source:     source,
 	}
 
-	body, err := json.Marshal(payload)
+	result, err := p.compresrClient.CompressToolOutput(params)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), p.apiTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", p.apiEndpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		req.Header.Set("X-API-Key", p.apiKey)
-	}
-
-	client := &http.Client{Timeout: p.apiTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// Read response body for debugging
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API returned status %d: %s (endpoint: %s)", resp.StatusCode, string(respBody), p.apiEndpoint)
-	}
-
-	var result struct {
-		Success bool `json:"success"`
-		Data    struct {
-			CompressedOutput string `json:"compressed_output"`
-		} `json:"data"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return "", fmt.Errorf("API request failed")
+		return "", fmt.Errorf("compresr API call failed: %w", err)
 	}
 
 	// Validate compression actually reduced size - if not, return error to trigger fallback
-	if len(result.Data.CompressedOutput) >= len(content) {
+	if len(result.CompressedOutput) >= len(content) {
 		return "", fmt.Errorf("compression ineffective: output (%d bytes) >= input (%d bytes)",
-			len(result.Data.CompressedOutput), len(content))
+			len(result.CompressedOutput), len(content))
 	}
 
-	return result.Data.CompressedOutput, nil
+	return result.CompressedOutput, nil
 }
 
 // compressViaExternalProvider calls an external LLM provider directly.
 // Uses the api config (endpoint, api_key, model) from the config file.
 // Provider is auto-detected from endpoint URL or can be set explicitly.
-func (p *Pipe) compressViaExternalProvider(query, content, toolName, capturedBearerToken, capturedBetaHeader string) (string, error) {
+func (p *Pipe) compressViaExternalProvider(reqCtx context.Context, query, content, toolName, capturedBearerToken, capturedBetaHeader string) (string, error) {
 	var systemPrompt, userPrompt string
-	if p.apiQueryAgnostic || query == "" {
+	if p.compresrQueryAgnostic || query == "" {
 		systemPrompt = external.SystemPromptQueryAgnostic
 		userPrompt = external.UserPromptQueryAgnostic(toolName, content)
 	} else {
@@ -614,25 +597,25 @@ func (p *Pipe) compressViaExternalProvider(query, content, toolName, capturedBea
 	}
 
 	params := external.CallLLMParams{
-		Endpoint:     p.apiEndpoint,
-		APIKey:       p.apiKey,
-		Model:        p.apiModel,
+		Endpoint:     p.compresrEndpoint,
+		APISecret:    p.compresrKey,
+		Model:        p.compresrModel,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		MaxTokens:    maxTokens,
-		Timeout:      p.apiTimeout,
+		Timeout:      p.compresrTimeout,
 	}
 
 	// OAuth fallback: reuse Bearer token captured from the incoming request.
 	// Claude Code OAuth tokens (sk-ant-oat*) require Bearer auth + anthropic-beta header.
-	if params.APIKey == "" && capturedBearerToken != "" {
-		params.BearerToken = capturedBearerToken
+	if params.APISecret == "" && capturedBearerToken != "" {
+		params.BearerAuth = capturedBearerToken
 		if capturedBetaHeader != "" {
 			params.ExtraHeaders = map[string]string{"anthropic-beta": capturedBetaHeader}
 		}
 	}
 
-	result, err := external.CallLLM(context.Background(), params)
+	result, err := external.CallLLM(reqCtx, params)
 	if err != nil {
 		return "", err
 	}
@@ -645,8 +628,8 @@ func (p *Pipe) compressViaExternalProvider(query, content, toolName, capturedBea
 
 	log.Debug().
 		Str("provider", result.Provider).
-		Str("model", p.apiModel).
-		Bool("query_agnostic", p.apiQueryAgnostic).
+		Str("model", p.compresrModel).
+		Bool("query_agnostic", p.compresrQueryAgnostic).
 		Int("original_size", len(content)).
 		Int("compressed_size", len(result.Content)).
 		Float64("ratio", float64(len(result.Content))/float64(len(content))).

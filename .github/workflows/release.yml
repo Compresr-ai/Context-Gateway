@@ -30,9 +30,10 @@ jobs:
 
       - name: Prepare embedded assets
         run: |
+          # Configs and agents are already in cmd/ - copy from root if they exist (legacy support)
           mkdir -p cmd/configs cmd/agents
-          cp configs/*.yaml cmd/configs/
-          cp agents/*.yaml cmd/agents/
+          [ -d configs ] && cp configs/*.yaml cmd/configs/ 2>/dev/null || true
+          [ -d agents ] && cp agents/*.yaml cmd/agents/ 2>/dev/null || true
 
       - name: Build binaries
         run: |

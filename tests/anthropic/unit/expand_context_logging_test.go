@@ -37,7 +37,7 @@ func TestExpandContext_ConfigValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := fixtures.TestConfig(config.StrategyAPI, 256, tt.expandEnabled)
+			cfg := fixtures.TestConfig(config.StrategyCompresr, 256, tt.expandEnabled)
 
 			assert.Equal(t, tt.expandEnabled, cfg.Pipes.ToolOutput.EnableExpandContext,
 				"EnableExpandContext should match test case")

@@ -7,7 +7,7 @@
 //   - ToolOutput:    Compress tool results, store originals for expand_context
 //   - ToolDiscovery: Filter irrelevant tools
 //
-// Each pipe has a STRATEGY: "passthrough" (noop) or "api" (call compression service).
+// Each pipe has a STRATEGY: "passthrough" (noop) or "compresr" (call compression service).
 //
 // NOTE: This file defines pipe-specific configuration types.
 // The main Config struct in config/ imports and uses these types.
@@ -25,10 +25,11 @@ import (
 // Strategy constants for pipe execution.
 const (
 	StrategyPassthrough      = "passthrough"       // Do nothing, pass through unchanged
-	StrategyAPI              = "api"               // Call compresr platform API
+	StrategyCompresr         = "compresr"          // Call compresr platform API
 	StrategySimple           = "simple"            // Simple compression (first N words)
 	StrategyExternalProvider = "external_provider" // Call external LLM provider (OpenAI/Anthropic) directly
 	StrategyRelevance        = "relevance"         // Local relevance-based tool filtering (no external API)
+	StrategyToolSearch       = "tool-search"       // Local regex-based tool search (no external API)
 )
 
 // =============================================================================
@@ -111,16 +112,16 @@ func (p *Config) Validate() error {
 // ToolOutputConfig configures tool result compression.
 type ToolOutputConfig struct {
 	Enabled          bool   `yaml:"enabled"`           // Enable this pipe
-	Strategy         string `yaml:"strategy"`          // passthrough | api | external_provider
+	Strategy         string `yaml:"strategy"`          // passthrough | compresr | external_provider
 	FallbackStrategy string `yaml:"fallback_strategy"` // Fallback when primary fails
 
-	// Provider reference (preferred over inline API config)
+	// Provider reference (preferred over inline Compresr config)
 	// References a provider defined in the top-level "providers" section.
 	Provider string `yaml:"provider,omitempty"`
 
-	// API strategy config (for strategy=api or strategy=external_provider)
+	// Compresr strategy config (for strategy=compresr or strategy=external_provider)
 	// Can be overridden by Provider reference
-	API APIConfig `yaml:"api,omitempty"`
+	Compresr CompresrConfig `yaml:"compresr,omitempty"`
 
 	// Compression settings
 	MinBytes    int     `yaml:"min_bytes"`    // Below this size, no compression (default: 2048)
@@ -146,21 +147,21 @@ func (t *ToolOutputConfig) Validate() error {
 	if t.Strategy == StrategySimple {
 		return nil
 	}
-	if t.Strategy == StrategyAPI {
-		// Provider or API.Endpoint required
-		if t.Provider == "" && t.API.Endpoint == "" {
-			return fmt.Errorf("tool_output: provider or api.endpoint required when strategy=api")
+	if t.Strategy == StrategyCompresr {
+		// Provider or Compresr.Endpoint required
+		if t.Provider == "" && t.Compresr.Endpoint == "" {
+			return fmt.Errorf("tool_output: provider or compresr.endpoint required when strategy=compresr")
 		}
 		return nil
 	}
 	if t.Strategy == StrategyExternalProvider {
-		// Provider or API.Endpoint required
-		if t.Provider == "" && t.API.Endpoint == "" {
-			return fmt.Errorf("tool_output: provider or api.endpoint required when strategy=external_provider")
+		// Provider or Compresr.Endpoint required
+		if t.Provider == "" && t.Compresr.Endpoint == "" {
+			return fmt.Errorf("tool_output: provider or compresr.endpoint required when strategy=external_provider")
 		}
 		return nil
 	}
-	return fmt.Errorf("tool_output: unknown strategy %q, must be 'passthrough', 'simple', 'api', or 'external_provider'", t.Strategy)
+	return fmt.Errorf("tool_output: unknown strategy %q, must be 'passthrough', 'simple', 'compresr', or 'external_provider'", t.Strategy)
 }
 
 // =============================================================================
@@ -170,21 +171,26 @@ func (t *ToolOutputConfig) Validate() error {
 // ToolDiscoveryConfig configures tool filtering.
 type ToolDiscoveryConfig struct {
 	Enabled          bool   `yaml:"enabled"`           // Enable this pipe
-	Strategy         string `yaml:"strategy"`          // passthrough | api | relevance
+	Strategy         string `yaml:"strategy"`          // passthrough | compresr | relevance
 	FallbackStrategy string `yaml:"fallback_strategy"` // Fallback when primary fails
 
-	// Provider reference (preferred over inline API config)
+	// Provider reference (preferred over inline Compresr config)
 	// References a provider defined in the top-level "providers" section.
 	Provider string `yaml:"provider,omitempty"`
 
-	// API strategy config
-	API APIConfig `yaml:"api,omitempty"`
+	// Compresr strategy config
+	Compresr CompresrConfig `yaml:"compresr,omitempty"`
 
 	// Filtering settings
 	MinTools    int      `yaml:"min_tools"`    // Below this count, no filtering (default: 5)
 	MaxTools    int      `yaml:"max_tools"`    // Keep at most this many tools (default: 25)
 	TargetRatio float64  `yaml:"target_ratio"` // Keep this ratio of tools (e.g., 0.8 = 80%)
 	AlwaysKeep  []string `yaml:"always_keep"`  // Tool names to never filter out
+
+	// Hybrid search fallback (allows LLM to request filtered-out tools)
+	EnableSearchFallback bool   `yaml:"enable_search_fallback"` // Inject gateway_search_tools (default: true when filtering)
+	SearchToolName       string `yaml:"search_tool_name"`       // Name of the search tool (default: "gateway_search_tools")
+	MaxSearchResults     int    `yaml:"max_search_results"`     // Max tools returned by search (default: 5)
 }
 
 // Validate validates tool discovery pipe config.
@@ -198,24 +204,27 @@ func (d *ToolDiscoveryConfig) Validate() error {
 	if d.Strategy == StrategyRelevance {
 		return nil // No external dependencies needed
 	}
-	if d.Strategy == StrategyAPI {
-		// Provider or API.Endpoint required
-		if d.Provider == "" && d.API.Endpoint == "" {
-			return fmt.Errorf("tool_discovery: provider or api.endpoint required when strategy=api")
+	if d.Strategy == StrategyToolSearch {
+		return nil // Local regex-based search, no external dependencies
+	}
+	if d.Strategy == StrategyCompresr {
+		// Provider or Compresr.Endpoint required
+		if d.Provider == "" && d.Compresr.Endpoint == "" {
+			return fmt.Errorf("tool_discovery: provider or compresr.endpoint required when strategy=compresr")
 		}
 		return nil
 	}
-	return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', or 'api'", d.Strategy)
+	return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', 'tool-search', or 'compresr'", d.Strategy)
 }
 
 // =============================================================================
 // STRATEGY-SPECIFIC CONFIGS
 // =============================================================================
 
-// APIConfig contains settings for calling compression APIs.
+// CompresrConfig contains settings for calling the Compresr compression API.
 // Not used in current release - tool output compression is disabled.
-type APIConfig struct {
-	Endpoint      string        `yaml:"endpoint"`       // API endpoint URL
+type CompresrConfig struct {
+	Endpoint      string        `yaml:"endpoint"`       // Compresr API endpoint URL
 	APIKey        string        `yaml:"api_key"`        // API authentication key
 	Model         string        `yaml:"model"`          // Compression model to use
 	Timeout       time.Duration `yaml:"timeout"`        // Request timeout

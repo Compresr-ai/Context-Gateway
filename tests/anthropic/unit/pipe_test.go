@@ -18,7 +18,7 @@ import (
 
 // TestPipeName verifies Name() returns "tool_output".
 func TestPipeName(t *testing.T) {
-	cfg := fixtures.TestConfig(config.StrategyAPI, 100, true)
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 100, true)
 	pipe := tooloutput.New(cfg, fixtures.TestStore())
 	assert.Equal(t, "tool_output", pipe.Name())
 }
@@ -30,7 +30,7 @@ func TestPipeStrategy(t *testing.T) {
 		strategy string
 	}{
 		{"passthrough", config.StrategyPassthrough},
-		{"api", config.StrategyAPI},
+		{"api", config.StrategyCompresr},
 	}
 
 	for _, tc := range testCases {
@@ -44,7 +44,7 @@ func TestPipeStrategy(t *testing.T) {
 
 // TestPipeEnabled verifies Enabled() returns config.Enabled value.
 func TestPipeEnabled(t *testing.T) {
-	cfgEnabled := fixtures.TestConfig(config.StrategyAPI, 100, true)
+	cfgEnabled := fixtures.TestConfig(config.StrategyCompresr, 100, true)
 	pipeEnabled := tooloutput.New(cfgEnabled, fixtures.TestStore())
 	assert.True(t, pipeEnabled.Enabled())
 
@@ -55,7 +55,7 @@ func TestPipeEnabled(t *testing.T) {
 
 // TestPipeClose verifies Close() cleans up resources.
 func TestPipeClose(t *testing.T) {
-	cfg := fixtures.TestConfig(config.StrategyAPI, 100, true)
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 100, true)
 	pipe := tooloutput.New(cfg, fixtures.TestStore())
 	// Close should not panic
 	pipe.Close()
@@ -63,7 +63,7 @@ func TestPipeClose(t *testing.T) {
 
 // TestPipeMetrics verifies metrics are tracked.
 func TestPipeMetrics(t *testing.T) {
-	cfg := fixtures.TestConfig(config.StrategyAPI, 100, true)
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 100, true)
 	pipe := tooloutput.New(cfg, fixtures.TestStore())
 	metrics := pipe.GetMetrics()
 	assert.NotNil(t, metrics)
@@ -94,12 +94,12 @@ func TestPipeQueryAgnostic(t *testing.T) {
 		},
 		{
 			name:          "custom_query_agnostic_true",
-			config:        fixtures.TestConfigWithModelAndQuery(config.StrategyAPI, "custom_model", 256, false, true),
+			config:        fixtures.TestConfigWithModelAndQuery(config.StrategyCompresr, "custom_model", 256, false, true),
 			queryAgnostic: true,
 		},
 		{
 			name:          "custom_query_agnostic_false",
-			config:        fixtures.TestConfigWithModelAndQuery(config.StrategyAPI, "custom_model", 256, false, false),
+			config:        fixtures.TestConfigWithModelAndQuery(config.StrategyCompresr, "custom_model", 256, false, false),
 			queryAgnostic: false,
 		},
 	}

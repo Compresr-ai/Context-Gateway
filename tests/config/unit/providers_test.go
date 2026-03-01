@@ -202,7 +202,7 @@ func TestConfig_ValidateUsedProviders(t *testing.T) {
 		cfg := baseConfig()
 		cfg.Pipes.ToolOutput.Enabled = true
 		cfg.Pipes.ToolOutput.Strategy = "api"
-		cfg.Pipes.ToolOutput.API = pipes.APIConfig{
+		cfg.Pipes.ToolOutput.Compresr = pipes.CompresrConfig{
 			Endpoint: "https://example.com",
 		}
 

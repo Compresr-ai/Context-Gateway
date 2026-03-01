@@ -19,6 +19,18 @@ import (
 	"github.com/compresr/context-gateway/internal/adapters"
 )
 
+// Strategy constants for preemptive summarization.
+const (
+	StrategyExternalProvider = "external_provider" // Use LLM provider for summarization
+	StrategyCompresr         = "compresr"          // Use Compresr API for history compression
+)
+
+// CodexDetectorConfig for Codex detection.
+type CodexDetectorConfig struct {
+	Enabled        bool     `yaml:"enabled"`
+	PromptPatterns []string `yaml:"prompt_patterns"`
+}
+
 // =============================================================================
 // CONFIGURATION
 // =============================================================================
@@ -39,6 +51,7 @@ type Config struct {
 	TestContextWindowOverride int `yaml:"test_context_window_override,omitempty"`
 
 	// Logging
+	LoggingEnabled    bool   `yaml:"logging_enabled,omitempty"` // Controls history_compaction.jsonl (follows telemetry_enabled)
 	LogDir            string `yaml:"log_dir,omitempty"`
 	CompactionLogPath string `yaml:"compaction_log_path,omitempty"`
 
@@ -53,14 +66,17 @@ type Config struct {
 
 // SummarizerConfig configures the summarization service.
 type SummarizerConfig struct {
-	// Provider reference (preferred over inline settings)
+	// Strategy: "external_provider" (LLM) or "compresr" (Compresr API with hcc_espresso_v1)
+	Strategy string `yaml:"strategy"`
+
+	// Provider reference (for strategy: "external_provider")
 	// References a provider defined in the top-level "providers" section.
 	// For Bedrock, set to "bedrock" — uses SigV4 signing instead of API key.
 	Provider string `yaml:"provider,omitempty"`
 
 	// Inline settings (used if Provider is not set, or for overrides)
 	Model              string        `yaml:"model"`
-	APIKey             string        `yaml:"api_key"`
+	APISecret          string        `yaml:"api_key"`
 	Endpoint           string        `yaml:"endpoint"`
 	MaxTokens          int           `yaml:"max_tokens"`
 	Timeout            time.Duration `yaml:"timeout"`
@@ -68,12 +84,28 @@ type SummarizerConfig struct {
 	KeepRecentCount    int           `yaml:"keep_recent"`          // Message-based (legacy fallback)
 	TokenEstimateRatio int           `yaml:"token_estimate_ratio"` // Bytes per token for estimation
 	SystemPrompt       string        `yaml:"system_prompt,omitempty"`
+
+	// Compresr config (for strategy: "compresr")
+	Compresr *CompresrConfig `yaml:"compresr,omitempty"`
+
+	// CompresrBaseURL is the Compresr platform base URL (e.g., "https://api.compresr.ai").
+	// Injected from cfg.URLs.Compresr at startup — not from YAML directly.
+	CompresrBaseURL string `yaml:"-"`
+}
+
+// CompresrConfig for Compresr API compression.
+type CompresrConfig struct {
+	Endpoint string        `yaml:"endpoint"` // e.g., "/api/compress/history/"
+	APIKey   string        `yaml:"api_key"`
+	Model    string        `yaml:"model"` // e.g., "hcc_espresso_v1"
+	Timeout  time.Duration `yaml:"timeout"`
 }
 
 // SessionConfig configures session management.
 type SessionConfig struct {
-	SummaryTTL       time.Duration `yaml:"summary_ttl"`
-	HashMessageCount int           `yaml:"hash_message_count"`
+	SummaryTTL           time.Duration `yaml:"summary_ttl"`
+	HashMessageCount     int           `yaml:"hash_message_count"`
+	DisableFuzzyMatching bool          `yaml:"disable_fuzzy_matching"` // Opt-out of fuzzy matching
 }
 
 // DetectorsConfig contains agent-specific compaction detectors.
@@ -89,11 +121,7 @@ type ClaudeCodeDetectorConfig struct {
 	PromptPatterns []string `yaml:"prompt_patterns"`
 }
 
-// CodexDetectorConfig for Codex detection.
-type CodexDetectorConfig struct {
-	Enabled        bool     `yaml:"enabled"`
-	PromptPatterns []string `yaml:"prompt_patterns"`
-}
+// (CodexDetectorConfig removed)
 
 // GenericDetectorConfig for generic detection.
 type GenericDetectorConfig struct {
@@ -111,19 +139,50 @@ func (c *Config) Validate() error {
 	if c.TriggerThreshold <= 0 || c.TriggerThreshold > 100 {
 		return fmt.Errorf("trigger_threshold must be between 0 and 100")
 	}
-	// Model is required unless using provider reference
-	if c.Summarizer.Provider == "" && c.Summarizer.Model == "" {
-		return fmt.Errorf("summarizer.model is required (or use provider reference)")
+
+	// Validate strategy
+	if c.Summarizer.Strategy == "" {
+		c.Summarizer.Strategy = StrategyExternalProvider // default to provider (backward compat)
 	}
-	// API key is optional - can be captured from incoming requests (Max/Pro users)
-	// Bedrock uses SigV4 signing (no API key needed)
-	// Runtime error will occur in callAPI if no auth is available
-	if c.Summarizer.MaxTokens <= 0 {
-		return fmt.Errorf("summarizer.max_tokens must be positive")
+	if c.Summarizer.Strategy != StrategyExternalProvider && c.Summarizer.Strategy != StrategyCompresr {
+		return fmt.Errorf("summarizer.strategy must be 'external_provider' or 'compresr'")
 	}
-	if c.Summarizer.Timeout <= 0 {
-		return fmt.Errorf("summarizer.timeout must be positive")
+
+	// Strategy-specific validation
+	switch c.Summarizer.Strategy {
+	case StrategyExternalProvider:
+		// Model is required unless using provider reference
+		if c.Summarizer.Provider == "" && c.Summarizer.Model == "" {
+			return fmt.Errorf("summarizer.model is required (or use provider reference)")
+		}
+		// API key is optional - can be captured from incoming requests (Max/Pro users)
+		// Bedrock uses SigV4 signing (no API key needed)
+		// Runtime error will occur in callAPI if no auth is available
+		if c.Summarizer.MaxTokens <= 0 {
+			return fmt.Errorf("summarizer.max_tokens must be positive")
+		}
+		if c.Summarizer.Timeout <= 0 {
+			return fmt.Errorf("summarizer.timeout must be positive")
+		}
+	case StrategyCompresr:
+		// API config validation
+		if c.Summarizer.Compresr == nil {
+			return fmt.Errorf("summarizer.compresr is required when strategy is 'compresr'")
+		}
+		if c.Summarizer.Compresr.Endpoint == "" {
+			return fmt.Errorf("summarizer.compresr.endpoint is required")
+		}
+		if c.Summarizer.Compresr.APIKey == "" {
+			return fmt.Errorf("summarizer.compresr.api_key is required")
+		}
+		if c.Summarizer.Compresr.Model == "" {
+			return fmt.Errorf("summarizer.compresr.model is required")
+		}
+		if c.Summarizer.Compresr.Timeout <= 0 {
+			return fmt.Errorf("summarizer.compresr.timeout must be positive")
+		}
 	}
+
 	if c.Session.SummaryTTL <= 0 {
 		return fmt.Errorf("session.summary_ttl must be positive")
 	}
@@ -131,6 +190,21 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("session.hash_message_count must be positive")
 	}
 	return nil
+}
+
+// EffectiveModelAndProvider returns the model and provider names based on the active strategy.
+// For "compresr" strategy, model comes from API.Model and provider is "compresr_api".
+// For "external_provider" strategy, model and provider come from the inline fields.
+func (sc *SummarizerConfig) EffectiveModelAndProvider() (model, provider string) {
+	switch sc.Strategy {
+	case StrategyCompresr:
+		if sc.Compresr != nil {
+			return sc.Compresr.Model, "compresr_api"
+		}
+		return "", "compresr_api"
+	default:
+		return sc.Model, sc.Provider
+	}
 }
 
 // =============================================================================
@@ -196,6 +270,11 @@ type request struct {
 	sessionID string
 	provider  adapters.Provider
 	detection DetectionResult
+
+	// Per-request auth captured from headers
+	authToken     string // Captured auth token from this request
+	authIsXAPIKey bool   // true if from x-api-key header
+	authEndpoint  string // Captured endpoint for this request
 }
 
 // summaryResult contains the result of a summarization.

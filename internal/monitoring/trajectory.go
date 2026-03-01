@@ -39,6 +39,7 @@ type TrajectoryTracker struct {
 	trajectory *Trajectory
 	mu         sync.Mutex
 	closed     bool
+	lastActive time.Time
 }
 
 // NewTrajectoryTracker creates a new trajectory tracker.
@@ -63,6 +64,7 @@ func NewTrajectoryTracker(cfg TrajectoryConfig) (*TrajectoryTracker, error) {
 		agentName = "context-gateway"
 	}
 	t.trajectory = NewTrajectory(sessionID, agentName, "1.0.0")
+	t.lastActive = time.Now()
 
 	// Ensure directory exists
 	if cfg.LogPath != "" {
@@ -94,6 +96,7 @@ func (t *TrajectoryTracker) RecordUserMessage(message string) {
 
 	step := NewUserStep(message)
 	t.trajectory.AddStep(step)
+	t.lastActive = time.Now()
 
 	// Flush to disk immediately
 	t.flushLocked()
@@ -136,6 +139,7 @@ func (t *TrajectoryTracker) RecordAgentResponse(response AgentResponseData) {
 	}
 
 	t.trajectory.AddStep(step)
+	t.lastActive = time.Now()
 
 	// Flush to disk immediately
 	t.flushLocked()
@@ -178,6 +182,7 @@ func (t *TrajectoryTracker) RecordToolResult(toolCallID string, content string) 
 						SourceCallID: toolCallID,
 						Content:      content,
 					})
+					t.lastActive = time.Now()
 					// Flush to disk immediately
 					t.flushLocked()
 					return
@@ -207,6 +212,7 @@ func (t *TrajectoryTracker) RecordSystemMessage(message string) {
 
 	step := NewSystemStep(message)
 	t.trajectory.AddStep(step)
+	t.lastActive = time.Now()
 
 	// Flush to disk immediately
 	t.flushLocked()
@@ -255,6 +261,7 @@ func (t *TrajectoryTracker) SetAgentModel(model string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.trajectory.Agent.ModelName = model
+	t.lastActive = time.Now()
 }
 
 // AddNote appends a note to the trajectory.
@@ -268,6 +275,20 @@ func (t *TrajectoryTracker) AddNote(note string) {
 		t.trajectory.Notes += "\n"
 	}
 	t.trajectory.Notes += note
+	t.lastActive = time.Now()
+}
+
+// LastActivity returns the timestamp of the last tracker update.
+func (t *TrajectoryTracker) LastActivity() time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.lastActive.IsZero() {
+		return time.Now()
+	}
+	return t.lastActive
 }
 
 // =============================================================================
@@ -550,6 +571,7 @@ func (t *TrajectoryTracker) RecordProxyInteraction(data ProxyInteractionData) {
 					TokenCount: data.ResponseTokens,
 				},
 			}
+			t.lastActive = time.Now()
 
 			// Add compression info if compression was applied
 			if data.CompressionEnabled && data.ClientTokens > 0 {
@@ -591,9 +613,11 @@ func (t *TrajectoryTracker) RecordProxyInteraction(data ProxyInteractionData) {
 
 // TrajectoryManagerConfig contains configuration for the trajectory manager.
 type TrajectoryManagerConfig struct {
-	Enabled   bool   // Enable trajectory logging
-	BaseDir   string // Base directory for trajectory files (e.g., "logs/session_1/")
-	AgentName string // Agent name (e.g., "claude-code")
+	Enabled         bool          // Enable trajectory logging
+	BaseDir         string        // Base directory for trajectory files (e.g., "logs/session_1/")
+	AgentName       string        // Agent name (e.g., "claude-code")
+	SessionTTL      time.Duration // Inactive session eviction TTL
+	CleanupInterval time.Duration // Inactive session cleanup interval
 }
 
 // TrajectoryManager manages multiple TrajectoryTrackers by session ID.
@@ -602,14 +626,29 @@ type TrajectoryManager struct {
 	config   TrajectoryManagerConfig
 	trackers map[string]*TrajectoryTracker
 	mu       sync.RWMutex
+	stopChan chan struct{}
+	wg       sync.WaitGroup
 }
 
 // NewTrajectoryManager creates a new trajectory manager.
 func NewTrajectoryManager(cfg TrajectoryManagerConfig) *TrajectoryManager {
-	return &TrajectoryManager{
+	if cfg.SessionTTL <= 0 {
+		cfg.SessionTTL = time.Hour
+	}
+	if cfg.CleanupInterval <= 0 {
+		cfg.CleanupInterval = 5 * time.Minute
+	}
+
+	m := &TrajectoryManager{
 		config:   cfg,
 		trackers: make(map[string]*TrajectoryTracker),
+		stopChan: make(chan struct{}),
 	}
+	if cfg.Enabled {
+		m.wg.Add(1)
+		go m.cleanupLoop()
+	}
+	return m
 }
 
 // Enabled returns whether trajectory tracking is enabled.
@@ -707,6 +746,14 @@ func (m *TrajectoryManager) SetAgentModel(sessionID string, model string) {
 
 // CloseAll closes all managed trackers.
 func (m *TrajectoryManager) CloseAll() error {
+	select {
+	case <-m.stopChan:
+		// already closed
+	default:
+		close(m.stopChan)
+	}
+	m.wg.Wait()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -719,6 +766,52 @@ func (m *TrajectoryManager) CloseAll() error {
 	}
 	m.trackers = make(map[string]*TrajectoryTracker)
 	return lastErr
+}
+
+func (m *TrajectoryManager) cleanupLoop() {
+	defer m.wg.Done()
+
+	ticker := time.NewTicker(m.config.CleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopChan:
+			return
+		case <-ticker.C:
+			m.cleanupInactiveTrackers()
+		}
+	}
+}
+
+func (m *TrajectoryManager) cleanupInactiveTrackers() {
+	if !m.config.Enabled || m.config.SessionTTL <= 0 {
+		return
+	}
+
+	cutoff := time.Now().Add(-m.config.SessionTTL)
+	stale := make(map[string]*TrajectoryTracker)
+
+	m.mu.Lock()
+	for sessionID, tracker := range m.trackers {
+		if tracker == nil {
+			delete(m.trackers, sessionID)
+			continue
+		}
+		if tracker.LastActivity().Before(cutoff) {
+			stale[sessionID] = tracker
+			delete(m.trackers, sessionID)
+		}
+	}
+	m.mu.Unlock()
+
+	for sessionID, tracker := range stale {
+		if err := tracker.Close(); err != nil {
+			log.Error().Err(err).Str("session_id", sessionID).Msg("trajectory manager: failed to close evicted tracker")
+		} else {
+			log.Debug().Str("session_id", sessionID).Msg("trajectory manager: evicted inactive tracker")
+		}
+	}
 }
 
 // Stats returns statistics about managed trackers.

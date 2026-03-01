@@ -6,6 +6,9 @@ package config
 
 import "github.com/compresr/context-gateway/internal/preemptive"
 
+// CodexDetectorConfig is an alias for preemptive.CodexDetectorConfig.
+type CodexDetectorConfig = preemptive.CodexDetectorConfig
+
 // =============================================================================
 // RE-EXPORTS FROM preemptive PACKAGE
 // =============================================================================
@@ -24,9 +27,6 @@ type DetectorsConfig = preemptive.DetectorsConfig
 
 // ClaudeCodeDetectorConfig is an alias for preemptive.ClaudeCodeDetectorConfig.
 type ClaudeCodeDetectorConfig = preemptive.ClaudeCodeDetectorConfig
-
-// CodexDetectorConfig is an alias for preemptive.CodexDetectorConfig.
-type CodexDetectorConfig = preemptive.CodexDetectorConfig
 
 // GenericDetectorConfig is an alias for preemptive.GenericDetectorConfig.
 type GenericDetectorConfig = preemptive.GenericDetectorConfig

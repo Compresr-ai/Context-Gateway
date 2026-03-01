@@ -23,9 +23,9 @@ import (
 
 // TestE1_CompressionAPIFailure verifies graceful fallback on API error.
 func TestE1_CompressionAPIFailure(t *testing.T) {
-	cfg := fixtures.TestConfig(config.StrategyAPI, 50, true)
-	cfg.Pipes.ToolOutput.API.Endpoint = "http://invalid-endpoint:9999/fail"
-	cfg.Pipes.ToolOutput.API.Timeout = 100 * time.Millisecond
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 50, true)
+	cfg.Pipes.ToolOutput.Compresr.Endpoint = "http://invalid-endpoint:9999/fail"
+	cfg.Pipes.ToolOutput.Compresr.Timeout = 100 * time.Millisecond
 	st := fixtures.TestStore()
 
 	pipe := tooloutput.New(cfg, st)
@@ -42,7 +42,7 @@ func TestE1_CompressionAPIFailure(t *testing.T) {
 
 // TestE3_ContentTooLarge verifies oversized content skips compression.
 func TestE3_ContentTooLarge(t *testing.T) {
-	cfg := fixtures.TestConfig(config.StrategyAPI, 50, true)
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 50, true)
 	cfg.Pipes.ToolOutput.MaxBytes = 1000 // Small max for test
 	st := fixtures.TestStore()
 
@@ -60,7 +60,7 @@ func TestE3_ContentTooLarge(t *testing.T) {
 
 // TestE4_CacheMissOnFirstRequest verifies cold start behavior.
 func TestE4_CacheMissOnFirstRequest(t *testing.T) {
-	cfg := fixtures.TestConfig(config.StrategyAPI, 50, true)
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 50, true)
 	st := fixtures.TestStore() // Empty store
 
 	pipe := tooloutput.New(cfg, st)
@@ -126,7 +126,7 @@ func TestE24_PrefixFormat(t *testing.T) {
 
 // TestBelowMinThreshold verifies content below minBytes is not compressed.
 func TestBelowMinThreshold(t *testing.T) {
-	cfg := fixtures.TestConfig(config.StrategyAPI, 500, true) // 500 byte min
+	cfg := fixtures.TestConfig(config.StrategyCompresr, 500, true) // 500 byte min
 	pipe := tooloutput.New(cfg, fixtures.TestStore())
 
 	smallContent := strings.Repeat("x", 100) // Below 500

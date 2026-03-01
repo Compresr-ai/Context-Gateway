@@ -21,7 +21,7 @@ func createTestConfig() preemptive.Config {
 		TriggerThreshold: 80.0,
 		Summarizer: preemptive.SummarizerConfig{
 			Model:           "claude-haiku-4-5",
-			APIKey:          "test-api-key",
+			APISecret:       "test-api-key",
 			Endpoint:        "https://api.anthropic.com/v1/messages",
 			MaxTokens:       4096,
 			Timeout:         60 * time.Second,

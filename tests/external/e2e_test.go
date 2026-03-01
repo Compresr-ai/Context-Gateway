@@ -517,9 +517,9 @@ func cfg(endpoint string) *config.Config {
 				Strategy:         pipes.StrategyExternalProvider,
 				FallbackStrategy: pipes.StrategyPassthrough,
 				MinBytes:         10,
-				API: pipes.APIConfig{
+				Compresr: pipes.CompresrConfig{
 					Endpoint:      endpoint,
-					APIKey:        "test-key",
+					APIKey:     "test-key",
 					Model:         "gpt-5-nano",
 					Timeout:       30 * time.Second,
 					QueryAgnostic: false,
@@ -531,7 +531,7 @@ func cfg(endpoint string) *config.Config {
 
 func cfgQueryAgnostic(endpoint string) *config.Config {
 	c := cfg(endpoint)
-	c.Pipes.ToolOutput.API.QueryAgnostic = true
+	c.Pipes.ToolOutput.Compresr.QueryAgnostic = true
 	return c
 }
 
@@ -543,9 +543,9 @@ func cfgAnthropic(endpoint string) *config.Config {
 				Strategy:         pipes.StrategyExternalProvider,
 				FallbackStrategy: pipes.StrategyPassthrough,
 				MinBytes:         10,
-				API: pipes.APIConfig{
+				Compresr: pipes.CompresrConfig{
 					Endpoint:      endpoint,
-					APIKey:        "test-key",
+					APIKey:     "test-key",
 					Model:         "claude-haiku-4-5",
 					Timeout:       30 * time.Second,
 					QueryAgnostic: false,
@@ -563,11 +563,11 @@ func cfgWithFallback(endpoint string) *config.Config {
 				Strategy:         pipes.StrategyExternalProvider,
 				FallbackStrategy: pipes.StrategyPassthrough,
 				MinBytes:         10,
-				API: pipes.APIConfig{
-					Endpoint: endpoint,
-					APIKey:   "key",
-					Model:    "gpt-5-nano",
-					Timeout:  5 * time.Second,
+				Compresr: pipes.CompresrConfig{
+					Endpoint:  endpoint,
+					APIKey: "key",
+					Model:     "gpt-5-nano",
+					Timeout:   5 * time.Second,
 				},
 			},
 		},
@@ -582,11 +582,11 @@ func cfgWithTimeout(endpoint string) *config.Config {
 				Strategy:         pipes.StrategyExternalProvider,
 				FallbackStrategy: pipes.StrategyPassthrough,
 				MinBytes:         10,
-				API: pipes.APIConfig{
-					Endpoint: endpoint,
-					APIKey:   "key",
-					Model:    "gpt-5-nano",
-					Timeout:  100 * time.Millisecond, // Short timeout
+				Compresr: pipes.CompresrConfig{
+					Endpoint:  endpoint,
+					APIKey: "key",
+					Model:     "gpt-5-nano",
+					Timeout:   100 * time.Millisecond, // Short timeout
 				},
 			},
 		},
@@ -600,11 +600,11 @@ func cfgHighMinBytes(endpoint string) *config.Config {
 				Enabled:  true,
 				Strategy: pipes.StrategyExternalProvider,
 				MinBytes: 1000, // High threshold
-				API: pipes.APIConfig{
-					Endpoint: endpoint,
-					APIKey:   "key",
-					Model:    "gpt-5-nano",
-					Timeout:  5 * time.Second,
+				Compresr: pipes.CompresrConfig{
+					Endpoint:  endpoint,
+					APIKey: "key",
+					Model:     "gpt-5-nano",
+					Timeout:   5 * time.Second,
 				},
 			},
 		},

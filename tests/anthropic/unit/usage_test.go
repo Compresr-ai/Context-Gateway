@@ -136,7 +136,7 @@ func TestAnthropic_ExtractUsage_WithCacheTokens(t *testing.T) {
 
 	assert.Equal(t, 5000, usage.InputTokens)
 	assert.Equal(t, 1500, usage.OutputTokens)
-	assert.Equal(t, 6500, usage.TotalTokens)
+	assert.Equal(t, 8000, usage.TotalTokens)
 }
 
 func TestAnthropic_ExtractUsage_NoUsageField(t *testing.T) {

@@ -16,11 +16,14 @@ import (
 	"time"
 )
 
-// V2: Default TTL values
+// V2: Default TTL values - re-exported from config for backward compatibility.
 const (
 	DefaultOriginalTTL   = 5 * time.Minute // Short TTL for original content
 	DefaultCompressedTTL = 24 * time.Hour  // Long TTL for compressed (KV-cache)
 )
+
+// Note: These match config.DefaultOriginalTTL and config.DefaultCompressedTTL.
+// Kept here for package-local usage without import cycles.
 
 // ExpansionRecord stores the expand_context interaction that happened during a request.
 // This is used to reconstruct history for KV-cache preservation.

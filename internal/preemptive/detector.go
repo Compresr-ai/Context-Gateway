@@ -42,6 +42,55 @@ func GetDetector(provider adapters.Provider, cfg DetectorsConfig) CompactionDete
 }
 
 // =============================================================================
+// OPENAI DETECTOR (Codex, GPT, etc.)
+// =============================================================================
+
+// OpenAIDetector detects OpenAI-based compaction requests.
+type OpenAIDetector struct {
+	patterns []string
+}
+
+func (d *OpenAIDetector) Detect(body []byte) DetectionResult {
+	return d.DetectWithPath(body, "")
+}
+
+// DetectWithPath detects compaction requests, checking URL path first (for Codex).
+func (d *OpenAIDetector) DetectWithPath(body []byte, path string) DetectionResult {
+	// Priority 1: URL path-based detection (Codex sends to /responses/compact)
+	if strings.HasSuffix(path, "/compact") {
+		return DetectionResult{
+			IsCompactionRequest: true,
+			DetectedBy:          "openai_path",
+			Confidence:          1.0,
+			Details:             map[string]interface{}{"path": path},
+		}
+	}
+
+	// Priority 2: Prompt pattern-based detection
+	var req requestBody
+	if err := json.Unmarshal(body, &req); err != nil {
+		return DetectionResult{}
+	}
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			text := strings.ToLower(ExtractText(req.Messages[i].Content))
+			for _, phrase := range d.patterns {
+				if strings.Contains(text, strings.ToLower(phrase)) {
+					return DetectionResult{
+						IsCompactionRequest: true,
+						DetectedBy:          "openai_prompt",
+						Confidence:          0.95,
+						Details:             map[string]interface{}{"matched_phrase": phrase},
+					}
+				}
+			}
+			break
+		}
+	}
+	return DetectionResult{}
+}
+
+// =============================================================================
 // CLAUDE DETECTOR (Anthropic)
 // =============================================================================
 
@@ -78,40 +127,7 @@ func (d *ClaudeDetector) Detect(body []byte) DetectionResult {
 }
 
 // =============================================================================
-// OPENAI DETECTOR (Codex, GPT, etc.)
-// =============================================================================
-
-// OpenAIDetector detects OpenAI-based compaction requests.
-type OpenAIDetector struct {
-	patterns []string
-}
-
-func (d *OpenAIDetector) Detect(body []byte) DetectionResult {
-	var req requestBody
-	if err := json.Unmarshal(body, &req); err != nil {
-		return DetectionResult{}
-	}
-
-	// Check last user message
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			text := strings.ToLower(ExtractText(req.Messages[i].Content))
-			for _, phrase := range d.patterns {
-				if strings.Contains(text, strings.ToLower(phrase)) {
-					return DetectionResult{
-						IsCompactionRequest: true,
-						DetectedBy:          "openai_prompt",
-						Confidence:          0.7,
-						Details:             map[string]interface{}{"matched_phrase": phrase},
-					}
-				}
-			}
-			break
-		}
-	}
-
-	return DetectionResult{}
-}
+// (OpenAIDetector removed)
 
 // =============================================================================
 // SHARED TYPES

@@ -25,6 +25,33 @@ func normalizeOpenAIPath(path string) string {
 	return path
 }
 
+// normalizeChatGPTPath transforms paths for ChatGPT subscription endpoint.
+// ChatGPT subscription uses /backend-api/codex/responses instead of /v1/responses
+func normalizeChatGPTPath(path string) string {
+	// Map /responses/* or /v1/responses/* to /codex/responses/*
+	if path == "/responses" || path == "/v1/responses" {
+		return "/codex/responses"
+	}
+	if strings.HasPrefix(path, "/responses/") {
+		return "/codex" + path // /responses/compact → /codex/responses/compact
+	}
+	if strings.HasPrefix(path, "/v1/responses/") {
+		return "/codex" + strings.TrimPrefix(path, "/v1") // /v1/responses/compact → /codex/responses/compact
+	}
+	return path
+}
+
+// isChatGPTSubscription checks if this is a ChatGPT subscription request (non-API key bearer token)
+func isChatGPTSubscription(r *http.Request) bool {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return false
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	// API keys start with sk-, subscription tokens don't
+	return !strings.HasPrefix(token, "sk-")
+}
+
 // autoDetectTargetURL determines the upstream URL based on request characteristics.
 func (g *Gateway) autoDetectTargetURL(r *http.Request) string {
 	path := r.URL.Path
@@ -36,35 +63,58 @@ func (g *Gateway) autoDetectTargetURL(r *http.Request) string {
 
 	// 1. Anthropic: anthropic-version header is definitive
 	if r.Header.Get("anthropic-version") != "" {
-		return Providers["anthropic"].BaseURL + path
+		return getProviderBaseURL("anthropic") + path
 	}
 
 	// 2. Check x-api-key for Anthropic pattern (sk-ant-)
 	if strings.HasPrefix(r.Header.Get("x-api-key"), "sk-ant-") {
-		return Providers["anthropic"].BaseURL + path
+		return getProviderBaseURL("anthropic") + path
 	}
 
 	// 3. Check Authorization header - distinguish providers by API key prefix
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		// Anthropic: Bearer sk-ant-xxx
 		if strings.HasPrefix(auth, "Bearer sk-ant-") {
-			return Providers["anthropic"].BaseURL + path
+			return getProviderBaseURL("anthropic") + path
 		}
 		// OpenRouter: Bearer sk-or-xxx
 		if strings.HasPrefix(auth, "Bearer sk-or-") {
 			path = normalizeOpenAIPath(path)
-			return Providers["openrouter"].BaseURL + path
+			return getProviderBaseURL("openrouter") + path
 		}
 		// OpenAI: Bearer sk-xxx (but not sk-ant- or sk-or-)
+		// Always route API keys to api.openai.com regardless of OPENAI_PROVIDER_URL
 		if strings.HasPrefix(auth, "Bearer sk-") {
 			path = normalizeOpenAIPath(path)
-			return Providers["openai"].BaseURL + path
+			return "https://api.openai.com" + path
+		}
+		// ChatGPT subscription: Bearer token without sk- prefix
+		// Always route subscription tokens to chatgpt.com regardless of OPENAI_PROVIDER_URL
+		if isChatGPTSubscription(r) {
+			return "https://chatgpt.com/backend-api" + normalizeChatGPTPath(path)
 		}
 	}
 
 	// 4. Match by path using provider configuration
 	if provider := GetProviderByPath(path); provider != nil {
-		return provider.BaseURL + path
+		// For OpenAI paths, use token-based detection to choose endpoint
+		if provider.Name == "openai" {
+			auth := r.Header.Get("Authorization")
+			// API key: route to api.openai.com
+			if strings.HasPrefix(auth, "Bearer sk-") {
+				return "https://api.openai.com" + normalizeOpenAIPath(path)
+			}
+			// Subscription token: route to chatgpt.com
+			if isChatGPTSubscription(r) {
+				return "https://chatgpt.com/backend-api" + normalizeChatGPTPath(path)
+			}
+		}
+		// Normalize path for OpenAI and OpenRouter (API key auth)
+		normalizedPath := path
+		if provider.Name == "openai" || provider.Name == "openrouter" {
+			normalizedPath = normalizeOpenAIPath(path)
+		}
+		return provider.BaseURL + normalizedPath
 	}
 
 	return ""

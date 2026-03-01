@@ -36,6 +36,8 @@ type CompactionEvent struct {
 	DurationMs         int64                  `json:"duration_ms,omitempty"`
 	Error              string                 `json:"error,omitempty"`
 	Details            map[string]interface{} `json:"details,omitempty"`
+	OriginalContent    string                 `json:"original_content,omitempty"`
+	CompressedContent  string                 `json:"compressed_content,omitempty"`
 }
 
 var (
@@ -45,7 +47,7 @@ var (
 
 // InitCompactionLogger initializes the logger with a directory path.
 func InitCompactionLogger(logDir string) error {
-	return InitCompactionLoggerWithPath(filepath.Join(logDir, "compaction.jsonl"))
+	return InitCompactionLoggerWithPath(filepath.Join(logDir, "history_compaction.jsonl"))
 }
 
 // InitCompactionLoggerWithPath initializes the logger with a file path.
@@ -55,7 +57,7 @@ func InitCompactionLoggerWithPath(logPath string) error {
 		// Handle both directory and file paths
 		path := logPath
 		if filepath.Ext(logPath) != ".jsonl" {
-			path = filepath.Join(logPath, "compaction.jsonl")
+			path = filepath.Join(logPath, "history_compaction.jsonl")
 		}
 
 		// Create directory
@@ -65,7 +67,7 @@ func InitCompactionLoggerWithPath(logPath string) error {
 		}
 
 		// Open file
-		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- user-configured log path
 		if err != nil {
 			initErr = fmt.Errorf("open log file: %w", err)
 			return
@@ -109,7 +111,7 @@ func (cl *CompactionLogger) Log(event CompactionEvent) {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	if data, err := json.Marshal(event); err == nil {
-		cl.file.Write(append(data, '\n'))
+		_, _ = cl.file.Write(append(data, '\n'))
 	}
 }
 
@@ -130,7 +132,7 @@ func (cl *CompactionLogger) LogPreemptiveTrigger(sessionID, model string, msgCou
 }
 
 // LogPreemptiveComplete logs when background summarization finishes.
-func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsSummarized, tokens int, duration time.Duration, summarizerProvider, summarizerModel string) {
+func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsSummarized, tokens int, duration time.Duration, summarizerProvider, summarizerModel string, originalContent, compressedContent string) {
 	cl.Log(CompactionEvent{
 		Event:              "preemptive_complete",
 		SessionID:          sessionID,
@@ -142,6 +144,8 @@ func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsS
 			"summarizer_provider": summarizerProvider,
 			"summarizer_model":    summarizerModel,
 		},
+		OriginalContent:   originalContent,
+		CompressedContent: compressedContent,
 	})
 }
 
@@ -157,7 +161,7 @@ func (cl *CompactionLogger) LogCompactionDetected(sessionID, model, detectedBy s
 }
 
 // LogCompactionApplied logs when compaction is applied.
-func (cl *CompactionLogger) LogCompactionApplied(sessionID, model string, precomputed bool, msgsSummarized, tokens, size int, details map[string]interface{}) {
+func (cl *CompactionLogger) LogCompactionApplied(sessionID, model string, precomputed bool, msgsSummarized, tokens, size int, details map[string]interface{}, compressedContent string) {
 	if details == nil {
 		details = make(map[string]interface{})
 	}
@@ -170,6 +174,7 @@ func (cl *CompactionLogger) LogCompactionApplied(sessionID, model string, precom
 		MessagesSummarized: msgsSummarized,
 		SummaryTokens:      tokens,
 		Details:            details,
+		CompressedContent:  compressedContent,
 	})
 }
 
