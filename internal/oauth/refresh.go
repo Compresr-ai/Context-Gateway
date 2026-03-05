@@ -45,6 +45,7 @@ func RefreshAccessToken(refreshToken string) (*ClaudeCredentials, error) {
 		ClientID:     clientID,
 	}
 
+	// #nosec G117 -- OAuth request body requires refresh_token field name
 	jsonBody, err := json.Marshal(&reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal refresh request: %w", err)

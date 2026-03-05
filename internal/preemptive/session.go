@@ -184,26 +184,6 @@ func (sm *SessionManager) SetSummaryReady(sessionID, summary string, tokens, las
 	return nil
 }
 
-// MarkUsed marks the session's summary as used (deprecated).
-// Use IncrementUseCount instead to keep summary available.
-func (sm *SessionManager) MarkUsed(sessionID string) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	s, ok := sm.sessions[sessionID]
-	if !ok {
-		return
-	}
-
-	s.CompactionUseCount++
-	if s.SummaryUsedAt == nil {
-		now := time.Now()
-		s.SummaryUsedAt = &now
-	}
-	s.State = StateUsed
-	s.LastUpdated = time.Now()
-}
-
 // IncrementUseCount increments the compaction use counter without changing state.
 // This keeps the summary in StateReady, allowing multiple compaction requests
 // to reuse the same precomputed summary.

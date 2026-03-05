@@ -38,7 +38,8 @@ type PipelineContext struct {
 	ReceivedAt   time.Time
 
 	// Expand context usage tracking
-	ExpandLoopCount int // How many times LLM called expand_context
+	ExpandLoopCount int  // How many times LLM called expand_context
+	StreamTruncated bool // True if streaming response exceeded buffer limit
 
 	// Cost control
 	CostSessionID string // Session ID for cost tracking
@@ -50,8 +51,7 @@ type PipelineContext struct {
 	// Metrics
 	OriginalTokenCount   int
 	CompressedTokenCount int
-	OriginalToolCount    int
-	FilteredToolCount    int
+	// Note: OriginalToolCount and FilteredToolCount are in embedded PipeContext
 }
 
 // NewPipelineContext creates a new pipeline context.

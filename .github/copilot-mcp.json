@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "nia": {
+      "type": "stdio",
+      "command": "pipx",
+      "args": [
+        "run",
+        "--no-cache",
+        "nia-mcp-server"
+      ],
+      "env": {
+        "NIA_API_KEY": "nk_aiKm3nJZb1T00Rpm4wdjh7Quk72so1xt",
+        "NIA_API_URL": "https://apigcp.trynia.ai/"
+      },
+      "tools": [
+        "index",
+        "search",
+        "manage_resource",
+        "nia_web_search",
+        "nia_deep_research_agent"
+      ]
+    }
+  }
+}

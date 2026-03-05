@@ -10,6 +10,8 @@ agent:
   name: "opencode"
   display_name: "OpenCode"
   description: "Open-source AI coding assistant with Compresr compression"
+  run_mode: "interactive"     # Gateway and agent run together in same session
+  routing_method: "env_var"   # Set ANTHROPIC_BASE_URL/OPENAI_BASE_URL at runtime
   config: "fast_setup.yaml"
 
   environment:

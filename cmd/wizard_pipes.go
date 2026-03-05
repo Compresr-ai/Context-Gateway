@@ -152,7 +152,7 @@ func editToolDiscovery(state *ConfigState) {
 			)
 
 			// API strategy: show model and API key
-			if state.ToolDiscoveryStrategy == pipes.StrategyCompresr {
+			if pipes.IsAPIStrategy(state.ToolDiscoveryStrategy) {
 				items = append(items,
 					tui.MenuItem{Label: "Model", Description: state.ToolDiscoveryModel, Value: "model"},
 				)
@@ -358,7 +358,7 @@ func editToolDiscoveryAdvanced(state *ConfigState) {
 
 func selectToolDiscoveryStrategy(state *ConfigState) {
 	items := []tui.MenuItem{
-		{Label: "compresr", Description: "Compresr API selects relevant tools", Value: pipes.StrategyCompresr},
+		{Label: "api", Description: "Compresr API selects tools + hybrid search", Value: pipes.StrategyAPI},
 		{Label: "tool-search", Description: "LLM searches via regex pattern", Value: pipes.StrategyToolSearch},
 		{Label: "relevance", Description: "local keyword scoring", Value: pipes.StrategyRelevance},
 		{Label: "passthrough", Description: "no filtering", Value: pipes.StrategyPassthrough},
@@ -372,8 +372,8 @@ func selectToolDiscoveryStrategy(state *ConfigState) {
 
 	selectedStrategy := items[idx].Value
 
-	// If compresr strategy selected, fetch pricing (skip API key prompt if key exists in env)
-	if selectedStrategy == pipes.StrategyCompresr {
+	// If api strategy selected, fetch pricing (skip API key prompt if key exists in env)
+	if pipes.IsAPIStrategy(selectedStrategy) {
 		envKey := os.Getenv(tui.CompresrModels.EnvVar)
 		if envKey != "" {
 			// Key exists in env — use it directly, skip prompt
@@ -492,7 +492,7 @@ func editToolOutputCompression(state *ConfigState) {
 			)
 
 			// Show different options based on strategy
-			if state.ToolOutputStrategy == pipes.StrategyCompresr {
+			if pipes.IsAPIStrategy(state.ToolOutputStrategy) {
 				// API strategy: show Compresr model and API key
 				items = append(items,
 					tui.MenuItem{Label: "Model", Description: state.ToolOutputModel, Value: "compresr_model"},
@@ -543,7 +543,7 @@ func editToolOutputCompression(state *ConfigState) {
 		case "strategy":
 			selectToolOutputStrategy(state)
 			// Reset model when strategy changes
-			if state.ToolOutputStrategy == pipes.StrategyCompresr {
+			if pipes.IsAPIStrategy(state.ToolOutputStrategy) {
 				state.ToolOutputModel = tui.CompresrModels.ToolOutput.DefaultModel
 			} else {
 				state.ToolOutputModel = state.ToolOutputProvider.DefaultModel
@@ -604,7 +604,7 @@ func editToolOutputAdvanced(state *ConfigState) {
 // selectToolOutputStrategy shows strategy selection for tool output compression
 func selectToolOutputStrategy(state *ConfigState) {
 	items := []tui.MenuItem{
-		{Label: "compresr", Description: "Compresr API compresses tool outputs", Value: pipes.StrategyCompresr},
+		{Label: "api", Description: "Compresr API compresses tool outputs", Value: pipes.StrategyAPI},
 		{Label: "external_provider", Description: "Use LLM provider to compress", Value: pipes.StrategyExternalProvider},
 		{Label: "← Back", Value: "back"},
 	}
@@ -616,8 +616,8 @@ func selectToolOutputStrategy(state *ConfigState) {
 
 	selectedStrategy := items[idx].Value
 
-	// If compresr strategy selected, fetch pricing (skip API key prompt if key exists in env)
-	if selectedStrategy == pipes.StrategyCompresr {
+	// If api strategy selected, fetch pricing (skip API key prompt if key exists in env)
+	if pipes.IsAPIStrategy(selectedStrategy) {
 		envKey := os.Getenv(tui.CompresrModels.EnvVar)
 		if envKey != "" {
 			// Key exists in env — use it directly, skip prompt

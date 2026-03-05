@@ -1,0 +1,37 @@
+{
+  "$schema": "https://openclaw.io/schemas/plugin.json",
+  "id": "context-gateway",
+  "name": "Context Gateway",
+  "version": "1.0.0",
+  "description": "Routes OpenClaw requests through Context Gateway for token compression and cost savings",
+  "author": "Compresr",
+  "homepage": "https://compresr.ai",
+  "engines": {
+    "openclaw": ">=0.1.0"
+  },
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "gatewayUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:18080",
+        "description": "Context Gateway URL"
+      },
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable/disable gateway routing"
+      },
+      "providers": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["anthropic", "openai"],
+        "description": "Providers to route through gateway"
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  }
+}

@@ -48,6 +48,9 @@ logs/
 bin/
 benchmarks/results_summary/
 benchmarks/results_detailed/
+
+# Dev container (personal testing)
+Dockerfile.dev
 benchmarks/runs/
 benchmarks/backup/
 # benchmarks/notebooks/
@@ -67,3 +70,7 @@ web/dashboard/node_modules/
 web/dashboard/dist/
 web/dashboard/.vite/
 
+# Plugins
+internal/plugins/openclaw/node_modules/
+
+.claude/

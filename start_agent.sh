@@ -31,10 +31,14 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 # Binary path
 BINARY="$SCRIPT_DIR/bin/context-gateway"
 
+# Save original directory (where user invoked the script)
+ORIGINAL_DIR="$(pwd)"
+
 # Always rebuild binary to ensure latest changes
 echo "Building context-gateway binary..."
 cd "$SCRIPT_DIR"
 go build -o bin/context-gateway ./cmd
 
-# Run the binary with agent subcommand
+# Return to original directory and run the agent there
+cd "$ORIGINAL_DIR"
 exec "$BINARY" agent "$@"

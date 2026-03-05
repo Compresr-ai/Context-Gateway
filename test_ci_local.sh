@@ -14,6 +14,10 @@ echo -e "${GREEN}  Context Gateway - Local CI Testing ${NC}"
 echo -e "${GREEN}=====================================${NC}"
 echo ""
 
+# Ensure Go bin directory is in PATH
+GOPATH_BIN="$(go env GOPATH)/bin"
+export PATH="$GOPATH_BIN:$PATH"
+
 # Detect repo from git remote
 REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || echo "compresr-founders/Context-Gateway-Private")
 
@@ -84,6 +88,25 @@ echo ""
 
 # Build
 run_step "Build" go build -v -o bin/gateway ./cmd
+
+# Cross-compile all platforms
+echo -e "${CYAN}▶ Cross-compile all platforms${NC}"
+CROSS_OK=true
+LDFLAGS="-s -w"
+
+GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd && echo "  ✓ linux/amd64" || CROSS_OK=false
+GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd && echo "  ✓ linux/arm64" || CROSS_OK=false
+GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd && echo "  ✓ darwin/amd64" || CROSS_OK=false
+GOOS=darwin GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd && echo "  ✓ darwin/arm64" || CROSS_OK=false
+GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd && echo "  ✓ windows/amd64" || CROSS_OK=false
+
+if [ "$CROSS_OK" = true ]; then
+    echo -e "${GREEN}✓ Cross-compile passed${NC}"
+else
+    echo -e "${RED}✗ Cross-compile failed${NC}"
+    FAILED=1
+fi
+echo ""
 
 # Unit Tests
 run_step "Unit Tests" go test -v -short -race \

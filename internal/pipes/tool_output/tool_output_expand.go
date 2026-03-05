@@ -199,6 +199,15 @@ func (e *Expander) ParseExpandContextCalls(responseBody []byte) []ExpandContextC
 
 	var response map[string]interface{}
 	if err := json.Unmarshal(responseBody, &response); err != nil {
+		preview := string(responseBody)
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		log.Warn().
+			Err(err).
+			Str("body_preview", preview).
+			Int("body_len", len(responseBody)).
+			Msg("expand_context: failed to parse response JSON for expand call detection")
 		return nil
 	}
 
@@ -308,6 +317,10 @@ func (e *Expander) CreateExpandResultMessages(calls []ExpandContextCall, isAnthr
 			} else {
 				resultContent = fmt.Sprintf("Error: shadow reference '%s' not found or expired", call.ShadowID)
 				notFound++
+				log.Error().
+					Str("shadow_id", call.ShadowID).
+					Str("reason", "ttl_expired_or_missing").
+					Msg("expand_context: shadow ID not found in store")
 			}
 
 			contentBlocks = append(contentBlocks, map[string]interface{}{
@@ -332,6 +345,10 @@ func (e *Expander) CreateExpandResultMessages(calls []ExpandContextCall, isAnthr
 			} else {
 				resultContent = fmt.Sprintf("Error: shadow reference '%s' not found or expired", call.ShadowID)
 				notFound++
+				log.Error().
+					Str("shadow_id", call.ShadowID).
+					Str("reason", "ttl_expired_or_missing").
+					Msg("expand_context: shadow ID not found in store")
 			}
 
 			messages = append(messages, map[string]interface{}{
@@ -491,7 +508,8 @@ func (e *Expander) AppendMessagesToRequest(body []byte, assistantResponse []byte
 	return json.Marshal(request)
 }
 
-// FilterExpandContextFromResponse removes expand_context tool calls from the response
+// FilterExpandContextFromResponse removes expand_context tool calls from the response.
+// Also fixes stop_reason/finish_reason when all tool_use blocks are removed.
 func (e *Expander) FilterExpandContextFromResponse(responseBody []byte) ([]byte, bool) {
 	var response map[string]interface{}
 	if err := json.Unmarshal(responseBody, &response); err != nil {
@@ -521,6 +539,24 @@ func (e *Expander) FilterExpandContextFromResponse(responseBody []byte) ([]byte,
 			filteredContent = append(filteredContent, block)
 		}
 		response["content"] = filteredContent
+
+		// Fix stop_reason: if we removed all tool_use blocks, stop_reason should not be "tool_use"
+		if modified {
+			if stopReason, _ := response["stop_reason"].(string); stopReason == "tool_use" {
+				hasRemainingToolUse := false
+				for _, block := range filteredContent {
+					if blockMap, ok := block.(map[string]interface{}); ok {
+						if blockMap["type"] == "tool_use" {
+							hasRemainingToolUse = true
+							break
+						}
+					}
+				}
+				if !hasRemainingToolUse {
+					response["stop_reason"] = "end_turn"
+				}
+			}
+		}
 	}
 
 	// OpenAI format: filter tool_calls in choices
@@ -561,7 +597,15 @@ func (e *Expander) FilterExpandContextFromResponse(responseBody []byte) ([]byte,
 				filteredCalls = append(filteredCalls, tc)
 			}
 
-			message["tool_calls"] = filteredCalls
+			// Fix finish_reason: if we removed all tool_calls, update to "stop"
+			if modified && len(filteredCalls) == 0 {
+				delete(message, "tool_calls")
+				if finishReason, _ := choice["finish_reason"].(string); finishReason == "tool_calls" {
+					choice["finish_reason"] = "stop"
+				}
+			} else {
+				message["tool_calls"] = filteredCalls
+			}
 			choice["message"] = message
 			choices[i] = choice
 		}
@@ -579,9 +623,11 @@ func (e *Expander) FilterExpandContextFromResponse(responseBody []byte) ([]byte,
 	return result, true
 }
 
-// InjectExpandContextTool adds the expand_context tool to a request if shadow refs exist.
+// InjectExpandContextTool adds the expand_context tool to a request.
+// The tool is only injected when there are shadow references to expand.
 // Uses provider name for reliable format detection (OpenAI vs Anthropic).
 func InjectExpandContextTool(body []byte, shadowRefs map[string]string, provider string) ([]byte, error) {
+	// Don't inject the tool if there are no shadow refs to expand
 	if len(shadowRefs) == 0 {
 		return body, nil
 	}
@@ -611,11 +657,12 @@ func InjectExpandContextTool(body []byte, shadowRefs map[string]string, provider
 		}
 	}
 
-	// Detect if this is Responses API format (has "input" field) or Chat Completions (has "messages")
+	// Detect if this is Responses API format (has "input" field, no "messages") or Chat Completions (has "messages")
 	// Responses API uses flat tool format: {"type":"function","name":"...","parameters":...}
 	// Chat Completions uses nested format: {"type":"function","function":{"name":"...","parameters":...}}
 	_, hasInput := request["input"]
-	isResponsesAPI := hasInput && provider == "openai"
+	_, hasMessages := request["messages"]
+	isResponsesAPI := hasInput && !hasMessages && provider == "openai"
 	isOpenAIChatCompletions := provider == "openai" && !isResponsesAPI
 
 	var expandTool map[string]interface{}

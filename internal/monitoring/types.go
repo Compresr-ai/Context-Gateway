@@ -31,41 +31,63 @@ const (
 
 // RequestEvent captures a request through the gateway.
 type RequestEvent struct {
-	RequestID            string    `json:"request_id"`
-	Timestamp            time.Time `json:"timestamp"`
-	Method               string    `json:"method"`
-	Path                 string    `json:"path"`
-	ClientIP             string    `json:"client_ip"`
-	Provider             string    `json:"provider"`
-	Model                string    `json:"model,omitempty"`
-	RequestBodySize      int       `json:"request_body_size"`
-	ResponseBodySize     int       `json:"response_body_size"`
-	StatusCode           int       `json:"status_code"`
-	OriginalTokens       int       `json:"original_tokens"`
-	CompressedTokens     int       `json:"compressed_tokens"`
-	TokensSaved          int       `json:"tokens_saved"`
-	CompressionRatio     float64   `json:"compression_ratio"`
-	CompressionUsed      bool      `json:"compression_used"`
-	PipeType             PipeType  `json:"pipe_type"`
-	PipeStrategy         string    `json:"pipe_strategy"`
-	ShadowRefsCreated    int       `json:"shadow_refs_created"`
-	ExpandLoops          int       `json:"expand_loops"`
-	ExpandCallsFound     int       `json:"expand_calls_found"`
-	ExpandCallsNotFound  int       `json:"expand_calls_not_found"`
-	Success              bool      `json:"success"`
-	Error                string    `json:"error,omitempty"`
-	CompressionLatencyMs int64     `json:"compression_latency_ms"`
-	ForwardLatencyMs     int64     `json:"forward_latency_ms"`
-	TotalLatencyMs       int64     `json:"total_latency_ms"`
-	AuthModeInitial      string    `json:"auth_mode_initial,omitempty"`   // subscription, api_key, bearer, oauth, none, unknown
-	AuthModeEffective    string    `json:"auth_mode_effective,omitempty"` // Actual auth sent upstream
-	AuthFallbackUsed     bool      `json:"auth_fallback_used,omitempty"`  // True when subscription->api_key fallback happened
+	RequestID        string    `json:"request_id"`
+	Timestamp        time.Time `json:"timestamp"`
+	Method           string    `json:"method"`
+	Path             string    `json:"path"`
+	ClientIP         string    `json:"client_ip"`
+	Provider         string    `json:"provider"`
+	Model            string    `json:"model,omitempty"`
+	RequestBodySize  int       `json:"request_body_size"`
+	ResponseBodySize int       `json:"response_body_size"`
+	StatusCode       int       `json:"status_code"`
+
+	// Pipe-specific counts (grouped together for easy analysis)
+	ToolOutputCount       int `json:"tool_output_count"`                 // Number of tool outputs compressed
+	ToolDiscoveryOriginal int `json:"tool_discovery_original,omitempty"` // Tools before filtering
+	ToolDiscoveryFiltered int `json:"tool_discovery_filtered,omitempty"` // Tools after filtering
+
+	// Token metrics
+	OriginalTokens   int     `json:"original_tokens"`
+	CompressedTokens int     `json:"compressed_tokens"`
+	TokensSaved      int     `json:"tokens_saved"`
+	CompressionRatio float64 `json:"compression_ratio"`
+	CompressionUsed  bool    `json:"compression_used"`
+
+	// Pipe routing
+	PipeType     PipeType `json:"pipe_type"`
+	PipeStrategy string   `json:"pipe_strategy"`
+
+	// Expand context tracking
+	ShadowRefsCreated   int `json:"shadow_refs_created"`
+	ExpandLoops         int `json:"expand_loops"`
+	ExpandCallsFound    int `json:"expand_calls_found"`
+	ExpandCallsNotFound int `json:"expand_calls_not_found"`
+
+	// Request result
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+
+	// Latency
+	CompressionLatencyMs int64 `json:"compression_latency_ms"`
+	ForwardLatencyMs     int64 `json:"forward_latency_ms"`
+	TotalLatencyMs       int64 `json:"total_latency_ms"`
+
+	// Auth
+	AuthModeInitial   string `json:"auth_mode_initial,omitempty"`   // subscription, api_key, bearer, oauth, none, unknown
+	AuthModeEffective string `json:"auth_mode_effective,omitempty"` // Actual auth sent upstream
+	AuthFallbackUsed  bool   `json:"auth_fallback_used,omitempty"`  // True when subscription->api_key fallback happened
+
+	// Preemptive summarization
+	HistoryCompactionTriggered bool `json:"history_compaction_triggered,omitempty"` // Whether preemptive summarization ran
+
 	// Usage from API response (extracted by adapter)
-	InputTokens              int `json:"input_tokens,omitempty"`
-	OutputTokens             int `json:"output_tokens,omitempty"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
-	TotalTokens              int `json:"total_tokens,omitempty"`
+	InputTokens              int     `json:"input_tokens,omitempty"`
+	OutputTokens             int     `json:"output_tokens,omitempty"`
+	CacheCreationInputTokens int     `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int     `json:"cache_read_input_tokens,omitempty"`
+	TotalTokens              int     `json:"total_tokens,omitempty"`
+	CostUSD                  float64 `json:"cost_usd,omitempty"` // Computed cost for this request
 
 	// VERBOSE PAYLOADS (populated when monitoring.verbose_payloads=true)
 	RequestHeaders      map[string]string `json:"request_headers,omitempty"`       // Sanitized headers (no secrets)
@@ -124,9 +146,9 @@ type ExpandEvent struct {
 // StepID links to trajectory step for correlation.
 type CompressionComparison struct {
 	RequestID        string  `json:"request_id"`
+	ProviderModel    string  `json:"model,omitempty"` // LLM model (e.g., "claude-sonnet-4-5", "gpt-5.1-codex")
 	StepID           int     `json:"step_id,omitempty"`
 	Timestamp        string  `json:"timestamp,omitempty"`
-	PipeType         string  `json:"pipe_type"`
 	ToolName         string  `json:"tool_name,omitempty"`
 	ShadowID         string  `json:"shadow_id,omitempty"`
 	OriginalBytes    int     `json:"original_bytes"`
@@ -134,10 +156,10 @@ type CompressionComparison struct {
 	CompressionRatio float64 `json:"compression_ratio"`
 	CacheHit         bool    `json:"cache_hit"`
 	IsLastTool       bool    `json:"is_last_tool,omitempty"`
-	Status           string  `json:"status"`                  // compressed, passthrough_small, passthrough_large, cache_hit
-	MinThreshold     int     `json:"min_threshold,omitempty"` // Min byte threshold used
-	MaxThreshold     int     `json:"max_threshold,omitempty"` // Max byte threshold used
-	Model            string  `json:"model,omitempty"`         // Compression model used (e.g., "toc_latte_v1", "tdc_coldbrew_v1")
+	Status           string  `json:"status"`                      // compressed, passthrough_small, passthrough_large, cache_hit
+	MinThreshold     int     `json:"min_threshold,omitempty"`     // Min byte threshold used
+	MaxThreshold     int     `json:"max_threshold,omitempty"`     // Max byte threshold used
+	CompressionModel string  `json:"compression_model,omitempty"` // Compression model used (e.g., "toc_latte_v1", "tdc_coldbrew_v1")
 	// Large/variable fields at end for readability
 	AllTools          []string `json:"all_tools,omitempty"`
 	SelectedTools     []string `json:"selected_tools,omitempty"`

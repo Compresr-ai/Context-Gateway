@@ -42,8 +42,8 @@ var Providers = map[string]ProviderConfig{
 	"gemini": {
 		Name:        "gemini",
 		BaseURL:     envOrDefault("GEMINI_PROVIDER_URL", "https://generativelanguage.googleapis.com"),
-		DefaultPath: "",
-		Paths:       []string{},
+		DefaultPath: "/v1beta/models/gemini-2.5-flash:generateContent",
+		Paths:       []string{"/v1beta/models/", ":generateContent", ":streamGenerateContent"},
 	},
 	"bedrock": {
 		Name:        "bedrock",

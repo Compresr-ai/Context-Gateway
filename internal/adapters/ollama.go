@@ -1,3 +1,4 @@
+// ollama.go implements the Ollama adapter for message transformation and usage parsing.
 package adapters
 
 import (

@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/gateway"
+	"github.com/compresr/context-gateway/internal/plugins"
 	"github.com/compresr/context-gateway/internal/preemptive"
 	"github.com/compresr/context-gateway/internal/tui"
 	"github.com/compresr/context-gateway/internal/utils"
@@ -37,6 +37,9 @@ func runAgentCommand(args []string) {
 		resetAPIKeyFlag bool
 		agentArg        string
 		passthroughArgs []string
+		daemonFlag      bool
+		stopFlag        bool
+		sessionDirFlag  string
 	)
 
 	portFlag = "" // Empty = auto-find available port
@@ -52,6 +55,19 @@ parseLoop:
 		case "-l", "--list":
 			listFlag = true
 			i++
+		case "--stop":
+			stopFlag = true
+			i++
+		case "--daemon":
+			daemonFlag = true
+			i++
+		case "--session":
+			if i+1 < len(args) {
+				sessionDirFlag = args[i+1]
+				i += 2
+			} else {
+				i++
+			}
 		case "-c", "--config":
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				configFlag = args[i+1]
@@ -80,6 +96,14 @@ parseLoop:
 				fmt.Fprintln(os.Stderr, "Error: --proxy requires a value")
 				os.Exit(1)
 			}
+		case "-a", "--agent":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				agentArg = args[i+1]
+				i += 2
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --agent requires a value")
+				os.Exit(1)
+			}
 		case "--reset-api-key":
 			resetAPIKeyFlag = true
 			i++
@@ -88,7 +112,7 @@ parseLoop:
 			break parseLoop
 		default:
 			if strings.HasPrefix(args[i], "-") {
-				fmt.Fprintf(os.Stderr, "Error: unknown option: %s\n", args[i])
+				fmt.Fprintf(os.Stderr, "Error: unknown option: %q\n", args[i])
 				os.Exit(1)
 			}
 			agentArg = args[i]
@@ -98,6 +122,83 @@ parseLoop:
 
 	// Load .env files
 	loadEnvFiles()
+
+	// Handle --stop flag - stop a running background gateway
+	if stopFlag {
+		pidFile := filepath.Join(os.TempDir(), "context-gateway.pid")
+		portFile := filepath.Join(os.TempDir(), "context-gateway.port")
+		pidBytes, err := os.ReadFile(filepath.Clean(pidFile)) // #nosec G304 -- reading pid file from temp dir
+		if err != nil {
+			fmt.Println("No gateway is running in background mode.")
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+		if err != nil {
+			fmt.Println("Invalid PID file.")
+			_ = os.Remove(pidFile)
+			_ = os.Remove(portFile)
+			return
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			fmt.Println("Gateway process not found.")
+			_ = os.Remove(pidFile)
+			_ = os.Remove(portFile)
+			return
+		}
+
+		// Check if process is actually alive (FindProcess always succeeds on Unix)
+		if !isProcessRunning(process) {
+			fmt.Println("Gateway process not running (stale PID file).")
+			_ = os.Remove(pidFile)
+			_ = os.Remove(portFile)
+			return
+		}
+
+		// Remove port file FIRST to signal plugins to restore config
+		_ = os.Remove(portFile)
+
+		// Wait for plugins to detect and restore configs before stopping gateway.
+		// Plugin health check runs every 1s, 2s gives time to detect + restore.
+		fmt.Println("Waiting for plugins to restore configs...")
+		time.Sleep(2 * time.Second)
+
+		if err := terminateProcess(process); err != nil {
+			fmt.Printf("Failed to stop gateway: %v\n", err)
+			// Only remove PID file if it still contains the same PID we read
+			if currentBytes, readErr := os.ReadFile(filepath.Clean(pidFile)); readErr == nil {
+				if currentPid, parseErr := strconv.Atoi(strings.TrimSpace(string(currentBytes))); parseErr == nil && currentPid == pid {
+					_ = os.Remove(pidFile)
+				}
+			}
+			return
+		}
+
+		// Wait for process to actually exit (up to 15s: 2s plugin wait + 10s shutdown + buffer)
+		exited := false
+		for i := 0; i < 150; i++ { // 150 * 100ms = 15s max
+			time.Sleep(100 * time.Millisecond)
+			if !isProcessRunning(process) {
+				exited = true
+				break
+			}
+		}
+
+		if exited {
+			printSuccess("Gateway stopped.")
+		} else {
+			printWarn("Gateway may still be shutting down.")
+		}
+
+		// Only remove PID file if it still contains the PID we stopped
+		// (avoids race condition if new gateway started during shutdown)
+		if currentBytes, readErr := os.ReadFile(filepath.Clean(pidFile)); readErr == nil {
+			if currentPid, parseErr := strconv.Atoi(strings.TrimSpace(string(currentBytes))); parseErr == nil && currentPid == pid {
+				_ = os.Remove(pidFile)
+			}
+		}
+		return
+	}
 
 	// Handle --reset-api-key flag
 	if resetAPIKeyFlag {
@@ -120,7 +221,7 @@ parseLoop:
 		var err error
 		gatewayPort, err = strconv.Atoi(portFlag)
 		if err != nil || gatewayPort <= 0 || gatewayPort > 65535 {
-			fmt.Fprintf(os.Stderr, "Error: invalid port '%s'\n", portFlag)
+			fmt.Fprintf(os.Stderr, "Error: invalid port %q\n", portFlag)
 			os.Exit(1)
 		}
 	} else {
@@ -229,6 +330,13 @@ mainSelectionLoop:
 			os.Exit(1)
 		}
 
+		// Install agent-specific plugins (slash commands, integrations)
+		if installed, pluginErr := plugins.EnsurePluginsInstalled(ac.Agent.Name); pluginErr != nil {
+			printWarn(fmt.Sprintf("Failed to install plugin: %v", pluginErr))
+		} else if installed {
+			printSuccess(fmt.Sprintf("Installed %s plugin", ac.Agent.Name))
+		}
+
 		if proxyMode != "skip" && showConfigMenu && configFlag == "" {
 		configSelectionLoop:
 			for {
@@ -328,7 +436,7 @@ mainSelectionLoop:
 	}
 
 	if !createdNewConfig {
-		if !setupAnthropicAPIKey(agentArg) {
+		if !setupAnthropicAPIKey(ac) {
 			os.Exit(1)
 		}
 	}
@@ -336,16 +444,21 @@ mainSelectionLoop:
 	// Export agent environment variables
 	exportAgentEnv(ac)
 
+	// Background mode: parent process should NOT start gateway
+	// Only the daemon subprocess should start the gateway
+	// This prevents duplicate logs when both parent and daemon initialize
+	isBackgroundParent := ac.Agent.IsBackgroundMode() && !daemonFlag
+
 	// Start gateway as goroutine (not background process)
 	// Each agent invocation gets its own session directory for logs
 	var gw *gateway.Gateway
 	var sessionDir string
 	var statusBar *tui.StatusBar
-	if proxyMode != "skip" && configData != nil {
+	if proxyMode != "skip" && configData != nil && !isBackgroundParent {
 		// gatewayPort was already found early (before agent config loading)
 		// Verify it's still available (unlikely to change but be safe)
 		if isPortInUse(gatewayPort) {
-			fmt.Fprintf(os.Stderr, "Error: port %d is no longer available\n", gatewayPort)
+			fmt.Fprintf(os.Stderr, "Error: port %d is no longer available\n", gatewayPort) // #nosec G705 -- gatewayPort is a validated int, no XSS risk
 			os.Exit(1)
 		}
 
@@ -370,14 +483,21 @@ mainSelectionLoop:
 
 		telemetryEnabled := earlyConfig.Monitoring.TelemetryEnabled
 
-		// Create session directory for this agent invocation
-		logsBase := logDir
-		if logsBase == "" {
-			logsBase = "logs"
+		// Prepare session path for lazy creation (directory created on first request)
+		// This prevents empty session folders when gateway starts but receives no traffic
+		if sessionDirFlag != "" {
+			// Daemon mode: reuse session directory from parent process
+			sessionDir = sessionDirFlag
+		} else {
+			logsBase := logDir
+			if logsBase == "" {
+				logsBase = "logs"
+			}
+			sessionDir = prepareSessionPath(logsBase)
 		}
-		sessionDir = createSessionDir(logsBase)
 
-		// Export session log paths for this agent (only if telemetry is enabled)
+		// Export session log paths for this agent (paths may not exist yet - lazy creation)
+		// Files will be created when the session directory is initialized on first request
 		_ = os.Setenv("SESSION_DIR", sessionDir)
 		if telemetryEnabled {
 			_ = os.Setenv("SESSION_TELEMETRY_LOG", filepath.Join(sessionDir, "telemetry.jsonl"))
@@ -391,35 +511,31 @@ mainSelectionLoop:
 		// Re-apply session env overrides to the early config now that env vars are set
 		earlyConfig.ApplySessionEnvOverrides()
 
-		printSuccess("Agent Session: " + filepath.Base(sessionDir))
-		printInfo(fmt.Sprintf("Gateway port: %d", gatewayPort))
+		printSuccess(fmt.Sprintf("Port: %d", gatewayPort))
 
-		// Save a copy of the config used for this session (do this regardless of gateway reuse)
-		if sessionDir != "" && len(configData) > 0 {
-			configCopy := filepath.Join(sessionDir, "config.yaml")
-			if err := os.WriteFile(configCopy, configData, 0600); err == nil {
-				printInfo("Config saved to: " + filepath.Base(sessionDir) + "/config.yaml")
-			}
-		}
+		// Store config data for lazy session creation (config.yaml written when first request arrives)
+		// Session directory is created now for gateway.log, but config.yaml is written lazily
+		// This lets us see gateway startup logs while avoiding config files for sessions with no traffic
+		lazyConfigData := configData
 
-		// Always start a new gateway for this terminal
-		printStep("Starting gateway in-process...")
+		// Create the session directory now (for gateway.log), but config.yaml is written lazily
+		_ = os.MkdirAll(sessionDir, 0750) // #nosec G703 -- sessionDir is from temp + internal session name
 
 		// Redirect ALL gateway logging to the session log file.
 		// This prevents any zerolog output from polluting the agent's terminal.
 		var gatewayLogFile *os.File
 		gatewayLogOutput := os.DevNull
 		if gwLogPath := os.Getenv("SESSION_GATEWAY_LOG"); gwLogPath != "" {
-			// #nosec G304 -- env-configured log path
+			// #nosec G304,G703 -- env-configured log path
 			if f, err := os.OpenFile(gwLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
 				gatewayLogFile = f
 				gatewayLogOutput = gwLogPath
 				defer func() { _ = f.Close() }()
 			}
 		}
-		// If we can't open a log file, discard all gateway logs
+		// If we can't open a log file, discard all gateway logs (use O_WRONLY for write access)
 		if gatewayLogFile == nil {
-			devNull, err := os.Open(os.DevNull)
+			devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 			if err == nil {
 				gatewayLogFile = devNull
 				defer func() { _ = devNull.Close() }()
@@ -453,6 +569,11 @@ mainSelectionLoop:
 
 		gw = gateway.New(cfg)
 
+		// Configure lazy session creation (directory created on first LLM request)
+		if sessionDir != "" {
+			gw.SetLazySession(sessionDir, lazyConfigData)
+		}
+
 		// Attach embedded React dashboard SPA
 		if dashFS, err := getDashboardFS(); err == nil {
 			gw.SetDashboardFS(dashFS)
@@ -483,14 +604,12 @@ mainSelectionLoop:
 				os.Exit(1)
 			}
 			printWarn("Continuing without healthy gateway...")
-		} else {
-			printSuccess(fmt.Sprintf("Gateway ready on port %d", gatewayPort))
 		}
 
 		// Display usage status bar (if API key is configured)
 		statusBar = showGatewayStatusBar(gatewayPort, filepath.Base(sessionDir), gw.CostTracker())
 		if gw != nil && statusBar != nil {
-			gw.SetStatusReporter(statusBar)
+			statusBar.SetSessionName(filepath.Base(sessionDir))
 			statusBar.SetSavingsSource(gw.SavingsTracker())
 		}
 
@@ -507,46 +626,176 @@ mainSelectionLoop:
 		printInfo("Skipping gateway (--proxy skip)")
 	}
 
-	// OpenClaw special handling
-	// Model selection is delegated to OpenClaw's own TUI — we just use the default
-	// model for the proxy config. Calling selectModelInteractive here caused a freeze
-	// because the status bar was already running and competing for terminal control.
-	var openclawCmd *exec.Cmd
-	if agentArg == "openclaw" {
-		selectedModel := ac.Agent.DefaultModel
-
-		if proxyMode == "skip" {
-			createOpenClawConfigDirect(selectedModel)
-		} else {
-			createOpenClawConfig(selectedModel, gatewayPort)
-		}
-
-		openclawCmd = startOpenClawGateway()
-	}
-
 	displayName := ac.Agent.DisplayName
 	if displayName == "" {
 		displayName = ac.Agent.Name
 	}
-	printStep(fmt.Sprintf("Launching %s...", displayName))
-	fmt.Println()
-	if sessionDir != "" {
-		fmt.Printf("\033[0;36mSession logs: %s\033[0m\n", filepath.Base(sessionDir))
-	}
-	fmt.Println()
 
 	// Clean up stale IDE lock files (only if truly stale)
-	// Don't remove active lock files from running sessions
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
 		lockFiles, _ := filepath.Glob(filepath.Join(homeDir, ".claude", "ide", "*.lock"))
 		for _, f := range lockFiles {
-			// Check if lock file is stale by verifying process exists
 			if isLockFileStale(f) {
 				_ = os.Remove(f)
 			}
 		}
 	}
+
+	// Run pre-run command if specified (e.g., start OpenClaw gateway)
+	if len(ac.Agent.Command.PreRunCmd) > 0 {
+		// Check if gateway is already running
+		if checkGatewayRunning(18789) {
+			printSuccess(fmt.Sprintf("%s internal gateway already running", displayName))
+		} else {
+			printStep(fmt.Sprintf("Starting %s internal gateway...", displayName))
+			preRunCmd := exec.Command(ac.Agent.Command.PreRunCmd[0], ac.Agent.Command.PreRunCmd[1:]...) // #nosec G204 G702 -- pre_run_cmd from trusted agent config
+			preRunCmd.Env = os.Environ()
+			if ac.Agent.Command.PreRunBackground {
+				// Start in background - don't wait for it
+				preRunCmd.Stdout = nil
+				preRunCmd.Stderr = nil
+				if err := preRunCmd.Start(); err != nil {
+					printWarn(fmt.Sprintf("Pre-run command failed: %v", err))
+				} else {
+					// Wait for gateway to be ready (poll with timeout)
+					// OpenClaw gateway runs on port 18789 by default
+					gatewayReady := waitForGateway(18789, 10*time.Second)
+					if gatewayReady {
+						printSuccess(fmt.Sprintf("%s gateway ready", displayName))
+					} else {
+						printWarn(fmt.Sprintf("%s gateway may not be ready (timeout) - TUI may show 'disconnected'", displayName))
+					}
+				}
+			} else {
+				// Run synchronously
+				preRunCmd.Stdout = os.Stdout
+				preRunCmd.Stderr = os.Stderr
+				if err := preRunCmd.Run(); err != nil {
+					printWarn(fmt.Sprintf("Pre-run command failed: %v", err))
+				}
+			}
+		}
+	}
+
+	// Background mode: gateway runs as daemon, user launches agent separately
+	if ac.Agent.IsBackgroundMode() {
+		if !daemonFlag {
+			// Stop any existing background gateway first (ensure only one runs at a time)
+			stopExistingBackgroundGateway()
+
+			// Not running as daemon yet - spawn daemon subprocess and exit
+			fmt.Println()
+			printSuccess(fmt.Sprintf("Context Gateway starting on port %d (background mode)", gatewayPort))
+			fmt.Println()
+			fmt.Printf("  \033[1;36mGateway will proxy traffic for %s\033[0m\n\n", displayName)
+
+			// Build the command user should run
+			agentCmd := ac.Agent.Command.Run
+			if len(ac.Agent.Command.Args) > 0 {
+				agentCmd += " " + strings.Join(ac.Agent.Command.Args, " ")
+			}
+
+			// For OpenClaw, show onboarding command first
+			if agentArg == "openclaw" {
+				fmt.Printf("  \033[1mFor first-time setup, run:\033[0m\n")
+				fmt.Printf("    \033[1;32mopenclaw onboard\033[0m\n\n")
+			}
+
+			fmt.Printf("  \033[1mTo use %s with compression, run:\033[0m\n", displayName)
+			fmt.Printf("    \033[1;32m%s\033[0m\n\n", agentCmd)
+			fmt.Printf("  \033[1mTo stop the gateway:\033[0m\n")
+			fmt.Printf("    \033[1;33mcontext-gateway --stop\033[0m\n\n")
+
+			if sessionDir != "" {
+				fmt.Printf("  \033[0;36mSession logs: %s\033[0m\n\n", filepath.Base(sessionDir))
+			}
+
+			// Spawn daemon subprocess
+			exe, _ := os.Executable()
+			daemonArgs := []string{"--daemon", "-a", agentArg, "-p", strconv.Itoa(gatewayPort)}
+			if sessionDir != "" {
+				daemonArgs = append(daemonArgs, "--session", sessionDir)
+			}
+			if configFlag != "" {
+				daemonArgs = append(daemonArgs, "-c", configFlag)
+			}
+			if debugFlag {
+				daemonArgs = append(daemonArgs, "-d")
+			}
+
+			daemonCmd := exec.Command(exe, daemonArgs...) // #nosec G204,G702 -- exe is our own binary path
+			daemonCmd.Stdout = nil
+			daemonCmd.Stderr = nil
+			daemonCmd.Stdin = nil
+			// Detach from parent process group (platform-specific)
+			daemonCmd.SysProcAttr = getSysProcAttr()
+
+			if err := daemonCmd.Start(); err != nil {
+				printError(fmt.Sprintf("Failed to start daemon: %v", err))
+				os.Exit(1)
+			}
+
+			// Save PID file immediately (so --stop works even if gateway fails)
+			pidFile := filepath.Join(os.TempDir(), "context-gateway.pid")
+			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", daemonCmd.Process.Pid)), 0600) // #nosec G703 -- temp dir path
+			// This prevents race condition where plugin connects before gateway is ready
+			if !waitForGateway(gatewayPort, 30*time.Second) {
+				printWarn("Gateway may not be ready (timeout) - first OpenClaw run might fail")
+				printInfo("If OpenClaw gets stuck, Ctrl+C and try again")
+			}
+
+			// Save port file for plugins to discover (only after gateway is healthy)
+			portFile := filepath.Clean(filepath.Join(os.TempDir(), "context-gateway.port"))
+			if !strings.HasPrefix(portFile, filepath.Clean(os.TempDir())) {
+				printWarn("Invalid port file path, skipping")
+			} else {
+				_ = os.WriteFile(portFile, []byte(strconv.Itoa(gatewayPort)), 0600)
+			}
+
+			fmt.Println("  \033[2mGateway running in background (PID: " + strconv.Itoa(daemonCmd.Process.Pid) + ")\033[0m\n")
+			return
+		}
+
+		// Running as daemon - block and handle signals
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, getShutdownSignals()...)
+		<-sigCh
+
+		// CRITICAL: Remove port file FIRST to signal plugins to restore config.
+		// This allows OpenClaw plugin to detect shutdown and restore original
+		// baseUrl before we actually stop the gateway server.
+		pidFile := filepath.Join(os.TempDir(), "context-gateway.pid")
+		portFile := filepath.Join(os.TempDir(), "context-gateway.port")
+		_ = os.Remove(portFile)
+
+		// Wait for plugins to detect port file removal and restore configs.
+		// Plugin health check runs every 1s, so 2s is enough for detection + restore.
+		time.Sleep(2 * time.Second)
+
+		// Now safe to shutdown gateway
+		if gw != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = gw.Shutdown(ctx)
+		}
+
+		// Only remove PID file if it still contains our PID (avoid race with new daemon)
+		myPid := os.Getpid()
+		if pidBytes, err := os.ReadFile(filepath.Clean(pidFile)); err == nil {
+			if pidInFile, err := strconv.Atoi(strings.TrimSpace(string(pidBytes))); err == nil {
+				if pidInFile == myPid {
+					_ = os.Remove(pidFile)
+				}
+			}
+		}
+		tui.ClearTerminalTitle()
+		return
+	}
+
+	// Interactive mode: launch agent as child process with env vars set for routing
+	printStep(fmt.Sprintf("Launching %s...", displayName))
+	fmt.Println()
 
 	// Build agent command (all args shell-quoted for bash -c safety)
 	agentCmd := ac.Agent.Command.Run
@@ -557,9 +806,7 @@ mainSelectionLoop:
 		agentCmd += " " + utils.ShellQuote(arg)
 	}
 
-	// Launch agent as child process
-
-	cmd := exec.Command("bash", "-c", agentCmd) // #nosec G204 -- user-selected agent command
+	cmd := exec.Command("bash", "-c", agentCmd) // #nosec G204,G702 -- user-selected agent command
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -567,10 +814,8 @@ mainSelectionLoop:
 
 	// Catch SIGINT/SIGTERM in the parent so it doesn't terminate when
 	// the user presses Ctrl+C (which the agent handles internally).
-	// Without this, Ctrl+C kills the parent and breaks the gateway proxy.
-	// This matches start_agent.sh's: trap cleanup_on_exit SIGINT SIGTERM EXIT
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, getShutdownSignals()...)
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -582,14 +827,8 @@ mainSelectionLoop:
 		printInfo("Agent exited with code: 0")
 	}
 
-	// Restore default signal handling after agent exits
 	signal.Stop(sigCh)
-	signal.Reset(syscall.SIGINT, syscall.SIGTERM)
-
-	// Cleanup after agent exits (matches trap cleanup_on_exit in start_agent.sh)
-	if openclawCmd != nil && openclawCmd.Process != nil {
-		_ = openclawCmd.Process.Kill()
-	}
+	signal.Reset(getShutdownSignals()...)
 
 	if gw != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -602,9 +841,6 @@ mainSelectionLoop:
 
 	// Show session summary with actual spend
 	fmt.Println()
-	if statusBar != nil {
-		statusBar.StopAutoRefresh()
-	}
 	printHeader("Session Summary")
 	if statusBar != nil {
 		_ = statusBar.Refresh() // Get latest credits
@@ -637,7 +873,6 @@ func showGatewayStatusBar(port int, session string, costSource tui.CostSource) *
 	client := compresr.NewClient(baseURL, apiKey)
 	statusBar := tui.NewStatusBar(client)
 	statusBar.SetDashboardPort(port)
-	statusBar.EnableFooter(true)
 
 	// Wire cost source before rendering so the box includes local spend
 	if costSource != nil {
@@ -652,10 +887,11 @@ func showGatewayStatusBar(port int, session string, costSource tui.CostSource) *
 		return statusBar
 	}
 
+	// Show Plan, Usage, Session in green at startup
+	statusBar.RenderStartup(session)
 	statusBar.RenderBox()
 
 	// Set terminal title with persistent status info
 	tui.SetTerminalTitle(statusBar.FormatTitleStatus(port, session))
-	statusBar.StartAutoRefresh(tui.AutoRefreshInterval)
 	return statusBar
 }

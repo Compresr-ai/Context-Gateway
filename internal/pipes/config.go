@@ -25,12 +25,18 @@ import (
 // Strategy constants for pipe execution.
 const (
 	StrategyPassthrough      = "passthrough"       // Do nothing, pass through unchanged
-	StrategyCompresr         = "compresr"          // Call compresr platform API
+	StrategyAPI              = "api"               // Call Compresr API with hybrid search fallback
+	StrategyCompresr         = "compresr"          // Deprecated: alias for StrategyAPI (backward compat)
 	StrategySimple           = "simple"            // Simple compression (first N words)
 	StrategyExternalProvider = "external_provider" // Call external LLM provider (OpenAI/Anthropic) directly
 	StrategyRelevance        = "relevance"         // Local relevance-based tool filtering (no external API)
 	StrategyToolSearch       = "tool-search"       // Local regex-based tool search (no external API)
 )
+
+// IsAPIStrategy returns true if the strategy is API-based (includes backward compat "compresr").
+func IsAPIStrategy(strategy string) bool {
+	return strategy == StrategyAPI || strategy == StrategyCompresr
+}
 
 // =============================================================================
 // COMPRESSION THRESHOLDS
@@ -124,9 +130,9 @@ type ToolOutputConfig struct {
 	Compresr CompresrConfig `yaml:"compresr,omitempty"`
 
 	// Compression settings
-	MinBytes    int     `yaml:"min_bytes"`    // Below this size, no compression (default: 2048)
-	MaxBytes    int     `yaml:"max_bytes"`    // Above this size, skip compression (V2, default: 64KB)
-	TargetRatio float64 `yaml:"target_ratio"` // Compress to this ratio (e.g., 0.5 = 50%)
+	MinBytes               int     `yaml:"min_bytes"`                // Below this size, no compression (default: 2048)
+	MaxBytes               int     `yaml:"max_bytes"`                // Above this size, skip compression (V2, default: 64KB)
+	TargetCompressionRatio float64 `yaml:"target_compression_ratio"` // Sent to API: 0-1 (strength) or >1 (factor). 0 = API default.
 
 	// Expand context feature
 	EnableExpandContext bool `yaml:"enable_expand_context"` // Inject expand_context tool

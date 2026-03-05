@@ -99,7 +99,7 @@ func TestOpenAI_ExtractUsage_InvalidJSON(t *testing.T) {
 func TestAnthropic_ExtractUsage_Standard(t *testing.T) {
 	adapter := adapters.NewAnthropicAdapter()
 
-	// Standard Anthropic response
+	// Standard Anthropic response (no caching)
 	response := []byte(`{
 		"id": "msg_123",
 		"type": "message",
@@ -113,7 +113,8 @@ func TestAnthropic_ExtractUsage_Standard(t *testing.T) {
 
 	usage := adapter.ExtractUsage(response)
 
-	assert.Equal(t, 2000, usage.InputTokens, "should extract input_tokens")
+	// No cache tokens, so InputTokens = input_tokens as-is
+	assert.Equal(t, 2000, usage.InputTokens, "should extract input_tokens (no cache)")
 	assert.Equal(t, 800, usage.OutputTokens, "should extract output_tokens")
 	assert.Equal(t, 2800, usage.TotalTokens, "should calculate total (input + output)")
 }
@@ -122,6 +123,8 @@ func TestAnthropic_ExtractUsage_WithCacheTokens(t *testing.T) {
 	adapter := adapters.NewAnthropicAdapter()
 
 	// Response with prompt caching (cache_creation and cache_read tokens)
+	// Anthropic's input_tokens (5000) includes cache tokens, so:
+	// non-cached input = 5000 - 1000 - 500 = 3500
 	response := []byte(`{
 		"id": "msg_456",
 		"usage": {
@@ -134,9 +137,12 @@ func TestAnthropic_ExtractUsage_WithCacheTokens(t *testing.T) {
 
 	usage := adapter.ExtractUsage(response)
 
-	assert.Equal(t, 5000, usage.InputTokens)
+	assert.Equal(t, 3500, usage.InputTokens, "should subtract cache tokens from input_tokens")
 	assert.Equal(t, 1500, usage.OutputTokens)
-	assert.Equal(t, 8000, usage.TotalTokens)
+	assert.Equal(t, 1000, usage.CacheCreationInputTokens)
+	assert.Equal(t, 500, usage.CacheReadInputTokens)
+	// TotalTokens = original input_tokens (5000) + output (1500) = 6500
+	assert.Equal(t, 6500, usage.TotalTokens, "total should be original input + output")
 }
 
 func TestAnthropic_ExtractUsage_NoUsageField(t *testing.T) {

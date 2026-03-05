@@ -11,6 +11,8 @@ agent:
   name: "codex"
   display_name: "Codex (CLI)"
   description: "OpenAI Codex CLI with Compresr compression"
+  run_mode: "interactive"     # Gateway and agent run together in same session
+  routing_method: "env_var"   # Set OPENAI_BASE_URL at runtime
   config: "fast_setup.yaml"
 
   environment:

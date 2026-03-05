@@ -194,7 +194,7 @@ func runGatewayServer(args []string) {
 	// Display usage status bar (if API key is configured)
 	statusBar := displayGatewayStatus()
 	if statusBar != nil {
-		gw.SetStatusReporter(statusBar)
+		statusBar.SetDashboardPort(cfg.Server.Port)
 	}
 
 	// Handle graceful shutdown
@@ -304,7 +304,6 @@ func displayGatewayStatus() *tui.StatusBar {
 
 	client := compresr.NewClient(baseURL, apiKey)
 	statusBar := tui.NewStatusBar(client)
-	statusBar.EnableFooter(true)
 
 	if err := statusBar.Refresh(); err != nil {
 		// Silently skip on error
@@ -312,6 +311,5 @@ func displayGatewayStatus() *tui.StatusBar {
 	}
 
 	statusBar.RenderBox()
-	statusBar.StartAutoRefresh(tui.AutoRefreshInterval)
 	return statusBar
 }

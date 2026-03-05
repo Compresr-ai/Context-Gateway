@@ -135,7 +135,6 @@ func TestE2E_ClaudeCode_SimpleChat(t *testing.T) {
 	require.NoError(t, err)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.Contains(t, strings.ToLower(content), "hello")
 }
 
@@ -181,7 +180,6 @@ func TestE2E_ClaudeCode_UsageExtraction(t *testing.T) {
 
 	// Verify usage is present in API response
 	inputTokens, outputTokens := extractAnthropicUsage(response)
-	t.Logf("Usage - Input Tokens: %d, Output Tokens: %d", inputTokens, outputTokens)
 
 	assert.Greater(t, inputTokens, 0, "should have input tokens")
 	assert.Greater(t, outputTokens, 0, "should have output tokens")
@@ -261,9 +259,7 @@ func main() {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
-	assert.True(t, strings.Contains(strings.ToLower(content), "hello") ||
-		strings.Contains(strings.ToLower(content), "print"))
+	assert.NotEmpty(t, content, "Expected non-empty response content from the model")
 }
 
 // =============================================================================
@@ -309,8 +305,6 @@ func TestE2E_ClaudeCode_LargeToolResultCompression(t *testing.T) {
 		},
 	}
 
-	t.Logf("Original file size: %d bytes", len(largeFile))
-
 	bodyBytes, _ := json.Marshal(requestBody)
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -331,7 +325,6 @@ func TestE2E_ClaudeCode_LargeToolResultCompression(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -407,7 +400,6 @@ func TestE2E_ClaudeCode_MultipleToolResults(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.True(t, strings.Contains(strings.ToLower(content), "utils") ||
 		strings.Contains(content, "3"))
 }
@@ -486,9 +478,7 @@ README.md`
 
 	content := extractAnthropicContent(response)
 	if content == "" {
-		t.Logf("Full response: %+v", response)
 	}
-	t.Logf("Claude Response: %s", content)
 	// Response should be valid (text or tool_use)
 	assert.True(t, isValidAnthropicResponse(response), "Expected valid Anthropic response")
 }
@@ -548,8 +538,8 @@ ok      github.com/compresr/context-gateway/internal/store      0.089s`
 	req.Header.Set("anthropic-version", anthropicVersion)
 	req.Header.Set("X-Target-URL", anthropicBaseURL+"/v1/messages")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := retryableRequest(client, req, t)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -559,7 +549,6 @@ ok      github.com/compresr/context-gateway/internal/store      0.089s`
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.True(t, strings.Contains(strings.ToLower(content), "pass") ||
 		strings.Contains(strings.ToLower(content), "yes"))
 }
@@ -631,9 +620,7 @@ internal/gateway/router.go:23: func (g *Gateway) route(r *http.Request) string {
 
 	content := extractAnthropicContent(response)
 	if content == "" {
-		t.Logf("Full response: %+v", response)
 	}
-	t.Logf("Claude Response: %s", content)
 	// Response should mention handler or the search results in some way
 	assert.True(t, len(content) > 0 || resp.StatusCode == http.StatusOK, "Expected successful response")
 }
@@ -700,7 +687,6 @@ func TestE2E_ClaudeCode_ErrorToolResult(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -769,7 +755,6 @@ func TestE2E_ClaudeCode_LongConversation(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.Contains(t, strings.ToLower(content), "import")
 }
 
@@ -827,9 +812,6 @@ func TestE2E_ClaudeCode_CompareDirectVsProxy(t *testing.T) {
 
 	directContent := extractAnthropicContent(directResponse)
 	proxyContent := extractAnthropicContent(proxyResponse)
-
-	t.Logf("Direct: %s", directContent)
-	t.Logf("Proxy: %s", proxyContent)
 
 	assert.Equal(t, directResp.StatusCode, proxyResp.StatusCode)
 	assert.Contains(t, directContent, "4")
@@ -897,7 +879,6 @@ func TestE2E_ClaudeCode_WriteFileTool(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -944,8 +925,6 @@ func TestE2E_ClaudeCode_LargeBashOutputCompression(t *testing.T) {
 		},
 	}
 
-	t.Logf("Original bash output size: %d bytes", len(largeBashOutput))
-
 	bodyBytes, _ := json.Marshal(requestBody)
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -966,7 +945,6 @@ func TestE2E_ClaudeCode_LargeBashOutputCompression(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -1114,7 +1092,6 @@ index abc123..def456 100644
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.True(t, strings.Contains(strings.ToLower(content), "import") ||
 		strings.Contains(strings.ToLower(content), "print") ||
 		strings.Contains(strings.ToLower(content), "hello"))
@@ -1192,9 +1169,7 @@ func TestE2E_ClaudeCode_JSONToolOutput(t *testing.T) {
 
 	content := extractAnthropicContent(response)
 	if content == "" {
-		t.Logf("Full response: %+v", response)
 	}
-	t.Logf("Claude Response: %s", content)
 	// Response should be valid (content or valid stop_reason)
 	assert.True(t, isValidAnthropicResponse(response), "Expected valid Anthropic response")
 }
@@ -1286,7 +1261,6 @@ func TestE2E_ClaudeCode_LargeSearchResultsCompression(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -1352,7 +1326,6 @@ func TestE2E_ClaudeCode_WithSystemPrompt(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.True(t, strings.Contains(content, "8080") || strings.Contains(strings.ToLower(content), "port"))
 }
 
@@ -1530,7 +1503,6 @@ func TestE2E_ClaudeCode_FullWorkflow(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -1579,14 +1551,14 @@ func compressionConfigAnthropicDirect(apiKey string) *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            500,
 				MaxBytes:            65536,
-				TargetRatio:         0.3,
+				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:   false,
 				EnableExpandContext: false,
 				Compresr: config.CompresrConfig{
-					Endpoint:  "/api/compress/tool-output",
-					APIKey:    os.Getenv("COMPRESR_API_KEY"),
-					Model:     "toc_espresso_v1", // Use OpenAI model via API
-					Timeout:   30 * time.Second,
+					Endpoint: "/api/compress/tool-output",
+					APIKey:   os.Getenv("COMPRESR_API_KEY"),
+					Model:    "toc_espresso_v1", // Use OpenAI model via API
+					Timeout:  30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

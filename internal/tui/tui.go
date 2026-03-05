@@ -126,21 +126,22 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 		return -1, fmt.Errorf("no items to select")
 	}
 
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	stdinFd := int(os.Stdin.Fd()) // #nosec G115 -- fd fits in int on all supported platforms
+	if !term.IsTerminal(stdinFd) {
 		return selectNumberedMenu(prompt, items)
 	}
 
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	oldState, err := term.MakeRaw(stdinFd)
 	if err != nil {
 		return selectNumberedMenu(prompt, items)
 	}
-	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
+	defer func() { _ = term.Restore(stdinFd, oldState) }()
 
 	selected := 0
 	reader := bufio.NewReader(os.Stdin)
 
 	// Get terminal width for truncating descriptions
-	termWidth, _, err := term.GetSize(int(os.Stdin.Fd()))
+	termWidth, _, err := term.GetSize(stdinFd)
 	if err != nil || termWidth < 40 {
 		termWidth = 80 // Default fallback
 	}
@@ -241,7 +242,7 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 		case 3: // Ctrl+C - exit immediately
 			// Restore terminal state before exiting
 			fmt.Print("\033[?25h") // Show cursor
-			_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			_ = term.Restore(stdinFd, oldState)
 			fmt.Println("\n\nInterrupted.")
 			os.Exit(130) // Standard exit code for Ctrl+C
 
@@ -310,7 +311,7 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 				fmt.Printf("\033[%dA", linesUp)
 				fmt.Print("\033[2K\r")
 
-				_ = term.Restore(int(os.Stdin.Fd()), oldState)
+				_ = term.Restore(stdinFd, oldState)
 				fmt.Print("\033[?25h")
 
 				// Show editable line with cursor after dash
@@ -324,7 +325,7 @@ func SelectMenu(prompt string, items []MenuItem) (int, error) {
 					items[selected].Description = input
 				}
 
-				oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
+				oldState, _ = term.MakeRaw(stdinFd)
 				fmt.Print("\033[?25l")
 
 				// Now we're on line below the edited item (Enter moved us down)
@@ -435,8 +436,9 @@ func PromptYesNo(prompt string, defaultYes bool) bool {
 func PromptPassword(prompt string) string {
 	fmt.Print(prompt)
 
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		password, err := term.ReadPassword(int(os.Stdin.Fd()))
+	stdinFd := int(os.Stdin.Fd()) // #nosec G115 -- fd fits in int on all supported platforms
+	if term.IsTerminal(stdinFd) {
+		password, err := term.ReadPassword(stdinFd)
 		fmt.Println()
 		if err == nil {
 			return strings.TrimSpace(string(password))

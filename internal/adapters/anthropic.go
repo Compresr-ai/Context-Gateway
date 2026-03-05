@@ -1,3 +1,4 @@
+// anthropic.go implements the Anthropic Claude adapter for message transformation and usage parsing.
 package adapters
 
 import (
@@ -603,10 +604,17 @@ func (a *AnthropicAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 		return UsageInfo{}
 	}
 
+	// Anthropic's input_tokens includes cache_read tokens and cache_creation tokens.
+	// Subtract them so InputTokens represents only non-cached input (avoids double-counting in cost calculation).
+	nonCachedInput := resp.Usage.InputTokens - resp.Usage.CacheCreationInputTokens - resp.Usage.CacheReadInputTokens
+	if nonCachedInput < 0 {
+		nonCachedInput = 0
+	}
+
 	return UsageInfo{
-		InputTokens:              resp.Usage.InputTokens,
+		InputTokens:              nonCachedInput,
 		OutputTokens:             resp.Usage.OutputTokens,
-		TotalTokens:              resp.Usage.InputTokens + resp.Usage.OutputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens,
+		TotalTokens:              resp.Usage.InputTokens + resp.Usage.OutputTokens,
 		CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
 		CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
 	}

@@ -68,6 +68,20 @@ kill_gateway_on_port() {
     return 1
 }
 
+# Kill all running gateway processes
+kill_all_gateways() {
+    local pids
+    pids=$(pgrep -f "context-gateway" 2>/dev/null || echo "")
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            kill -9 "$pid" 2>/dev/null || true
+        done
+        print_info "Killed all gateway processes"
+        return 0
+    fi
+    return 1
+}
+
 # Stop gateway using PID file or port
 stop_gateway() {
     local pid_file="${1:-}"

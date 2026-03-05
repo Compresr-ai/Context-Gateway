@@ -47,7 +47,7 @@ func TestConfig(strategy string, minBytes int, enableExpand bool) *config.Config
 				Strategy:            strategy,
 				FallbackStrategy:    config.StrategyPassthrough,
 				MinBytes:            minBytes,
-				TargetRatio:         0.5,
+				TargetCompressionRatio: 0.5,
 				IncludeExpandHint:   enableExpand,
 				EnableExpandContext: enableExpand,
 				Compresr: config.CompresrConfig{
@@ -93,7 +93,7 @@ func TestConfigWithModelAndQuery(strategy string, model string, minBytes int, en
 				Strategy:            strategy,
 				FallbackStrategy:    config.StrategyPassthrough,
 				MinBytes:            minBytes,
-				TargetRatio:         0.5,
+				TargetCompressionRatio: 0.5,
 				IncludeExpandHint:   enableExpand,
 				EnableExpandContext: enableExpand,
 				Compresr: config.CompresrConfig{

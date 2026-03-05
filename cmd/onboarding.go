@@ -33,11 +33,22 @@ const (
 
 // setupAnthropicAPIKey interactively prompts for the Anthropic API key if not set.
 // For claude_code agent, the key is optional since we can capture it from requests.
+// For agents with skip_api_key_setup: true, the prompt is skipped entirely.
 // Returns true if setup was successful or skipped, false if user cancelled.
-func setupAnthropicAPIKey(agentName string) bool {
+func setupAnthropicAPIKey(ac *AgentConfig) bool {
 	// Check if already set
 	if os.Getenv("ANTHROPIC_API_KEY") != "" {
 		return true
+	}
+
+	agentName := ""
+	if ac != nil {
+		agentName = ac.Agent.Name
+
+		// Agent handles its own API key configuration (e.g., OpenClaw)
+		if ac.Agent.SkipAPIKeySetup {
+			return true
+		}
 	}
 
 	fmt.Println()
@@ -285,7 +296,12 @@ func removeCredentialFromEnvFile(envPath, key string) {
 	if len(lines) > 0 {
 		output += "\n"
 	}
-	_ = os.WriteFile(envPath, []byte(output), 0600)
+	cleanPath := filepath.Clean(envPath)
+	homeDir, err := os.UserHomeDir()
+	if err != nil || !strings.HasPrefix(cleanPath, filepath.Clean(homeDir)) {
+		return // refuse to write outside home directory
+	}
+	_ = os.WriteFile(cleanPath, []byte(output), 0600)
 }
 
 // =============================================================================
@@ -357,11 +373,11 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", url) // #nosec G204 -- trusted system command with URL
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", url) // #nosec G204 -- trusted system command with URL
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		cmd = exec.Command("cmd", "/c", "start", url) // #nosec G204 -- trusted system command with URL
 	default:
 		fmt.Printf("  Please open: %s\n", url)
 		return
@@ -584,6 +600,7 @@ func appendToEnvFile(envPath, key, value string) {
 
 	// Write back
 	output := strings.Join(lines, "\n") + "\n"
+	// #nosec G703 -- envPath is user's home directory .env file
 	if err := os.WriteFile(envPath, []byte(output), 0600); err != nil {
 		printWarn(fmt.Sprintf("Could not write to %s: %v", envPath, err))
 	}

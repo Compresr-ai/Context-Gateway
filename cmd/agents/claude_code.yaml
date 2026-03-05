@@ -9,13 +9,14 @@ agent:
   name: "claude_code"
   display_name: "Claude Code (CLI)"
   description: "Anthropic Claude via official CLI with Compresr compression"
-  config: "fast_setup.yaml"
+  run_mode: "interactive"     # Gateway and agent run together in same session
+  routing_method: "env_var"   # Set ANTHROPIC_BASE_URL at runtime
+  skip_api_key_setup: true  # Claude Code handles auth via /login
 
+  # Only route traffic through gateway - Claude Code handles auth via /login
   environment:
     - name: "ANTHROPIC_BASE_URL"
       value: "http://localhost:${GATEWAY_PORT}"
-    - name: "ANTHROPIC_API_KEY"
-      value: "${ANTHROPIC_API_KEY}"
 
   command:
     check_cmd: ["which", "claude"]

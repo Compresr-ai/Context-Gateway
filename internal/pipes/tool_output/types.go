@@ -34,12 +34,6 @@ const (
 	// DefaultMaxCompressSize is the maximum content size for compression (64KB)
 	DefaultMaxCompressSize = 65536
 
-	// DefaultCompressedTTL is how long compressed content is cached (preserves KV-cache)
-	DefaultCompressedTTL = 24 * time.Hour
-
-	// DefaultOriginalTTL is how long original content is cached (for expand_context)
-	DefaultOriginalTTL = 5 * time.Minute
-
 	// DefaultLLMBuffer is extra TTL added before sending to LLM
 	DefaultLLMBuffer = 10 * time.Minute
 
@@ -52,6 +46,11 @@ const (
 	// MaxCompressionsPerSecond rate limit for compression API (C11)
 	MaxCompressionsPerSecond = 20
 
+	// RefusalThreshold is the fixed threshold above which compression is rejected.
+	// If compressed/original > 0.9, we reject the compression and use original content.
+	// This is separate from target_compression_ratio which is sent to the API.
+	RefusalThreshold = 0.9
+
 	// ExpandContextToolName is the phantom tool injected for expansion
 	ExpandContextToolName = "expand_context"
 
@@ -60,20 +59,26 @@ const (
 
 	// PrefixFormat for LLM-visible content (E24: unambiguous delimiter)
 	PrefixFormat = "<<<SHADOW:%s>>>\n%s"
+
+	// PrefixFormatWithHint includes usage instructions for expand_context
+	PrefixFormatWithHint = "<<<SHADOW:%s>>>\n%s\n\n[To retrieve full content, call: expand_context(id=\"%s\")]"
+
+	// ShadowPrefixMarker is the prefix used to detect already-compressed content
+	ShadowPrefixMarker = "<<<SHADOW:"
 )
 
 // Pipe compresses tool outputs dynamically and stores raw data for retrieval.
 // V2: Compresses ALL tool outputs with dual-TTL caching for KV-cache preservation.
 type Pipe struct {
-	enabled             bool
-	strategy            string
-	fallbackStrategy    string  // Strategy to use when primary compression fails/times out
-	minBytes            int     // Below this size, no compression
-	maxBytes            int     // Above this, skip compression (V2)
-	targetRatio         float64 // Target compression ratio (e.g., 0.5 = 50%)
-	includeExpandHint   bool    // Add expand_context() hint to compressed output
-	enableExpandContext bool    // Enable expand_context feature (tool injection, hint, expand loop)
-	store               store.Store
+	enabled                bool
+	strategy               string
+	fallbackStrategy       string  // Strategy to use when primary compression fails/times out
+	minBytes               int     // Below this size, no compression
+	maxBytes               int     // Above this, skip compression (V2)
+	targetCompressionRatio float64 // Target compression ratio sent to API (0-1 strength or >1 factor)
+	includeExpandHint      bool    // Add expand_context() hint to compressed output
+	enableExpandContext    bool    // Enable expand_context feature (tool injection, hint, expand loop)
+	store                  store.Store
 
 	// Compresr API client (used when strategy=compresr)
 	compresrClient *compresr.Client
@@ -214,10 +219,9 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 		maxBytes = DefaultMaxCompressSize
 	}
 
-	targetRatio := cfg.Pipes.ToolOutput.TargetRatio
-	if targetRatio == 0 {
-		targetRatio = 0.9 // default: discard compression if savings < 10%
-	}
+	targetCompressionRatio := cfg.Pipes.ToolOutput.TargetCompressionRatio
+	// Note: targetCompressionRatio is sent to the API. 0 means "use API default".
+	// The refusal threshold (0.9) is fixed and separate - see RefusalThreshold constant.
 
 	fallbackStrategy := cfg.Pipes.ToolOutput.FallbackStrategy
 	if fallbackStrategy == "" {
@@ -248,15 +252,15 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 	}
 
 	p := &Pipe{
-		enabled:             cfg.Pipes.ToolOutput.Enabled,
-		strategy:            cfg.Pipes.ToolOutput.Strategy,
-		fallbackStrategy:    fallbackStrategy,
-		minBytes:            minBytes,
-		maxBytes:            maxBytes,
-		targetRatio:         targetRatio,
-		includeExpandHint:   cfg.Pipes.ToolOutput.IncludeExpandHint,
-		enableExpandContext: cfg.Pipes.ToolOutput.EnableExpandContext,
-		store:               st,
+		enabled:                cfg.Pipes.ToolOutput.Enabled,
+		strategy:               cfg.Pipes.ToolOutput.Strategy,
+		fallbackStrategy:       fallbackStrategy,
+		minBytes:               minBytes,
+		maxBytes:               maxBytes,
+		targetCompressionRatio: targetCompressionRatio,
+		includeExpandHint:      cfg.Pipes.ToolOutput.IncludeExpandHint,
+		enableExpandContext:    cfg.Pipes.ToolOutput.EnableExpandContext,
+		store:                  st,
 
 		// Compresr strategy config (used by both compresr and external_provider strategies)
 		compresrEndpoint:      compresrEndpoint,

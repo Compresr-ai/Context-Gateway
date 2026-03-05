@@ -1,8 +1,8 @@
 // Router routes requests to compression pipes based on content analysis.
 //
 // DESIGN: Content-based routing (no thresholds - intercept ALL):
-//  1. Tool outputs (role: "tool") → ToolOutputPipe
-//  2. Tools present             → ToolDiscoveryPipe (stub)
+//  1. Tool outputs (role: "tool") -> ToolOutputPipe
+//  2. Tools present              -> ToolDiscoveryPipe
 //
 // Uses worker pools for concurrent pipe execution.
 // Threshold logic (min bytes) is handled INSIDE each pipe.
@@ -68,117 +68,70 @@ func NewRouter(cfg *config.Config, st store.Store) *Router {
 	}
 }
 
-// Route analyzes request and determines which pipe should handle it.
-// Routes based on content detection (priority order) - NO THRESHOLDS:
-//  1. Any tool outputs (role: "tool" or Anthropic tool_result blocks) → ToolOutput pipe
-//  2. Any tools present → ToolDiscovery pipe
-//
-// DESIGN: Router delegates ALL extraction logic to the adapter.
-// The adapter is responsible for provider-specific parsing (OpenAI vs Anthropic format).
-// Router only uses the extraction results to make routing decisions.
-// Pipes will call adapter.Extract*() again for processing (adapters can cache if needed).
-func (r *Router) Route(ctx *PipelineContext) PipeType {
+// RouteResult indicates which pipes should run on this request.
+type RouteResult struct {
+	ToolOutput    bool
+	ToolDiscovery bool
+}
+
+// RouteFlags returns which pipes should run on this request.
+func (r *Router) RouteFlags(ctx *PipelineContext) RouteResult {
+	result := RouteResult{}
 	if ctx == nil || ctx.Adapter == nil || len(ctx.OriginalRequest) == 0 {
-		return PipeNone
+		return result
 	}
 
-	// Priority 1: ANY tool outputs - intercept ALL
-	// Delegate extraction to adapter - handles both OpenAI and Anthropic formats
+	// Check for tool outputs
 	if r.config.Pipes.ToolOutput.Enabled {
 		contents, err := ctx.Adapter.ExtractToolOutput(ctx.OriginalRequest)
-		if err == nil && len(contents) > 0 {
-			return PipeToolOutput
-		}
+		result.ToolOutput = err == nil && len(contents) > 0
 	}
 
-	// Priority 2: ANY tools present - intercept ALL
-	// Delegate extraction to adapter for provider-agnostic tool detection
+	// Check for tool discovery
 	if r.config.Pipes.ToolDiscovery.Enabled {
 		contents, err := ctx.Adapter.ExtractToolDiscovery(ctx.OriginalRequest, nil)
-		if err == nil && len(contents) > 0 {
-			return PipeToolDiscovery
+		if err == nil {
+			ctx.ToolDiscoveryToolCount = len(contents)
+			result.ToolDiscovery = len(contents) > 0
 		}
 	}
 
-	return PipeNone
+	return result
 }
 
-// Process routes and processes the request through the appropriate pipe.
-// Returns the modified request body (or original on error).
-func (r *Router) Process(ctx *PipelineContext) ([]byte, error) {
-	pipeType := r.Route(ctx)
-	return r.processPipe(ctx, pipeType)
-}
+// ProcessAll processes the request through ALL applicable pipes.
+// Order: tool_output first (modifies message content), then tool_discovery (filters tools array).
+func (r *Router) ProcessAll(ctx *PipelineContext) ([]byte, RouteResult, error) {
+	flags := r.RouteFlags(ctx)
+	body := ctx.OriginalRequest
 
-// ProcessResponse handles RESPONSE-SIDE compression for Tool Output and Tool Discovery.
-// Called AFTER receiving response from LLM.
-// On success: returns compressed response body (original cached for expand)
-// On failure: returns original response unchanged
-func (r *Router) ProcessResponse(ctx *PipelineContext, pipeType PipeType) ([]byte, error) {
-	if pipeType != PipeToolOutput && pipeType != PipeToolDiscovery {
-		return ctx.OriginalRequest, nil
+	// Process tool_output first (modifies tool result content in messages)
+	if flags.ToolOutput && r.config.Pipes.ToolOutput.Strategy != config.StrategyPassthrough {
+		worker := r.toolOutputPool.acquire()
+		pipeCtx := ctx.PipeContext
+		pipeCtx.OriginalRequest = body
+		modifiedBody, err := worker.Process(pipeCtx)
+		r.toolOutputPool.release(worker)
+		if err != nil {
+			log.Error().Err(err).Msg("tool_output pipe failed")
+		} else {
+			body = modifiedBody
+		}
 	}
 
-	var pool *Pool
-	switch pipeType {
-	case PipeToolOutput:
-		pool = r.toolOutputPool
-	case PipeToolDiscovery:
-		pool = r.toolDiscoveryPool
-	default:
-		return ctx.OriginalRequest, nil
+	// Process tool_discovery second (filters tools array)
+	if flags.ToolDiscovery && r.config.Pipes.ToolDiscovery.Strategy != config.StrategyPassthrough {
+		worker := r.toolDiscoveryPool.acquire()
+		pipeCtx := ctx.PipeContext
+		pipeCtx.OriginalRequest = body // Use potentially modified body from tool_output
+		modifiedBody, err := worker.Process(pipeCtx)
+		r.toolDiscoveryPool.release(worker)
+		if err != nil {
+			log.Error().Err(err).Msg("tool_discovery pipe failed")
+		} else {
+			body = modifiedBody
+		}
 	}
 
-	worker := pool.acquire()
-	defer pool.release(worker)
-
-	pipeCtx := r.toPipeContext(ctx)
-	modifiedBody, err := worker.Process(pipeCtx)
-	if err != nil {
-		log.Error().Err(err).Str("pipe", worker.Name()).Msg("response compression failed")
-		return ctx.OriginalRequest, err // Return original on failure
-	}
-	r.copyPipeResults(pipeCtx, ctx)
-	return modifiedBody, nil
-}
-
-func (r *Router) processPipe(ctx *PipelineContext, pipeType PipeType) ([]byte, error) {
-	if pipeType == PipeNone {
-		return ctx.OriginalRequest, nil
-	}
-
-	var pool *Pool
-	switch pipeType {
-	case PipeToolOutput:
-		pool = r.toolOutputPool
-	case PipeToolDiscovery:
-		pool = r.toolDiscoveryPool
-	default:
-		return ctx.OriginalRequest, nil
-	}
-
-	worker := pool.acquire()
-	defer pool.release(worker)
-
-	pipeCtx := r.toPipeContext(ctx)
-	modifiedBody, err := worker.Process(pipeCtx)
-	if err != nil {
-		log.Error().Err(err).Str("pipe", worker.Name()).Msg("pipe failed")
-		return ctx.OriginalRequest, err
-	}
-	r.copyPipeResults(pipeCtx, ctx)
-	return modifiedBody, nil
-}
-
-// toPipeContext returns the embedded PipeContext for pipe processing.
-// Since PipelineContext embeds *pipes.PipeContext, we return it directly.
-func (r *Router) toPipeContext(ctx *PipelineContext) *pipes.PipeContext {
-	return ctx.PipeContext
-}
-
-// copyPipeResults is now a no-op since PipelineContext embeds PipeContext.
-// Results are written directly to the embedded context during pipe processing.
-func (r *Router) copyPipeResults(pipeCtx *pipes.PipeContext, ctx *PipelineContext) {
-	// No-op: PipelineContext embeds *PipeContext, so results are already in ctx.
-	// This function is kept for backward compatibility with the call sites.
+	return body, flags, nil
 }

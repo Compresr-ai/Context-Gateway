@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -70,6 +71,14 @@ type CallLLMParams struct {
 func (p *CallLLMParams) validate() error {
 	if p.Endpoint == "" {
 		return fmt.Errorf("endpoint required")
+	}
+	// Validate URL scheme to prevent SSRF via arbitrary protocols.
+	parsedURL, err := url.Parse(p.Endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid endpoint URL: %w", err)
+	}
+	if parsedURL.Scheme != "https" && parsedURL.Scheme != "http" {
+		return fmt.Errorf("endpoint must use http or https scheme, got %q", parsedURL.Scheme)
 	}
 	// Bedrock uses SigV4 signing via HTTPClient transport, not an API key.
 	// OAuth uses BearerToken instead of APIKey.

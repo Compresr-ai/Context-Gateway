@@ -35,6 +35,8 @@ type Manager struct {
 	enabled  bool
 }
 
+// NewManager creates a preemptive summarization manager.
+// If cfg.Enabled is false, returns a no-op manager that passes requests through unchanged.
 func NewManager(cfg Config) *Manager {
 	cfg = WithDefaults(cfg)
 	m := &Manager{config: cfg, enabled: cfg.Enabled}
@@ -162,15 +164,25 @@ func (m *Manager) parseRequest(headers http.Header, body []byte, model, provider
 	provider := adapters.ProviderFromString(providerName)
 	detector := GetDetector(provider, m.config.Detectors)
 
-	// Get URL path from headers for path-based detection (e.g., Codex /responses/compact)
-	requestPath := headers.Get("X-Request-Path")
-
-	// Use path-aware detection for OpenAI (Codex sends to /responses/compact)
+	// PRIORITY 0: Generic header-based detection (highest priority)
+	// Agents like OpenClaw can send X-Request-Compaction: true header
 	var detection DetectionResult
-	if openaiDetector, ok := detector.(*OpenAIDetector); ok {
-		detection = openaiDetector.DetectWithPath(body, requestPath)
-	} else {
-		detection = detector.Detect(body)
+	if genericDetector := GetGenericDetector(m.config.Detectors); genericDetector != nil {
+		headerValue := headers.Get(genericDetector.HeaderName())
+		detection = genericDetector.DetectFromHeaders(headerValue)
+	}
+
+	// PRIORITY 1: Provider-specific detection (path or prompt patterns)
+	if !detection.IsCompactionRequest {
+		// Get URL path from headers for path-based detection (e.g., Codex /responses/compact)
+		requestPath := headers.Get("X-Request-Path")
+
+		// Use path-aware detection for OpenAI (Codex sends to /responses/compact)
+		if openaiDetector, ok := detector.(*OpenAIDetector); ok {
+			detection = openaiDetector.DetectWithPath(body, requestPath)
+		} else {
+			detection = detector.Detect(body)
+		}
 	}
 
 	// SPECIAL HANDLING FOR COMPACTION REQUESTS

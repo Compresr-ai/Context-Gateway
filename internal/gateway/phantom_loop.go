@@ -95,6 +95,21 @@ func (p *PhantomLoop) Run(
 		result.ForwardLatency += time.Since(forwardStart)
 
 		if err != nil {
+			// If we already have a successful response from a previous loop iteration,
+			// fall back to it instead of failing the entire request.
+			if result.LoopCount > 0 && result.ResponseBody != nil {
+				log.Error().Err(err).Int("loop", result.LoopCount).
+					Msg("phantom_loop: forward failed mid-loop, falling back to last successful response")
+				// Filter phantom tools from last response before returning
+				finalResponse := result.ResponseBody
+				for _, handler := range p.handlers {
+					if filtered, ok := handler.FilterFromResponse(finalResponse); ok {
+						finalResponse = filtered
+					}
+				}
+				result.ResponseBody = finalResponse
+				return result, nil
+			}
 			return result, err
 		}
 
@@ -175,11 +190,16 @@ func (p *PhantomLoop) Run(
 		}
 
 		// Apply request modifiers (e.g., add tools to tools array)
+		// Save backup so we can revert if a modifier corrupts the body
+		bodyBeforeModifiers := currentBody
 		for _, modifier := range requestModifiers {
-			currentBody, err = modifier(currentBody)
-			if err != nil {
-				log.Warn().Err(err).Msg("phantom_loop: request modifier failed")
+			modified, modErr := modifier(currentBody)
+			if modErr != nil {
+				log.Warn().Err(modErr).Msg("phantom_loop: request modifier failed, reverting to pre-modifier body")
+				currentBody = bodyBeforeModifiers
+				break
 			}
+			currentBody = modified
 		}
 	}
 
@@ -190,6 +210,15 @@ func (p *PhantomLoop) Run(
 func (p *PhantomLoop) parsePhantomCalls(responseBody []byte, provider adapters.Provider) []PhantomToolCall {
 	var response map[string]any
 	if err := json.Unmarshal(responseBody, &response); err != nil {
+		preview := string(responseBody)
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		log.Warn().
+			Err(err).
+			Str("body_preview", preview).
+			Int("body_len", len(responseBody)).
+			Msg("phantom_loop: failed to parse response JSON for phantom tool detection")
 		return nil
 	}
 

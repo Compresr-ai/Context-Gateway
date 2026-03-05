@@ -14,7 +14,7 @@ import (
 // Falls back to a minimal page if the SPA isn't embedded.
 func (g *Gateway) handleCostDashboard(w http.ResponseWriter, r *http.Request) {
 	if !isLoopback(r.RemoteAddr) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		g.writeError(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	// Redirect /costs to /costs/ so relative asset paths work

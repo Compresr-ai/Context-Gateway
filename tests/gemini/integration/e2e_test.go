@@ -188,7 +188,6 @@ func TestE2E_Gemini_SimpleChat(t *testing.T) {
 	defer resp.Body.Close()
 
 	responseBody, _ := io.ReadAll(resp.Body)
-	t.Logf("Response status: %d, body: %s", resp.StatusCode, string(responseBody))
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Response: %s", string(responseBody))
 
@@ -197,7 +196,6 @@ func TestE2E_Gemini_SimpleChat(t *testing.T) {
 	require.NoError(t, err)
 
 	content := extractGeminiContent(response)
-	t.Logf("Gemini Response: %s", content)
 	assert.Contains(t, strings.ToLower(content), "hello")
 }
 
@@ -257,7 +255,6 @@ func TestE2E_Gemini_UsageExtraction(t *testing.T) {
 
 	promptTokens, _ := usage["promptTokenCount"].(float64)
 	candidateTokens, _ := usage["candidatesTokenCount"].(float64)
-	t.Logf("Usage - Prompt Tokens: %.0f, Candidate Tokens: %.0f", promptTokens, candidateTokens)
 
 	assert.Greater(t, promptTokens, float64(0), "should have prompt tokens")
 	assert.Greater(t, candidateTokens, float64(0), "should have candidate tokens")
@@ -326,7 +323,6 @@ func TestE2E_Gemini_MultiTurn(t *testing.T) {
 	json.Unmarshal(responseBody, &response)
 
 	content := extractGeminiContent(response)
-	t.Logf("Gemini Response: %s", content)
 	assert.Contains(t, strings.ToLower(content), "alice", "Should remember the name from context")
 }
 
@@ -531,7 +527,6 @@ func TestE2E_Gemini_ToolResult(t *testing.T) {
 	json.Unmarshal(responseBody, &response)
 
 	content := extractGeminiContent(response)
-	t.Logf("Gemini Response after tool result: %s", content)
 
 	// Should reference the weather data
 	contentLower := strings.ToLower(content)
@@ -620,7 +615,6 @@ func TestE2E_Gemini_LargeToolResult(t *testing.T) {
 	}
 
 	bodyBytes, _ := json.Marshal(requestBody)
-	t.Logf("Request size: %d bytes", len(bodyBytes))
 
 	// Use header-based auth for Gemini (x-goog-api-key)
 	geminiPath := fmt.Sprintf("/v1beta/models/%s:generateContent", geminiModel)
@@ -645,7 +639,6 @@ func TestE2E_Gemini_LargeToolResult(t *testing.T) {
 	json.Unmarshal(responseBody, &response)
 
 	content := extractGeminiContent(response)
-	t.Logf("Gemini Response: %s", content)
 
 	// Should have some response about the items
 	assert.NotEmpty(t, content, "Should receive a response")
@@ -699,7 +692,6 @@ func TestE2E_Gemini_Streaming(t *testing.T) {
 
 	// Read streaming response
 	responseBody, _ := io.ReadAll(resp.Body)
-	t.Logf("Streaming response length: %d bytes", len(responseBody))
 
 	// Streaming responses come as JSON array or newline-delimited
 	assert.NotEmpty(t, responseBody, "Should receive streaming response")
@@ -768,7 +760,6 @@ func TestE2E_Gemini_SystemInstruction(t *testing.T) {
 	json.Unmarshal(responseBody, &response)
 
 	content := extractGeminiContent(response)
-	t.Logf("Gemini Response: %s", content)
 
 	// Should respond in pirate speak
 	contentLower := strings.ToLower(content)

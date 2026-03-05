@@ -122,7 +122,6 @@ func TestHardIntegration_ThreeToolsOneLarge_OneExpandNeeded(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -202,7 +201,6 @@ func TestHardIntegration_ThreeToolsAllLarge(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -272,7 +270,6 @@ func TestHardIntegration_MixedSuccessAndError(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 
 	contentLower := strings.ToLower(content)
 	assert.True(t, strings.Contains(contentLower, "error") ||
@@ -339,7 +336,6 @@ func TestHardIntegration_LargeErrorMessage(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 
 	// Check we got a meaningful response about the error
 	contentLower := strings.ToLower(content)
@@ -412,7 +408,6 @@ func TestHardIntegration_RealWorld_GitLog(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -469,7 +464,6 @@ func TestHardIntegration_RealWorld_NPMInstall(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -526,7 +520,6 @@ func TestHardIntegration_RealWorld_DockerBuild(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -584,7 +577,6 @@ func TestHardIntegration_EmptyToolResult(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 
 	// GPT may respond with text OR with another tool call
 	// Check for valid response (either text content or tool_calls)
@@ -665,7 +657,6 @@ func TestHardIntegration_SpecialCharactersInOutput(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 
 	contentLower := strings.ToLower(content)
 	assert.True(t, strings.Contains(contentLower, "emoji") ||
@@ -733,7 +724,6 @@ Size: 1024 bytes
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractOpenAIContentHard(response)
-	t.Logf("GPT Response: %s", content)
 
 	contentLower := strings.ToLower(content)
 	assert.True(t, strings.Contains(contentLower, "png") ||
@@ -819,7 +809,7 @@ func hardCompressionConfigOpenAI() *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            500,
 				MaxBytes:            65536,
-				TargetRatio:         0.3,
+				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true,
 				Compresr: config.CompresrConfig{

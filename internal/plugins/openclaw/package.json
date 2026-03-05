@@ -1,0 +1,13 @@
+{
+  "name": "context-gateway",
+  "version": "1.0.0",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.9.3"
+  }
+}

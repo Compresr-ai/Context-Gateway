@@ -71,9 +71,20 @@ func (s *authFallbackStore) cleanupLoop() {
 	}
 }
 
-// Stop stops the cleanup goroutine.
+// Reset clears all auth fallback state for a fresh session.
+func (s *authFallbackStore) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions = make(map[string]time.Time)
+}
+
+// Stop stops the cleanup goroutine. Safe to call multiple times.
 func (s *authFallbackStore) Stop() {
-	close(s.stopCh)
+	select {
+	case <-s.stopCh:
+	default:
+		close(s.stopCh)
+	}
 }
 
 func (s *authFallbackStore) cleanup() {

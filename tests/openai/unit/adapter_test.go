@@ -116,25 +116,107 @@ func TestOpenAI_ApplyToolOutput_Multiple(t *testing.T) {
 }
 
 // =============================================================================
-// OPENAI TOOL DISCOVERY TESTS (Stub)
+// OPENAI TOOL DISCOVERY TESTS
 // =============================================================================
 
-func TestOpenAI_ExtractToolDiscovery_Stub(t *testing.T) {
+func TestOpenAI_ExtractToolDiscovery_ResponsesAPI(t *testing.T) {
 	adapter := adapters.NewOpenAIAdapter()
 
+	// Responses API format: flat tool structure
 	body := []byte(`{
 		"model": "gpt-5",
 		"input": [{"type": "message", "role": "user", "content": "Help"}],
-		"tools": [{"type": "function", "name": "read_file"}]
+		"tools": [{"type": "function", "name": "read_file", "description": "Read a file"}]
 	}`)
 
 	extracted, err := adapter.ExtractToolDiscovery(body, nil)
 
 	require.NoError(t, err)
-	assert.Empty(t, extracted)
+	require.Len(t, extracted, 1)
+	assert.Equal(t, "read_file", extracted[0].ToolName)
+	assert.Equal(t, "Read a file", extracted[0].Content)
 }
 
-func TestOpenAI_ApplyToolDiscovery_Stub(t *testing.T) {
+func TestOpenAI_ExtractToolDiscovery_ChatCompletions(t *testing.T) {
+	adapter := adapters.NewOpenAIAdapter()
+
+	// Chat Completions format: nested tool structure
+	body := []byte(`{
+		"model": "gpt-5",
+		"messages": [{"role": "user", "content": "Help"}],
+		"tools": [{"type": "function", "function": {"name": "write_file", "description": "Write a file"}}]
+	}`)
+
+	extracted, err := adapter.ExtractToolDiscovery(body, nil)
+
+	require.NoError(t, err)
+	require.Len(t, extracted, 1)
+	assert.Equal(t, "write_file", extracted[0].ToolName)
+	assert.Equal(t, "Write a file", extracted[0].Content)
+}
+
+func TestOpenAI_ApplyToolDiscovery_ResponsesAPI(t *testing.T) {
+	adapter := adapters.NewOpenAIAdapter()
+
+	// Responses API format with multiple tools
+	body := []byte(`{
+		"model": "gpt-5",
+		"input": [{"type": "message", "role": "user", "content": "Help"}],
+		"tools": [
+			{"type": "function", "name": "read_file", "description": "Read"},
+			{"type": "function", "name": "write_file", "description": "Write"}
+		]
+	}`)
+
+	results := []adapters.CompressedResult{
+		{ID: "read_file", Keep: true},
+		{ID: "write_file", Keep: false},
+	}
+
+	modified, err := adapter.ApplyToolDiscovery(body, results)
+
+	require.NoError(t, err)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(modified, &req))
+
+	tools := req["tools"].([]any)
+	require.Len(t, tools, 1)
+	assert.Equal(t, "read_file", tools[0].(map[string]any)["name"])
+}
+
+func TestOpenAI_ApplyToolDiscovery_ChatCompletions(t *testing.T) {
+	adapter := adapters.NewOpenAIAdapter()
+
+	// Chat Completions format with multiple tools
+	body := []byte(`{
+		"model": "gpt-5",
+		"messages": [{"role": "user", "content": "Help"}],
+		"tools": [
+			{"type": "function", "function": {"name": "read_file", "description": "Read"}},
+			{"type": "function", "function": {"name": "write_file", "description": "Write"}}
+		]
+	}`)
+
+	results := []adapters.CompressedResult{
+		{ID: "read_file", Keep: false},
+		{ID: "write_file", Keep: true},
+	}
+
+	modified, err := adapter.ApplyToolDiscovery(body, results)
+
+	require.NoError(t, err)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(modified, &req))
+
+	tools := req["tools"].([]any)
+	require.Len(t, tools, 1)
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, "write_file", fn["name"])
+}
+
+func TestOpenAI_ApplyToolDiscovery_Empty(t *testing.T) {
 	adapter := adapters.NewOpenAIAdapter()
 
 	body := []byte(`{"model": "gpt-5", "tools": []}`)

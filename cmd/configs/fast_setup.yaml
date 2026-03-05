@@ -72,7 +72,11 @@ pipes:
   tool_output:
     enabled: true
     strategy: "compresr"
-    min_bytes: 2048
+    enable_expand_context: false
+    include_expand_hint: false
+    min_bytes: 8192
+    max_bytes: 512000
+    target_compression_ratio: 0.5  # Sent to API: 0.5 = 50% compression strength
     compresr:
       endpoint: "/api/compress/tool-output/"
       api_key: "${COMPRESR_API_KEY:-}"
@@ -81,7 +85,7 @@ pipes:
   
   # Tool Discovery - SaT backbone
   tool_discovery:
-    enabled: true
+    enabled: false
     strategy: "compresr"
     min_tools: 5
     max_tools: 25

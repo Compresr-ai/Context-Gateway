@@ -55,19 +55,19 @@ func e2eFullConfig() *config.Config {
 		Pipes: config.PipesConfig{
 			// PIPE 1: Tool Output Compression via Compresr API
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            config.StrategyCompresr,
-				FallbackStrategy:    "passthrough",
-				MinBytes:            500,
-				MaxBytes:            100000,
-				TargetRatio:         0.3,
-				IncludeExpandHint:   true,
-				EnableExpandContext: true,
+				Enabled:                true,
+				Strategy:               config.StrategyCompresr,
+				FallbackStrategy:       "passthrough",
+				MinBytes:               500,
+				MaxBytes:               100000,
+				TargetCompressionRatio: 0.3,
+				IncludeExpandHint:      true,
+				EnableExpandContext:    true,
 				Compresr: config.CompresrConfig{
-					Endpoint:  "/api/compress/tool-output/",
-					APIKey: compresrKey,
-					Model:     "toc_latte_v1",
-					Timeout:   30 * time.Second,
+					Endpoint: "/api/compress/tool-output/",
+					APIKey:   compresrKey,
+					Model:    "toc_latte_v1",
+					Timeout:  30 * time.Second,
 				},
 			},
 			// PIPE 2: Tool Discovery via Compresr API
@@ -79,10 +79,10 @@ func e2eFullConfig() *config.Config {
 				TargetRatio:          0.5,
 				EnableSearchFallback: true,
 				Compresr: config.CompresrConfig{
-					Endpoint:  "/api/compress/tool-discovery/",
-					APIKey: compresrKey,
-					Model:     "tdc_coldbrew_v1",
-					Timeout:   30 * time.Second,
+					Endpoint: "/api/compress/tool-discovery/",
+					APIKey:   compresrKey,
+					Model:    "tdc_coldbrew_v1",
+					Timeout:  30 * time.Second,
 				},
 			},
 		},
@@ -166,7 +166,6 @@ func TestE2E_ToolOutputCompression_RealCompresrAPI(t *testing.T) {
 	}
 
 	bodyBytes, _ := json.Marshal(requestBody)
-	t.Logf("Tool output size: %d bytes (should trigger Compresr API compression)", len(largeOutput))
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -187,7 +186,6 @@ func TestE2E_ToolOutputCompression_RealCompresrAPI(t *testing.T) {
 	json.Unmarshal(bodyBytes, &response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response (compressed via Compresr): %s", content)
 
 	assert.NotEmpty(t, content)
 	// Should have meaningful response about the code
@@ -268,7 +266,6 @@ func TestE2E_ToolOutputCompression_MultipleTools(t *testing.T) {
 	}
 
 	bodyBytes, _ := json.Marshal(requestBody)
-	t.Logf("Tool output sizes: %d, %d, %d bytes", len(output1), len(output2), len(output3))
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -289,7 +286,6 @@ func TestE2E_ToolOutputCompression_MultipleTools(t *testing.T) {
 	json.Unmarshal(bodyBytes, &response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response (3 tools compressed): %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -332,7 +328,6 @@ func TestE2E_ToolDiscovery_RealCompresrAPI(t *testing.T) {
 	}
 
 	bodyBytes, _ := json.Marshal(requestBody)
-	t.Logf("Sending request with %d tools (Compresr should filter to ~10)", len(tools))
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -354,7 +349,6 @@ func TestE2E_ToolDiscovery_RealCompresrAPI(t *testing.T) {
 
 	// Check if Claude made a tool call (should select file reading tool)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response (from filtered tools): %s", content)
 	// Response should be meaningful
 	assert.True(t, len(content) > 0 || hasToolUse(response), "Should have content or tool use")
 }
@@ -392,7 +386,6 @@ func TestE2E_ToolDiscovery_ManyTools(t *testing.T) {
 	}
 
 	bodyBytes, _ := json.Marshal(requestBody)
-	t.Logf("Sending request with %d tools (heavy tool discovery test)", len(tools))
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -447,14 +440,6 @@ func TestE2E_HistoryCompression_RealCompresrAPI(t *testing.T) {
 		"messages":   messages,
 	}
 
-	totalHistorySize := 0
-	for _, m := range messages {
-		if content, ok := m["content"].(string); ok {
-			totalHistorySize += len(content)
-		}
-	}
-	t.Logf("Total history size: %d bytes (should trigger history compression)", totalHistorySize)
-
 	bodyBytes, _ := json.Marshal(requestBody)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
@@ -476,7 +461,6 @@ func TestE2E_HistoryCompression_RealCompresrAPI(t *testing.T) {
 	json.Unmarshal(bodyBytes, &response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response (with history compression): %s", content)
 	assert.NotEmpty(t, content)
 	// Should have contextual answer based on previous discussion
 	contentLower := strings.ToLower(content)
@@ -556,9 +540,6 @@ func TestE2E_AllPipesActive(t *testing.T) {
 		"messages":   messages,
 	}
 
-	t.Logf("E2E test: %d tools, %d bytes tool output, %d messages",
-		len(tools), len(largeOutput), len(messages))
-
 	bodyBytes, _ := json.Marshal(requestBody)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
@@ -580,7 +561,6 @@ func TestE2E_AllPipesActive(t *testing.T) {
 	json.Unmarshal(bodyBytes, &response)
 
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response (all pipes active): %s", content)
 	assert.NotEmpty(t, content)
 }
 

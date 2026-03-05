@@ -14,6 +14,13 @@ var DefaultCodexPromptPatterns = []string{
 	"compress the context",
 }
 
+// DefaultOpenClawPromptPatterns are phrases from OpenClaw's compaction (generateSummary).
+// These are used as fallback detection when header-based detection is not available.
+var DefaultOpenClawPromptPatterns = []string{
+	"merge these partial summaries into a single cohesive summary",
+	"preserve all opaque identifiers exactly as written",
+}
+
 // =============================================================================
 // DEFAULT PROMPT PATTERNS (per provider)
 // =============================================================================
@@ -25,8 +32,6 @@ var DefaultClaudeCodePromptPatterns = []string{
 	"do not use any tools. you must respond with only the <summary>...</summary> block",
 	"important: do not use any tools",
 }
-
-// (Codex support removed)
 
 // =============================================================================
 // DEFAULT SYSTEM PROMPTS (per provider)
@@ -57,8 +62,6 @@ Files, IDs, commands that worked. Technical details needed to continue.
 Specific next actions when conversation resumes.
 
 Be specific. Be thorough. Capture what matters, not just what happened.`
-
-// (Codex support removed)
 
 // =============================================================================
 // MODEL CONTEXT WINDOWS
@@ -126,11 +129,11 @@ func DefaultConfig() Config {
 		Detectors: DetectorsConfig{
 			ClaudeCode: ClaudeCodeDetectorConfig{
 				Enabled:        true,
-				PromptPatterns: DefaultClaudeCodePromptPatterns,
+				PromptPatterns: append(DefaultClaudeCodePromptPatterns, DefaultOpenClawPromptPatterns...),
 			},
 			Codex: CodexDetectorConfig{
 				Enabled:        true,
-				PromptPatterns: DefaultCodexPromptPatterns,
+				PromptPatterns: append(DefaultCodexPromptPatterns, DefaultOpenClawPromptPatterns...),
 			},
 			Generic: GenericDetectorConfig{
 				Enabled:     true,

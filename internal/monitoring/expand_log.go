@@ -4,10 +4,7 @@
 // Shows which tool outputs the model requested to see in full.
 package monitoring
 
-import (
-	"sync"
-	"time"
-)
+import "time"
 
 const maxExpandLogEntries = 100
 
@@ -24,65 +21,38 @@ type ExpandLogEntry struct {
 
 // ExpandLog keeps a ring buffer of recent expand_context events.
 type ExpandLog struct {
-	mu      sync.RWMutex
-	entries []ExpandLogEntry
+	buf *RingBuffer[ExpandLogEntry]
 }
 
 // NewExpandLog creates a new expand log.
 func NewExpandLog() *ExpandLog {
-	return &ExpandLog{
-		entries: make([]ExpandLogEntry, 0, maxExpandLogEntries),
-	}
+	return &ExpandLog{buf: NewRingBuffer[ExpandLogEntry](maxExpandLogEntries)}
 }
+
+// Reset clears all entries so the log starts fresh for a new session.
+func (l *ExpandLog) Reset() { l.buf.Reset() }
 
 // Record adds an expand_context event to the log.
-func (l *ExpandLog) Record(entry ExpandLogEntry) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if len(l.entries) >= maxExpandLogEntries {
-		// Shift: drop oldest
-		copy(l.entries, l.entries[1:])
-		l.entries[len(l.entries)-1] = entry
-	} else {
-		l.entries = append(l.entries, entry)
-	}
-}
+func (l *ExpandLog) Record(entry ExpandLogEntry) { l.buf.Record(entry) }
 
 // Recent returns the most recent N entries (newest first).
-func (l *ExpandLog) Recent(n int) []ExpandLogEntry {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	if n <= 0 || len(l.entries) == 0 {
-		return nil
-	}
-	if n > len(l.entries) {
-		n = len(l.entries)
-	}
-
-	// Return newest first
-	result := make([]ExpandLogEntry, n)
-	for i := 0; i < n; i++ {
-		result[i] = l.entries[len(l.entries)-1-i]
-	}
-	return result
-}
+func (l *ExpandLog) Recent(n int) []ExpandLogEntry { return l.buf.Recent(n) }
 
 // Count returns the total number of logged expansions.
-func (l *ExpandLog) Count() int {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return len(l.entries)
+func (l *ExpandLog) Count() int { return l.buf.Count() }
+
+// ExpandSummary is a brief summary of expand_context activity.
+type ExpandSummary struct {
+	Total    int `json:"total"`
+	Found    int `json:"found"`
+	NotFound int `json:"not_found"`
 }
 
 // Summary returns a brief summary for inline display.
 func (l *ExpandLog) Summary() ExpandSummary {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	s := ExpandSummary{Total: len(l.entries)}
-	for _, e := range l.entries {
+	entries := l.buf.All()
+	s := ExpandSummary{Total: len(entries)}
+	for _, e := range entries {
 		if e.Found {
 			s.Found++
 		} else {
@@ -94,17 +64,15 @@ func (l *ExpandLog) Summary() ExpandSummary {
 
 // RecentForSession returns the most recent N entries for a specific session (newest first).
 func (l *ExpandLog) RecentForSession(sessionID string, n int) []ExpandLogEntry {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	if n <= 0 || len(l.entries) == 0 {
+	entries := l.buf.All()
+	if n <= 0 || len(entries) == 0 {
 		return nil
 	}
 
 	var result []ExpandLogEntry
-	for i := len(l.entries) - 1; i >= 0 && len(result) < n; i-- {
-		if l.entries[i].SessionID == sessionID {
-			result = append(result, l.entries[i])
+	for i := len(entries) - 1; i >= 0 && len(result) < n; i-- {
+		if entries[i].SessionID == sessionID {
+			result = append(result, entries[i])
 		}
 	}
 	return result
@@ -112,11 +80,9 @@ func (l *ExpandLog) RecentForSession(sessionID string, n int) []ExpandLogEntry {
 
 // SummaryForSession returns a summary for a specific session.
 func (l *ExpandLog) SummaryForSession(sessionID string) ExpandSummary {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
+	entries := l.buf.All()
 	var s ExpandSummary
-	for _, e := range l.entries {
+	for _, e := range entries {
 		if e.SessionID == sessionID {
 			s.Total++
 			if e.Found {
@@ -127,13 +93,6 @@ func (l *ExpandLog) SummaryForSession(sessionID string) ExpandSummary {
 		}
 	}
 	return s
-}
-
-// ExpandSummary is a brief summary of expand_context activity.
-type ExpandSummary struct {
-	Total    int `json:"total"`
-	Found    int `json:"found"`
-	NotFound int `json:"not_found"`
 }
 
 // GetExpandSummary returns expand context stats for the TUI status bar.

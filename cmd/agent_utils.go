@@ -2,9 +2,6 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,7 +35,7 @@ func selectFromList(prompt string, items []string) (int, error) {
 // checkGatewayRunning checks if a gateway is already running on the port.
 func checkGatewayRunning(port int) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
-	// #nosec G107 -- localhost-only health check, port from internal config
+	// #nosec G107,G704 -- localhost-only health check, port from internal config
 	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/health", port))
 	if err != nil {
 		return false
@@ -71,8 +68,6 @@ func isPortInUse(port int) bool {
 
 // waitForGateway polls the health endpoint until ready or timeout.
 func waitForGateway(port int, timeout time.Duration) bool {
-	printStep("Waiting for gateway to be ready...")
-
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if checkGatewayRunning(port) {
@@ -81,6 +76,73 @@ func waitForGateway(port int, timeout time.Duration) bool {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return false
+}
+
+// stopExistingBackgroundGateway stops any existing background gateway.
+// Used to ensure only one background gateway runs at a time.
+// Silently returns if no gateway is running.
+func stopExistingBackgroundGateway() {
+	pidFile := filepath.Join(os.TempDir(), "context-gateway.pid")
+	portFile := filepath.Join(os.TempDir(), "context-gateway.port")
+
+	// #nosec G304 -- reading pid file from temp dir (trusted path)
+	pidBytes, err := os.ReadFile(filepath.Clean(pidFile))
+	if err != nil {
+		// No PID file - no gateway running
+		return
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		// Invalid PID file - clean up
+		_ = os.Remove(pidFile)
+		_ = os.Remove(portFile)
+		return
+	}
+
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		// Process not found - clean up
+		_ = os.Remove(pidFile)
+		_ = os.Remove(portFile)
+		return
+	}
+
+	// Check if process is actually alive (FindProcess always succeeds on Unix)
+	if err := process.Signal(syscall.Signal(0)); err != nil {
+		// Process not running - clean up stale files
+		_ = os.Remove(pidFile)
+		_ = os.Remove(portFile)
+		return
+	}
+
+	// Try to stop gracefully with SIGTERM
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		// Failed to signal - clean up
+		_ = os.Remove(pidFile)
+		_ = os.Remove(portFile)
+		return
+	}
+
+	// Wait for daemon to fully shutdown (daemon takes 2s for plugins + 10s max for gateway)
+	// We wait up to 15s to be safe
+	for i := 0; i < 150; i++ { // 150 * 100ms = 15s max
+		time.Sleep(100 * time.Millisecond)
+		// Check if process is still running
+		if err := process.Signal(syscall.Signal(0)); err != nil {
+			break // Process exited
+		}
+	}
+
+	// Only clean up files if they still contain the OLD pid we just stopped
+	// (new daemon may have already written new files)
+	if currentBytes, readErr := os.ReadFile(filepath.Clean(pidFile)); readErr == nil {
+		if currentPid, parseErr := strconv.Atoi(strings.TrimSpace(string(currentBytes))); parseErr == nil && currentPid == pid {
+			_ = os.Remove(pidFile)
+		}
+	}
+	// Port file: only remove if PID file was ours (they go together)
+	// Actually, the daemon removes its own port file on shutdown, so we don't need to
 }
 
 // isLockFileStale checks if a lock file is stale (process no longer running).
@@ -124,18 +186,19 @@ func isLockFileStale(lockPath string) bool {
 
 // validateAgent checks if the agent binary is available and offers to install.
 func validateAgent(ac *AgentConfig) error {
-	if len(ac.Agent.Command.CheckCmd) == 0 {
-		return nil
-	}
-	// #nosec G204 -- CheckCmd comes from embedded YAML config, not user input
-	checkCmd := exec.Command(ac.Agent.Command.CheckCmd[0], ac.Agent.Command.CheckCmd[1:]...)
-	if err := checkCmd.Run(); err == nil {
-		return nil // Agent is available
-	}
-
 	displayName := ac.Agent.DisplayName
 	if displayName == "" {
 		displayName = ac.Agent.Name
+	}
+
+	if len(ac.Agent.Command.CheckCmd) == 0 {
+		return nil
+	}
+	// #nosec G204,G702 -- CheckCmd comes from embedded YAML config, not user input
+	checkCmd := exec.Command(ac.Agent.Command.CheckCmd[0], ac.Agent.Command.CheckCmd[1:]...)
+	if err := checkCmd.Run(); err == nil {
+		printSuccess(fmt.Sprintf("%s binary found", displayName))
+		return nil // Agent is available
 	}
 
 	fmt.Println()
@@ -161,7 +224,7 @@ func validateAgent(ac *AgentConfig) error {
 		fmt.Println()
 		printStep(fmt.Sprintf("Installing %s...", displayName))
 		fmt.Println()
-		// #nosec G204 -- InstallCmd comes from embedded YAML config, not user input
+		// #nosec G204,G702 -- InstallCmd comes from embedded YAML config, not user input
 		installCmd := exec.Command(ac.Agent.Command.InstallCmd[0], ac.Agent.Command.InstallCmd[1:]...)
 		installCmd.Stdin = os.Stdin
 		installCmd.Stdout = os.Stdout
@@ -239,7 +302,7 @@ func discoverAgents() map[string][]byte {
 func resolveConfig(userConfig string) ([]byte, string, error) {
 	// If it looks like a file path, try reading it directly
 	if strings.Contains(userConfig, "/") || strings.Contains(userConfig, "\\") {
-		// #nosec G304 -- userConfig path provided by CLI user (intentional)
+		// #nosec G304,G703 -- userConfig path provided by CLI user (intentional)
 		data, err := os.ReadFile(userConfig)
 		if err != nil {
 			return nil, "", fmt.Errorf("config file not found: %s", userConfig)
@@ -254,7 +317,7 @@ func resolveConfig(userConfig string) ([]byte, string, error) {
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
 		path := filepath.Join(homeDir, ".config", "context-gateway", "configs", name+".yaml")
-		// #nosec G304 -- trusted config path
+		// #nosec G304,G703 -- trusted config path
 		if data, err := os.ReadFile(path); err == nil {
 			return data, path, nil
 		}
@@ -262,7 +325,7 @@ func resolveConfig(userConfig string) ([]byte, string, error) {
 
 	// Check local configs directory
 	path := filepath.Join("configs", name+".yaml")
-	// #nosec G304 -- trusted config path
+	// #nosec G304,G703 -- trusted config path
 	if data, err := os.ReadFile(path); err == nil {
 		return data, path, nil
 	}
@@ -428,8 +491,10 @@ func listAvailableConfigsPrint() {
 	}
 }
 
-// createSessionDir creates a timestamped session directory.
-func createSessionDir(baseDir string) string {
+// prepareSessionPath computes a session directory path without creating it.
+// The actual directory is created lazily on first LLM request via ensureSessionDir().
+// This prevents empty session folders when the gateway starts but receives no traffic.
+func prepareSessionPath(baseDir string) string {
 	_ = os.MkdirAll(baseDir, 0750)
 
 	now := time.Now().Format("20060102_150405")
@@ -450,9 +515,7 @@ func createSessionDir(baseDir string) string {
 		}
 	}
 
-	dir := filepath.Join(baseDir, fmt.Sprintf("session_%d_%s", sessionNum, now))
-	_ = os.MkdirAll(dir, 0750)
-	return dir
+	return filepath.Join(baseDir, fmt.Sprintf("session_%d_%s", sessionNum, now))
 }
 
 // exportAgentEnv sets environment variables defined in the agent config.
@@ -460,12 +523,10 @@ func exportAgentEnv(ac *AgentConfig) {
 	// First, unset any specified variables (for OAuth-based auth)
 	for _, varName := range ac.Agent.Unset {
 		_ = os.Unsetenv(varName)
-		printInfo(fmt.Sprintf("Unset: %s (agent will use OAuth)", varName))
 	}
 	// Then set the specified variables
 	for _, env := range ac.Agent.Environment {
 		_ = os.Setenv(env.Name, env.Value)
-		printInfo(fmt.Sprintf("Exported: %s", env.Name))
 	}
 }
 
@@ -504,98 +565,6 @@ func listAvailableAgents() {
 	}
 }
 
-// createOpenClawConfig writes the OpenClaw config with proxy routing.
-func createOpenClawConfig(model string, gatewayPort int) {
-	homeDir, _ := os.UserHomeDir()
-	if homeDir == "" {
-		return
-	}
-
-	configDir := filepath.Join(homeDir, ".openclaw")
-	_ = os.MkdirAll(configDir, 0750)
-
-	cfg := map[string]interface{}{
-		"agents": map[string]interface{}{
-			"defaults": map[string]interface{}{
-				"model": map[string]interface{}{
-					"primary": model,
-				},
-			},
-		},
-		"models": map[string]interface{}{
-			"providers": map[string]interface{}{
-				"anthropic": map[string]interface{}{
-					"baseUrl": fmt.Sprintf("http://localhost:%d", gatewayPort),
-					"models":  []interface{}{},
-				},
-				"openai": map[string]interface{}{
-					"baseUrl": fmt.Sprintf("http://localhost:%d/v1", gatewayPort),
-					"models":  []interface{}{},
-				},
-			},
-		},
-	}
-
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	configFile := filepath.Join(configDir, "openclaw.json")
-	_ = os.WriteFile(configFile, data, 0600)
-
-	printSuccess(fmt.Sprintf("Created OpenClaw config with model: %s", model))
-	printInfo(fmt.Sprintf("API calls routed through Context Gateway on port %d", gatewayPort))
-}
-
-// createOpenClawConfigDirect writes OpenClaw config without proxy.
-func createOpenClawConfigDirect(model string) {
-	homeDir, _ := os.UserHomeDir()
-	if homeDir == "" {
-		return
-	}
-
-	configDir := filepath.Join(homeDir, ".openclaw")
-	_ = os.MkdirAll(configDir, 0750)
-
-	cfg := map[string]interface{}{
-		"agents": map[string]interface{}{
-			"defaults": map[string]interface{}{
-				"model": map[string]interface{}{
-					"primary": model,
-				},
-			},
-		},
-	}
-
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	configFile := filepath.Join(configDir, "openclaw.json")
-	_ = os.WriteFile(configFile, data, 0600)
-
-	printSuccess(fmt.Sprintf("Created OpenClaw config with model: %s", model))
-	printInfo("API calls go directly to providers (no proxy)")
-}
-
-// startOpenClawGateway starts the OpenClaw TUI gateway subprocess.
-func startOpenClawGateway() *exec.Cmd {
-	// Stop any existing gateway
-	_ = exec.Command("openclaw", "gateway", "stop").Run()
-	time.Sleep(1 * time.Second)
-
-	// Start fresh gateway
-	printInfo("Starting OpenClaw gateway...")
-
-	// Generate random token for security
-	tokenBytes := make([]byte, 16)
-	_, _ = rand.Read(tokenBytes)
-	randomToken := hex.EncodeToString(tokenBytes)
-
-	cmd := exec.Command("openclaw", "gateway", "--port", "18789", "--allow-unconfigured", "--token", randomToken, "--force") // #nosec G204 -- controlled command with known args
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	_ = cmd.Start()
-	time.Sleep(2 * time.Second)
-
-	printSuccess("OpenClaw gateway started on port 18789")
-	return cmd
-}
-
 // Print helper functions for consistent output formatting.
 func printHeader(title string) {
 	fmt.Printf("\033[1m\033[0;36m========================================\033[0m\n")
@@ -627,9 +596,10 @@ func printStep(msg string) {
 func printAgentHelp() {
 	fmt.Println("Start Agent with Gateway Proxy")
 	fmt.Println()
-	fmt.Println("Usage: context-gateway [AGENT] [OPTIONS] [-- AGENT_ARGS...]")
+	fmt.Println("Usage: context-gateway [OPTIONS] [AGENT] [-- AGENT_ARGS...]")
 	fmt.Println()
 	fmt.Println("Options:")
+	fmt.Println("  -a, --agent AGENT    Select agent directly (claude_code, openclaw, codex, etc.)")
 	fmt.Println("  -c, --config [NAME]  Config menu if NAME omitted, uses NAME directly if provided")
 	fmt.Println("  --config list        List available configs")
 	fmt.Println("  -p, --port PORT      Gateway port (default: 18080)")
@@ -645,13 +615,14 @@ func printAgentHelp() {
 	fmt.Println("  (e.g., -p is used by the gateway for --port).")
 	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  context-gateway                                  Start with default config")
+	fmt.Println("  context-gateway                                  Interactive agent selection")
+	fmt.Println("  context-gateway -a claude_code                   Launch Claude Code")
+	fmt.Println("  context-gateway -a openclaw                      Launch OpenClaw")
 	fmt.Println("  context-gateway claude_code -c                   Config management menu")
-	fmt.Println("  context-gateway claude_code -c fast_setup        Use specific config")
+	fmt.Println("  context-gateway -a claude_code -c fast_setup     Use specific config")
 	fmt.Println("  context-gateway --config list                    List configs")
 	fmt.Println("  context-gateway -l                               List agents")
 	fmt.Println("  context-gateway claude_code -- -p \"fix the bug\"  Pass -p to Claude Code")
-	fmt.Println("  context-gateway claude_code -d -- --verbose      Debug gateway, --verbose to agent")
 }
 
 // sortedKeys returns the sorted keys of a map.
