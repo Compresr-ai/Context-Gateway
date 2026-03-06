@@ -71,7 +71,19 @@ func (g *Gateway) autoDetectTargetURL(r *http.Request) string {
 		return getProviderBaseURL("anthropic") + path
 	}
 
-	// 3. Check Authorization header - distinguish providers by API key prefix
+	// 3. Gemini: x-goog-api-key header is definitive
+	if r.Header.Get("x-goog-api-key") != "" {
+		return getProviderBaseURL("gemini") + path
+	}
+
+	// 4. Vertex AI: path contains aiplatform.googleapis.com (uses OAuth, not API keys)
+	if strings.Contains(path, "aiplatform.googleapis.com") ||
+		strings.Contains(path, "/publishers/google/models/") {
+		// Vertex AI uses regional endpoints, extract from path or use default
+		return "https://us-central1-aiplatform.googleapis.com" + path
+	}
+
+	// 5. Check Authorization header - distinguish providers by API key prefix
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		// Anthropic: Bearer sk-ant-xxx
 		if strings.HasPrefix(auth, "Bearer sk-ant-") {

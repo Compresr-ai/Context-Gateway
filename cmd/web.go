@@ -5,7 +5,6 @@ import (
 	"io/fs"
 )
 
-//go:embed all:dashboard_dist
 var dashboardEmbedFS embed.FS
 
 // getDashboardFS returns the dashboard SPA filesystem rooted at the dist directory.

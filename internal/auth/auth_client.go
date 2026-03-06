@@ -1,3 +1,5 @@
+// Package auth provides multi-provider authentication for the gateway,
+// including API key management, OAuth flows, and token refresh.
 package auth
 
 import (
@@ -16,7 +18,7 @@ import (
 // Unlike the old CallbackServer (localhost HTTP), this works from VMs and remote
 // machines since it uses an outbound WebSocket connection.
 type AuthClient struct {
-	backendURL string // e.g. "http://localhost:8000" or "https://compresr.dev"
+	backendURL string // e.g. "http://localhost:8000" or "https://compresr.ai"
 	state      string // CSRF token
 	conn       *websocket.Conn
 	mu         sync.Mutex
@@ -31,7 +33,7 @@ type wsMessage struct {
 }
 
 // NewAuthClient creates a new auth client that will connect to the backend via WebSocket.
-// backendURL is the backend base URL (e.g. "http://localhost:8000" or "https://compresr.dev").
+// backendURL is the backend base URL (e.g. "http://localhost:8000" or "https://compresr.ai").
 func NewAuthClient(backendURL string) (*AuthClient, error) {
 	stateBytes := make([]byte, 32)
 	if _, err := rand.Read(stateBytes); err != nil {

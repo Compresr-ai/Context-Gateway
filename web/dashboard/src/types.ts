@@ -13,6 +13,7 @@ export interface Savings {
   compressed_requests: number
   tokens_saved: number
   token_saved_pct: number
+  billed_spend_usd?: number
   cost_saved_usd: number
   original_cost_usd: number
   compressed_cost_usd: number
@@ -22,6 +23,7 @@ export interface Savings {
   original_tool_count?: number
   filtered_tool_count?: number
   tool_discovery_tokens?: number
+  tool_discovery_cost_usd?: number
   tool_discovery_pct?: number
 }
 
@@ -39,6 +41,22 @@ export interface ExpandContext {
   found: number
   not_found: number
   recent?: ExpandEntry[]
+}
+
+export interface SearchEntry {
+  timestamp: string
+  request_id: string
+  session_id?: string
+  query: string
+  deferred_count: number
+  results_count: number
+  tools_found: string[]
+  strategy: string
+}
+
+export interface SearchContext {
+  total: number
+  recent?: SearchEntry[]
 }
 
 export interface GatewayStats {
@@ -59,6 +77,7 @@ export interface DashboardData {
   enabled: boolean
   savings?: Savings
   expand?: ExpandContext
+  search?: SearchContext
   gateway?: GatewayStats
 }
 
@@ -69,8 +88,6 @@ export interface AccountData {
   credits_used_this_month: number
   monthly_budget_usd: number
   usage_percent: number
-  requests_today: number
-  requests_this_month: number
   is_admin: boolean
   error?: string
 }

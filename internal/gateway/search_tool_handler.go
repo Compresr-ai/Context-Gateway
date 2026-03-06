@@ -25,6 +25,8 @@ import (
 
 	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/config"
+	"github.com/compresr/context-gateway/internal/monitoring"
+	"github.com/compresr/context-gateway/internal/pipes"
 	"github.com/compresr/context-gateway/internal/utils"
 )
 
@@ -54,6 +56,11 @@ type SearchToolHandler struct {
 
 	// API fallback events captured during this request for telemetry.
 	apiFallbackEvents []ToolDiscoveryAPIFallbackEvent
+
+	// Search logging (for dashboard display)
+	searchLog *monitoring.SearchLog
+	requestID string
+	sessionID string
 }
 
 // SearchToolHandlerOptions configures gateway_search_tools behavior.
@@ -109,6 +116,14 @@ func (h *SearchToolHandler) SetRequestContext(sessionID string, deferredTools []
 		DeferredTools: deferredTools,
 	}
 	h.apiFallbackEvents = nil
+}
+
+// WithSearchLog sets the search log for recording gateway_search_tools calls.
+func (h *SearchToolHandler) WithSearchLog(sl *monitoring.SearchLog, requestID, sessionID string) *SearchToolHandler {
+	h.searchLog = sl
+	h.requestID = requestID
+	h.sessionID = sessionID
+	return h
 }
 
 // getRequestContext returns a copy of the current request context.
@@ -193,6 +208,9 @@ func (h *SearchToolHandler) HandleCalls(calls []PhantomToolCall, isAnthropic boo
 				Int("matches", len(matches)).
 				Strs("found", extractToolNames(matches)).
 				Msg("search_tool: handled search")
+
+			// Record to search log for dashboard
+			h.recordSearchEvent(query, len(reqCtx.DeferredTools), matches)
 		}
 
 		result.ToolResults = []map[string]any{{
@@ -230,6 +248,9 @@ func (h *SearchToolHandler) HandleCalls(calls []PhantomToolCall, isAnthropic boo
 				Int("matches", len(matches)).
 				Strs("found", extractToolNames(matches)).
 				Msg("search_tool: handled search")
+
+			// Record to search log for dashboard
+			h.recordSearchEvent(query, len(reqCtx.DeferredTools), matches)
 		}
 	}
 
@@ -250,21 +271,18 @@ func (h *SearchToolHandler) HandleCalls(calls []PhantomToolCall, isAnthropic boo
 
 // resolveMatches picks search backend by strategy.
 func (h *SearchToolHandler) resolveMatches(deferred []adapters.ExtractedContent, query string) []adapters.ExtractedContent {
-	switch h.strategy {
-	case config.StrategyToolSearch:
-		// Local regex-based search
-		return h.searchByRegex(deferred, query)
-	case config.StrategyCompresr:
+	// API strategy (includes backward compat "compresr")
+	if pipes.IsAPIStrategy(h.strategy) {
 		if h.apiEndpoint == "" {
-			h.recordAPIFallback(query, "missing_api_endpoint", "compresr endpoint is empty", len(deferred), len(deferred))
-			log.Warn().Msg("search_tool(compresr): compresr endpoint is empty, restoring all deferred tools")
+			h.recordAPIFallback(query, "missing_api_endpoint", "api endpoint is empty", len(deferred), len(deferred))
+			log.Warn().Msg("search_tool(api): api endpoint is empty, restoring all deferred tools")
 			return deferred
 		}
 
 		result, err := h.searchViaAPI(deferred, query)
 		if err != nil {
 			h.recordAPIFallback(query, "api_error", err.Error(), len(deferred), len(deferred))
-			log.Warn().Err(err).Msg("search_tool(compresr): API failed, restoring all deferred tools")
+			log.Warn().Err(err).Msg("search_tool(api): API failed, restoring all deferred tools")
 			return deferred
 		}
 		if !result.Meaningful {
@@ -272,10 +290,16 @@ func (h *SearchToolHandler) resolveMatches(deferred []adapters.ExtractedContent,
 			log.Warn().
 				Str("reason", result.Reason).
 				Str("detail", result.Detail).
-				Msg("search_tool(compresr): API returned non-meaningful selection, restoring all deferred tools")
+				Msg("search_tool(api): API returned non-meaningful selection, restoring all deferred tools")
 			return deferred
 		}
 		return result.Matches
+	}
+
+	switch h.strategy {
+	case config.StrategyToolSearch:
+		// Local regex-based search
+		return h.searchByRegex(deferred, query)
 	default:
 		// Fallback to keyword-based search
 		return SearchDeferredTools(deferred, query, h.maxResults)
@@ -703,4 +727,25 @@ func injectToolsIntoRequest(body []byte, tools []adapters.ExtractedContent, isAn
 
 	request["tools"] = existingTools
 	return utils.MarshalNoEscape(request)
+}
+
+// recordSearchEvent records a search tool call to the search log for dashboard display.
+func (h *SearchToolHandler) recordSearchEvent(query string, deferredCount int, matches []adapters.ExtractedContent) {
+	if h.searchLog == nil {
+		return
+	}
+	matchNames := make([]string, 0, len(matches))
+	for _, m := range matches {
+		matchNames = append(matchNames, m.ToolName)
+	}
+	h.searchLog.Record(monitoring.SearchLogEntry{
+		Timestamp:     time.Now(),
+		SessionID:     h.sessionID,
+		RequestID:     h.requestID,
+		Query:         query,
+		DeferredCount: deferredCount,
+		ResultsCount:  len(matches),
+		ToolsFound:    matchNames,
+		Strategy:      h.strategy,
+	})
 }

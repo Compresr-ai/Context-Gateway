@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 const sessionTTL = 24 * time.Hour
@@ -19,6 +21,9 @@ type Tracker struct {
 	// Atomic global cost accumulator for O(1) budget checks
 	// Stored as cost * 1e9 (nano-dollars) to use atomic int64 ops
 	globalCostNano int64
+
+	stopChan  chan struct{}
+	closeOnce sync.Once
 }
 
 // NewTracker creates a new cost tracker. Starts a background cleanup goroutine.
@@ -26,9 +31,17 @@ func NewTracker(cfg CostControlConfig) *Tracker {
 	t := &Tracker{
 		config:   cfg,
 		sessions: make(map[string]*CostSession),
+		stopChan: make(chan struct{}),
 	}
 	go t.cleanup()
 	return t
+}
+
+// Close stops the background cleanup goroutine. Safe to call multiple times.
+func (t *Tracker) Close() {
+	t.closeOnce.Do(func() {
+		close(t.stopChan)
+	})
 }
 
 // CheckBudget checks whether a session can continue.
@@ -69,6 +82,15 @@ func (t *Tracker) GetGlobalCost() float64 {
 	return float64(atomic.LoadInt64(&t.globalCostNano)) / 1e9
 }
 
+// ResetGlobalCost resets the global cost accumulator to zero.
+// Call this when starting a new agent session to track only that session's spend.
+func (t *Tracker) ResetGlobalCost() {
+	atomic.StoreInt64(&t.globalCostNano, 0)
+	t.mu.Lock()
+	t.sessions = make(map[string]*CostSession)
+	t.mu.Unlock()
+}
+
 // GetGlobalCap returns the effective global budget cap in USD. Returns 0 if unlimited.
 func (t *Tracker) GetGlobalCap() float64 {
 	_, globalCap := t.effectiveCaps()
@@ -85,6 +107,22 @@ func (t *Tracker) RecordUsage(sessionID, model string, inputTokens, outputTokens
 	} else {
 		cost = CalculateCost(inputTokens, outputTokens, pricing)
 	}
+
+	newGlobal := float64(atomic.LoadInt64(&t.globalCostNano))/1e9 + cost
+	log.Debug().
+		Str("session", sessionID).
+		Str("model", model).
+		Int("input", inputTokens).
+		Int("output", outputTokens).
+		Int("cache_write", cacheCreationTokens).
+		Int("cache_read", cacheReadTokens).
+		Float64("input_rate", pricing.InputPerMTok).
+		Float64("output_rate", pricing.OutputPerMTok).
+		Float64("cache_write_mult", pricing.CacheWriteMultiplier).
+		Float64("cache_read_mult", pricing.CacheReadMultiplier).
+		Float64("cost", cost).
+		Float64("global_total", newGlobal).
+		Msg("cost_tracker: RecordUsage")
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -173,16 +211,21 @@ func (t *Tracker) cleanup() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		t.mu.Lock()
-		now := time.Now()
-		for id, s := range t.sessions {
-			if now.Sub(s.LastUpdated) > sessionTTL {
-				costNano := int64(s.Cost * 1e9)
-				atomic.AddInt64(&t.globalCostNano, -costNano)
-				delete(t.sessions, id)
+	for {
+		select {
+		case <-ticker.C:
+			t.mu.Lock()
+			now := time.Now()
+			for id, s := range t.sessions {
+				if now.Sub(s.LastUpdated) > sessionTTL {
+					costNano := int64(s.Cost * 1e9)
+					atomic.AddInt64(&t.globalCostNano, -costNano)
+					delete(t.sessions, id)
+				}
 			}
+			t.mu.Unlock()
+		case <-t.stopChan:
+			return
 		}
-		t.mu.Unlock()
 	}
 }

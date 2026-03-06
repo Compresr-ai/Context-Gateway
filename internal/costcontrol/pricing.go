@@ -203,6 +203,15 @@ var modelFamilyPricing = map[string]ModelPricing{
 	"gemini-pro":            {InputPerMTok: 0.5, OutputPerMTok: 1.5},
 }
 
+// ListModels returns all model IDs from the pricing table.
+func ListModels() []string {
+	models := make([]string, 0, len(modelPricingTable))
+	for id := range modelPricingTable {
+		models = append(models, id)
+	}
+	return models
+}
+
 // GetModelPricing returns pricing for a model.
 // Tries exact match, then prefix/family match (longest prefix wins), then default.
 // Cache multipliers are inferred from the model name if not explicitly set.

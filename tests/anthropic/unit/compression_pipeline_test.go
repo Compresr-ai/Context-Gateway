@@ -62,7 +62,7 @@ func TestIntegration_CompressionPipeline_WithMockAPI(t *testing.T) {
 				FallbackStrategy:    config.StrategyPassthrough,
 				MinBytes:            100,
 				MaxBytes:            1024 * 1024,
-				TargetRatio:         0.5,
+				TargetCompressionRatio: 0.5,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true,
 				Compresr: config.CompresrConfig{
@@ -162,7 +162,7 @@ func TestIntegration_CompressionPipeline_MultipleToolOutputs(t *testing.T) {
 				FallbackStrategy:    config.StrategyPassthrough,
 				MinBytes:            50,
 				MaxBytes:            1024 * 1024,
-				TargetRatio:         0.5,
+				TargetCompressionRatio: 0.5,
 				EnableExpandContext: true,
 				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",

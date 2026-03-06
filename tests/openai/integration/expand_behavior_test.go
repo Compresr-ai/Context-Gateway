@@ -130,7 +130,6 @@ NOTE: These credentials rotate every 30 days. Last rotation: 2024-01-15`
 	defer resp.Body.Close()
 
 	responseBody, _ := io.ReadAll(resp.Body)
-	t.Logf("Response: %s", string(responseBody))
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.NotContains(t, string(responseBody), "expand_context")
@@ -139,7 +138,6 @@ NOTE: These credentials rotate every 30 days. Last rotation: 2024-01-15`
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHelper(response)
-	t.Logf("GPT Response: %s", content)
 
 	// Works with both reasoning models (empty content) and regular models
 	assert.True(t, content != "" || isValidOpenAIResponse(response), "Expected either content or valid response")
@@ -156,7 +154,6 @@ func TestExpandBehavior_WithExpand_QuestionRequiresDetail(t *testing.T) {
 	defer gwServer.Close()
 
 	largeCodeWithBug := generateBuggyCodeOpenAI()
-	t.Logf("Code size: %d bytes", len(largeCodeWithBug))
 
 	requestBody := map[string]interface{}{
 		"model":                 miniModel,
@@ -207,7 +204,6 @@ func TestExpandBehavior_WithExpand_QuestionRequiresDetail(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHelper(response)
-	t.Logf("GPT Response: %s", content)
 
 	// Works with both reasoning models (empty content) and regular models
 	if content != "" {
@@ -288,7 +284,6 @@ func TestExpandBehavior_SmallContent_NoCompression(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHelper(response)
-	t.Logf("GPT Response: %s", content)
 
 	// Works with both reasoning models (empty content) and regular models
 	if content != "" {
@@ -365,7 +360,6 @@ Secret Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
 	defer resp.Body.Close()
 
 	responseBody, _ := io.ReadAll(resp.Body)
-	t.Logf("Response: %s", string(responseBody))
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.NotContains(t, string(responseBody), "expand_context")
@@ -373,7 +367,6 @@ Secret Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHelper(response)
-	t.Logf("GPT Response (no expand): %s", content)
 
 	// Works with both reasoning models (empty content) and regular models
 	assert.True(t, content != "" || isValidOpenAIResponse(response), "Expected either content or valid response")
@@ -389,7 +382,6 @@ func TestExpandBehavior_NoExpand_LargeOutput(t *testing.T) {
 	defer gwServer.Close()
 
 	largeLog := generateLargeLogFileOpenAI(3000)
-	t.Logf("Log size: %d bytes", len(largeLog))
 
 	requestBody := map[string]interface{}{
 		"model":                 miniModel,
@@ -439,7 +431,6 @@ func TestExpandBehavior_NoExpand_LargeOutput(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHelper(response)
-	t.Logf("GPT Response: %s", content)
 
 	// Works with both reasoning models (empty content) and regular models
 	assert.True(t, content != "" || isValidOpenAIResponse(response), "Expected either content or valid response")
@@ -478,7 +469,6 @@ cache:
 		assert.NotContains(t, resp.body, "expand_context")
 		assert.NotContains(t, resp.body, "<<<SHADOW:")
 
-		t.Logf("WITH expand - Response: %s", resp.content)
 	})
 
 	t.Run("without_expand", func(t *testing.T) {
@@ -491,7 +481,6 @@ cache:
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.NotContains(t, resp.body, "expand_context")
 
-		t.Logf("WITHOUT expand - Response: %s", resp.content)
 	})
 }
 
@@ -565,9 +554,6 @@ func TestExpandBehavior_MultiTool_SomeNeedExpand(t *testing.T) {
 		},
 	}
 
-	t.Logf("Output sizes: small=%d, medium=%d, large=%d",
-		len(smallOutput), len(mediumOutput), len(largeOutput))
-
 	bodyBytes, _ := json.Marshal(requestBody)
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/chat/completions", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -590,7 +576,6 @@ func TestExpandBehavior_MultiTool_SomeNeedExpand(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHelper(response)
-	t.Logf("GPT Response: %s", content)
 
 	// Works with both reasoning models (empty content) and regular models
 	if content != "" {
@@ -665,7 +650,6 @@ func TestExpandBehavior_WithExpand_ErrorToolResult(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHelper(response)
-	t.Logf("GPT Response: %s", content)
 
 	// Works with both reasoning models (empty content) and regular models
 	if content != "" {
@@ -752,7 +736,6 @@ func TestExpandBehavior_StressTest_ManyToolResults(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractOpenAIContentHelper(response)
-	t.Logf("GPT Response: %s", content)
 
 	// Works with both reasoning models (empty content) and regular models
 	if content != "" {
@@ -927,14 +910,14 @@ func configWithExpandEnabledOpenAI(mockAPIURL string) *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            300,
 				MaxBytes:            65536,
-				TargetRatio:         0.2,
+				TargetCompressionRatio: 0.2,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true, // ENABLED
 				Compresr: config.CompresrConfig{
-					Endpoint:  apiEndpoint,
-					APIKey: os.Getenv("COMPRESR_API_KEY"),
-					Model:     "toc_espresso_v1",
-					Timeout:   30 * time.Second,
+					Endpoint: apiEndpoint,
+					APIKey:   os.Getenv("COMPRESR_API_KEY"),
+					Model:    "toc_espresso_v1",
+					Timeout:  30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
@@ -967,14 +950,14 @@ func configWithExpandDisabledOpenAI() *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            300,
 				MaxBytes:            65536,
-				TargetRatio:         0.2,
+				TargetCompressionRatio: 0.2,
 				IncludeExpandHint:   false, // No hint
 				EnableExpandContext: false, // DISABLED
 				Compresr: config.CompresrConfig{
-					Endpoint:  "",
-					APIKey: "",
-					Model:     "",
-					Timeout:   30 * time.Second,
+					Endpoint: "",
+					APIKey:   "",
+					Model:    "",
+					Timeout:  30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

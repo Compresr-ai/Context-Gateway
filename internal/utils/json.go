@@ -1,3 +1,5 @@
+// Package utils provides shared utility functions for JSON manipulation,
+// key masking, and shell command quoting.
 package utils
 
 import (

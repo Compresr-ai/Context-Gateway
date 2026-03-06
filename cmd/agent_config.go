@@ -18,14 +18,29 @@ type AgentConfig struct {
 
 // AgentSpec defines an agent's properties.
 type AgentSpec struct {
-	Name         string        `yaml:"name"`
-	DisplayName  string        `yaml:"display_name"`
-	Description  string        `yaml:"description"`
-	Models       []AgentModel  `yaml:"models"`
-	DefaultModel string        `yaml:"default_model"`
-	Environment  []AgentEnvVar `yaml:"environment"`
-	Unset        []string      `yaml:"unset"` // env vars to unset (for OAuth auth)
-	Command      AgentCommand  `yaml:"command"`
+	Name            string        `yaml:"name"`
+	DisplayName     string        `yaml:"display_name"`
+	Description     string        `yaml:"description"`
+	RunMode         string        `yaml:"run_mode"`       // "interactive" (default) or "background"
+	RoutingMethod   string        `yaml:"routing_method"` // "env_var" (default) or "config_override"
+	Models          []AgentModel  `yaml:"models"`
+	DefaultModel    string        `yaml:"default_model"`
+	Environment     []AgentEnvVar `yaml:"environment"`
+	Unset           []string      `yaml:"unset"`              // env vars to unset (for OAuth auth)
+	SkipAPIKeySetup bool          `yaml:"skip_api_key_setup"` // skip gateway API key prompt (agent handles own config)
+	Command         AgentCommand  `yaml:"command"`
+}
+
+// IsBackgroundMode returns true if the agent runs in background mode
+// (gateway runs as daemon, user launches agent separately)
+func (a *AgentSpec) IsBackgroundMode() bool {
+	return strings.ToLower(a.RunMode) == "background"
+}
+
+// UsesConfigOverride returns true if routing is done via config file modification (plugin)
+// rather than session-based environment variables
+func (a *AgentSpec) UsesConfigOverride() bool {
+	return strings.ToLower(a.RoutingMethod) == "config_override"
 }
 
 // AgentModel defines a selectable model for agents like OpenClaw.
@@ -43,13 +58,15 @@ type AgentEnvVar struct {
 
 // AgentCommand defines how to check, run, and install the agent.
 type AgentCommand struct {
-	Check           string   `yaml:"check"`       // legacy: shell-style string
-	CheckCmd        []string `yaml:"check_cmd"`   // preferred: executable + args
-	Run             string   `yaml:"run"`         // executable name/path
-	Args            []string `yaml:"args"`        // executable args
-	Install         string   `yaml:"install"`     // legacy: shell-style string
-	InstallCmd      []string `yaml:"install_cmd"` // preferred: executable + args
-	FallbackMessage string   `yaml:"fallback_message"`
+	Check            string   `yaml:"check"`              // legacy: shell-style string
+	CheckCmd         []string `yaml:"check_cmd"`          // preferred: executable + args
+	PreRunCmd        []string `yaml:"pre_run_cmd"`        // command to run before agent (e.g., start gateway)
+	PreRunBackground bool     `yaml:"pre_run_background"` // run pre_run_cmd in background
+	Run              string   `yaml:"run"`                // executable name/path
+	Args             []string `yaml:"args"`               // executable args
+	Install          string   `yaml:"install"`            // legacy: shell-style string
+	InstallCmd       []string `yaml:"install_cmd"`        // preferred: executable + args
+	FallbackMessage  string   `yaml:"fallback_message"`
 }
 
 var shellMetaPattern = regexp.MustCompile(`[|&;<>()$` + "`" + `\n\r]`)

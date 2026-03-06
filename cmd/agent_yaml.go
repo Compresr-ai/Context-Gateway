@@ -184,7 +184,7 @@ func generateCustomConfigYAML(
       model: "%s"
       timeout: 30s
     min_bytes: %d
-    target_ratio: %.2f`,
+    target_compression_ratio: %.2f`,
 			toolOutputEnabled, toolOutputStrategy, toolOutputEndpoint, toolOutputAPIKey, toolOutputModel,
 			toolOutputMinBytes, toolOutputTargetRatio)
 	} else {
@@ -196,7 +196,7 @@ func generateCustomConfigYAML(
     enable_expand_context: true
     include_expand_hint: true
     min_bytes: %d
-    target_ratio: %.2f`,
+    target_compression_ratio: %.2f`,
 			toolOutputEnabled, toolOutputStrategy, effectiveToolOutputProvider,
 			toolOutputMinBytes, toolOutputTargetRatio)
 	}

@@ -137,9 +137,13 @@ func (rl *rateLimiter) cleanup() {
 	}
 }
 
-// Stop stops the cleanup goroutine.
+// Stop stops the cleanup goroutine. Safe to call multiple times.
 func (rl *rateLimiter) Stop() {
-	close(rl.stopCh)
+	select {
+	case <-rl.stopCh:
+	default:
+		close(rl.stopCh)
+	}
 }
 
 // loggingMiddleware logs request details and duration using the structured logging system.
@@ -305,6 +309,23 @@ func (g *Gateway) isAllowedHost(host string) bool {
 	}
 	host = strings.ToLower(host)
 
-	// Check static allowlist only (no dynamic patterns for security)
-	return allowedHosts[host]
+	// Check static allowlist first
+	if allowedHosts[host] {
+		return true
+	}
+
+	// Check suffix patterns for cloud providers with regional subdomains
+	// Vertex AI: us-central1-aiplatform.googleapis.com, europe-west1-aiplatform.googleapis.com
+	// AWS Bedrock: bedrock-runtime.us-east-1.amazonaws.com
+	cloudPatterns := []string{
+		"-aiplatform.googleapis.com",
+		".amazonaws.com",
+	}
+	for _, pattern := range cloudPatterns {
+		if strings.HasSuffix(host, pattern) {
+			return true
+		}
+	}
+
+	return false
 }

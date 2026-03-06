@@ -72,11 +72,12 @@ type ModelPricingInfo struct {
 
 // CompressToolOutputParams contains parameters for tool output compression.
 type CompressToolOutputParams struct {
-	ToolOutput string // The tool output content to compress (required, non-empty)
-	UserQuery  string // The user query for context
-	ToolName   string // Name of the tool that produced the output (required)
-	ModelName  string // Compression model (default: "toc_latte_v1")
-	Source     string // Source identifier (e.g., "gateway:anthropic", "sdk:python")
+	ToolOutput             string  // The tool output content to compress (required, non-empty)
+	UserQuery              string  // The user query for context
+	ToolName               string  // Name of the tool that produced the output (required)
+	ModelName              string  // Compression model (default: "toc_latte_v1")
+	Source                 string  // Source identifier (e.g., "gateway:anthropic", "sdk:python")
+	TargetCompressionRatio float64 // Target compression ratio: 0-1 (strength) or >1 (factor). Sent to API.
 }
 
 // CompressToolOutputResponse contains the compressed output.

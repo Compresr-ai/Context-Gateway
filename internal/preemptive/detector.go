@@ -1,7 +1,15 @@
 // Compaction request detection.
 //
-// DESIGN: Provider-specific detectors for identifying compaction requests.
-// Each provider (Anthropic, OpenAI) has its own detector implementation.
+// DESIGN: Multi-layer detection for identifying compaction requests:
+//
+//	Layer 0 (Header):  GenericDetector checks X-Request-Compaction header
+//	Layer 1 (Path):    OpenAIDetector checks /compact URL path (Codex)
+//	Layer 2 (Prompt):  Pattern matching for Claude Code, Codex, OpenClaw
+//
+// Supported Agents:
+//   - Claude Code: Prompt pattern detection (Anthropic)
+//   - Codex: URL path /responses/compact + prompt patterns (OpenAI)
+//   - OpenClaw: Header detection + prompt patterns (fallback)
 //
 // Usage:
 //
@@ -39,6 +47,47 @@ func GetDetector(provider adapters.Provider, cfg DetectorsConfig) CompactionDete
 	default:
 		return &ClaudeDetector{patterns: cfg.ClaudeCode.PromptPatterns}
 	}
+}
+
+// GetGenericDetector returns the generic header-based detector.
+func GetGenericDetector(cfg DetectorsConfig) *GenericDetector {
+	if !cfg.Generic.Enabled {
+		return nil
+	}
+	return &GenericDetector{
+		headerName:  cfg.Generic.HeaderName,
+		headerValue: cfg.Generic.HeaderValue,
+	}
+}
+
+// =============================================================================
+// GENERIC DETECTOR (Header-based)
+// =============================================================================
+
+// GenericDetector detects compaction requests via HTTP header.
+// This is the primary detection method for agents like OpenClaw that don't
+// use specific prompt patterns but can send a header to signal compaction.
+type GenericDetector struct {
+	headerName  string
+	headerValue string
+}
+
+// DetectFromHeaders checks if the request has the compaction header.
+func (d *GenericDetector) DetectFromHeaders(headerValue string) DetectionResult {
+	if headerValue == d.headerValue {
+		return DetectionResult{
+			IsCompactionRequest: true,
+			DetectedBy:          "generic_header",
+			Confidence:          1.0,
+			Details:             map[string]interface{}{"header": d.headerName},
+		}
+	}
+	return DetectionResult{}
+}
+
+// HeaderName returns the header name to check.
+func (d *GenericDetector) HeaderName() string {
+	return d.headerName
 }
 
 // =============================================================================
@@ -125,9 +174,6 @@ func (d *ClaudeDetector) Detect(body []byte) DetectionResult {
 
 	return DetectionResult{}
 }
-
-// =============================================================================
-// (OpenAIDetector removed)
 
 // =============================================================================
 // SHARED TYPES

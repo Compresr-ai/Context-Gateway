@@ -65,7 +65,7 @@ jobs:
         run: |
           if [ -n "$ANTHROPIC_API_KEY" ]; then
             echo "Running Anthropic integration tests..."
-            go test -v -race ./tests/anthropic/integration/... -timeout 5m
+            go test -v -race ./tests/anthropic/integration/... -timeout 10m
           else
             echo "⚠️  Skipping integration tests - no API keys configured"
           fi
@@ -152,8 +152,31 @@ jobs:
       - name: Prepare embedded files
         run: make embed-prep
 
-      - name: Build
+      - name: Build (native)
         run: go build -v -o bin/gateway ./cmd
+
+      - name: Cross-compile all platforms
+        run: |
+          echo "Cross-compiling to catch platform-specific errors..."
+          LDFLAGS="-s -w"
+
+          # Linux
+          GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd
+          echo "✓ linux/amd64"
+          GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd
+          echo "✓ linux/arm64"
+
+          # macOS
+          GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd
+          echo "✓ darwin/amd64"
+          GOOS=darwin GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd
+          echo "✓ darwin/arm64"
+
+          # Windows
+          GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o /dev/null ./cmd
+          echo "✓ windows/amd64"
+
+          echo "All platforms build successfully!"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

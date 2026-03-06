@@ -198,6 +198,92 @@ func TestTracker_GetSessionCost_NotFound(t *testing.T) {
 	assert.Equal(t, 0.0, cost)
 }
 
+func TestTracker_FloatingPointPrecision(t *testing.T) {
+	tracker := costcontrol.NewTracker(costcontrol.CostControlConfig{})
+	defer tracker.Close()
+
+	// Record 1000 small requests and verify no floating-point drift
+	for i := 0; i < 1000; i++ {
+		tracker.RecordUsage("precision-test", "claude-haiku-4-5", 100, 50, 0, 0)
+	}
+
+	singleCost := costcontrol.CalculateCost(100, 50, costcontrol.GetModelPricing("claude-haiku-4-5"))
+	expected := singleCost * 1000
+	actual := tracker.GetSessionCost("precision-test")
+
+	// Nano-dollar accumulation should be precise within 1 nano-dollar per operation
+	assert.InDelta(t, expected, actual, 0.000001, "floating-point drift after 1000 operations")
+}
+
+func TestTracker_GlobalCapBoundary(t *testing.T) {
+	tracker := costcontrol.NewTracker(costcontrol.CostControlConfig{
+		Enabled:   true,
+		GlobalCap: 0.001,
+	})
+	defer tracker.Close()
+
+	// Record tiny usage just below cap
+	tracker.RecordUsage("s1", "claude-haiku-4-5", 1, 1, 0, 0)
+	result := tracker.CheckBudget("s1")
+	assert.True(t, result.Allowed, "should be allowed when under cap")
+
+	// Push over the cap
+	tracker.RecordUsage("s2", "claude-opus-4-6", 100000, 10000, 0, 0)
+	result = tracker.CheckBudget("s2")
+	assert.False(t, result.Allowed, "should be blocked when over cap")
+}
+
+func TestTracker_ResetClearsEverything(t *testing.T) {
+	tracker := costcontrol.NewTracker(costcontrol.CostControlConfig{})
+	defer tracker.Close()
+
+	tracker.RecordUsage("s1", "claude-sonnet-4-5", 10000, 5000, 0, 0)
+	tracker.RecordUsage("s2", "gpt-4o", 10000, 5000, 0, 0)
+
+	assert.Greater(t, tracker.GetGlobalCost(), 0.0)
+	assert.Greater(t, tracker.GetSessionCost("s1"), 0.0)
+	assert.Len(t, tracker.AllSessions(), 2)
+
+	tracker.ResetGlobalCost()
+
+	assert.Equal(t, 0.0, tracker.GetGlobalCost())
+	assert.Equal(t, 0.0, tracker.GetSessionCost("s1"))
+	assert.Len(t, tracker.AllSessions(), 0)
+}
+
+func TestTracker_ConcurrentBudgetCheckDuringRecordUsage(t *testing.T) {
+	tracker := costcontrol.NewTracker(costcontrol.CostControlConfig{
+		Enabled:   true,
+		GlobalCap: 100.0,
+	})
+	defer tracker.Close()
+
+	var wg sync.WaitGroup
+	// 50 goroutines recording usage
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tracker.RecordUsage("concurrent-session", "claude-sonnet-4-5", 100, 50, 0, 0)
+		}()
+	}
+	// 50 goroutines checking budget simultaneously
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tracker.CheckBudget("concurrent-session")
+			tracker.GetGlobalCost()
+			tracker.GetGlobalCap()
+		}()
+	}
+	wg.Wait()
+
+	// Verify no corruption
+	assert.Greater(t, tracker.GetGlobalCost(), 0.0)
+	assert.Greater(t, tracker.GetSessionCost("concurrent-session"), 0.0)
+}
+
 func TestTracker_ConcurrentAccess(t *testing.T) {
 	tracker := costcontrol.NewTracker(costcontrol.CostControlConfig{
 		Enabled:    true,

@@ -121,14 +121,11 @@ type ClaudeCodeDetectorConfig struct {
 	PromptPatterns []string `yaml:"prompt_patterns"`
 }
 
-// (CodexDetectorConfig removed)
-
-// GenericDetectorConfig for generic detection.
+// GenericDetectorConfig for header-based detection (OpenClaw, etc.).
 type GenericDetectorConfig struct {
-	Enabled        bool     `yaml:"enabled"`
-	PromptPatterns []string `yaml:"prompt_patterns"`
-	HeaderName     string   `yaml:"header_name"`
-	HeaderValue    string   `yaml:"header_value"`
+	Enabled     bool   `yaml:"enabled"`
+	HeaderName  string `yaml:"header_name"`
+	HeaderValue string `yaml:"header_value"`
 }
 
 // Validate validates the configuration.

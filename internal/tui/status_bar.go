@@ -93,6 +93,9 @@ type StatusBar struct {
 	// Dashboard port (for displaying URL)
 	dashboardPort int
 
+	// Session name (for terminal title display)
+	sessionName string
+
 	// Display configuration
 	enabled bool
 
@@ -251,7 +254,8 @@ func (sb *StatusBar) StartAutoRefresh(interval time.Duration) {
 	if interval <= 0 {
 		return
 	}
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
+	stdoutFd := int(os.Stdout.Fd()) // #nosec G115 -- fd fits in int on all supported platforms
+	if !term.IsTerminal(stdoutFd) {
 		return
 	}
 
@@ -296,6 +300,13 @@ func (sb *StatusBar) StopAutoRefresh() {
 	sb.mu.Unlock()
 }
 
+// SetSessionName sets the session name for terminal title display.
+func (sb *StatusBar) SetSessionName(name string) {
+	sb.mu.Lock()
+	sb.sessionName = name
+	sb.mu.Unlock()
+}
+
 // =============================================================================
 // RENDERING
 // =============================================================================
@@ -312,97 +323,72 @@ func (sb *StatusBar) Render() {
 	fmt.Println(sb.formatStatusLine())
 }
 
-// RenderCompact prints a one-line status update using PrintInfo.
-// Avoids carriage return (\r) which collides with Claude Code's TUI.
+// RenderCompact updates the terminal title with current status.
+// Uses OSC escape sequence which doesn't conflict with agent TUI output.
 func (sb *StatusBar) RenderCompact() {
-	if !sb.enabled || sb.status == nil {
-		return
-	}
-
-	s := sb.status
-	if s.IsAdmin {
-		PrintInfo(fmt.Sprintf("Credits: ∞ unlimited │ %s", formatTier(s.Tier)))
-		return
-	}
-
-	balanceColor := ColorGreen
-	if s.CreditsRemainingUSD < CriticalBalanceThreshold {
-		balanceColor = ColorRed
-	} else if s.CreditsRemainingUSD < LowBalanceThreshold {
-		balanceColor = ColorYellow
-	}
-
-	totalCredits := s.CreditsRemainingUSD + s.CreditsUsedThisMonth
-	usedPercent := 0.0
-	if totalCredits > 0 {
-		usedPercent = (s.CreditsUsedThisMonth / totalCredits) * 100
-	}
-	remainingPercent := 100 - usedPercent
-
-	PrintInfo(fmt.Sprintf("Credits: %s$%.2f%s / $%.2f  %s %.1f%% remaining",
-		balanceColor, s.CreditsRemainingUSD, ColorReset,
-		totalCredits,
-		renderMiniBar(usedPercent, 15), remainingPercent))
-}
-
-// RenderBox prints plan, credits, session limit, and dashboard URL at startup.
-func (sb *StatusBar) RenderBox() {
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 
 	if !sb.enabled || sb.status == nil {
-		// No API data — show session limit if configured
-		sb.renderSessionLimit()
-		sb.renderDashboardURL()
 		return
 	}
 
-	s := sb.status
-	tier := formatTier(s.Tier)
+	// Update terminal title (non-intrusive, won't conflict with agent TUI)
+	SetTerminalTitle(sb.formatTitleStatusLocked())
+}
 
-	// Plan (green)
-	fmt.Printf("%s[OK]%s %sPlan:%s %s%s%s\n", ColorGreen, ColorReset, ColorGreen, ColorReset, ColorBold, tier, ColorReset)
-
-	// Credits — depends on plan type (green)
-	if s.Tier == "enterprise" || s.IsAdmin {
-		// Enterprise / Admin = pay-as-you-go, show usage this month
-		fmt.Printf("%s[OK]%s %sUsage this month:%s %s$%.2f%s (pay-as-you-go)\n",
-			ColorGreen, ColorReset, ColorGreen, ColorReset, ColorGreen, s.CreditsUsedThisMonth, ColorReset)
-	} else if s.MonthlyBudgetUSD > 0 {
-		// Pro/Free with budget = show remaining out of total credits
-		totalCredits, usedPercent, remainingPercent := calcCreditPercents(s)
-		balanceColor := getBalanceColor(s.CreditsRemainingUSD)
-		fmt.Printf("%s[OK]%s %sCredits:%s %s$%.2f%s / $%.2f  %s %.1f%% remaining\n",
-			ColorGreen, ColorReset, ColorGreen, ColorReset,
-			balanceColor, s.CreditsRemainingUSD, ColorReset,
-			totalCredits,
-			renderMiniBar(usedPercent, 15), remainingPercent)
-	} else {
-		// Fallback — show remaining
-		fmt.Printf("%s[OK]%s %sCredits:%s %s$%.2f%s remaining\n",
-			ColorGreen, ColorReset, ColorGreen, ColorReset, ColorGreen, s.CreditsRemainingUSD, ColorReset)
+// formatTitleStatusLocked returns the title string (caller must hold mu.RLock).
+func (sb *StatusBar) formatTitleStatusLocked() string {
+	base := fmt.Sprintf("Context Gateway | :%d", sb.dashboardPort)
+	if sb.sessionName != "" {
+		base += " | " + sb.sessionName
 	}
 
-	// Compression savings — always show
-	if sb.savingsSource != nil {
-		tokensSaved, costSaved, compressed, total := sb.savingsSource.GetSavingsSummary()
-		if tokensSaved > 0 {
-			fmt.Printf("%s[OK]%s %sSavings:%s %s%d tokens%s saved (%s$%.4f%s) across %d/%d requests\n",
-				ColorGreen, ColorReset, ColorGreen, ColorReset,
-				ColorGreen, tokensSaved, ColorReset,
-				ColorGreen, costSaved, ColorReset,
-				compressed, total)
+	if !sb.enabled || sb.status == nil {
+		return base
+	}
+
+	s := sb.status
+	if s.IsAdmin {
+		return fmt.Sprintf("%s | unlimited | %s", base, formatTier(s.Tier))
+	}
+	return fmt.Sprintf("%s | $%.2f remaining | %s", base, s.CreditsRemainingUSD, formatTier(s.Tier))
+}
+
+// RenderBox prints the dashboard URL at startup.
+func (sb *StatusBar) RenderBox() {
+	sb.mu.RLock()
+	defer sb.mu.RUnlock()
+
+	// Dashboard URL only
+	sb.renderDashboardURL()
+}
+
+// RenderStartup prints plan, usage, and session info in green at startup.
+func (sb *StatusBar) RenderStartup(sessionName string) {
+	sb.mu.RLock()
+	defer sb.mu.RUnlock()
+
+	// Plan
+	if sb.enabled && sb.status != nil {
+		s := sb.status
+		tier := formatTier(s.Tier)
+		fmt.Printf("%s[OK]%s %sPlan:%s %s\n", ColorGreen, ColorReset, ColorGreen, ColorReset, tier)
+
+		// Usage
+		if s.Tier == "enterprise" || s.IsAdmin {
+			fmt.Printf("%s[OK]%s %sUsage this month:%s $%.2f (pay-as-you-go)\n",
+				ColorGreen, ColorReset, ColorGreen, ColorReset, s.CreditsUsedThisMonth)
 		} else {
-			fmt.Printf("%s[OK]%s %sSavings:%s no compression data yet\n",
-				ColorGreen, ColorReset, ColorGreen, ColorReset)
+			fmt.Printf("%s[OK]%s %sCredits:%s $%.2f remaining\n",
+				ColorGreen, ColorReset, ColorGreen, ColorReset, s.CreditsRemainingUSD)
 		}
 	}
 
-	// Session limit from config (only if configured)
-	sb.renderSessionLimit()
-
-	// Dashboard URL
-	sb.renderDashboardURL()
+	// Session
+	if sessionName != "" {
+		fmt.Printf("%s[OK]%s %sSession:%s %s\n", ColorGreen, ColorReset, ColorGreen, ColorReset, sessionName)
+	}
 }
 
 // renderDashboardURL prints the cost dashboard URL if port is set.
@@ -410,17 +396,6 @@ func (sb *StatusBar) renderDashboardURL() {
 	if sb.dashboardPort > 0 {
 		fmt.Printf("%s[OK]%s %sCost dashboard:%s http://localhost:%d/costs/\n",
 			ColorGreen, ColorReset, ColorGreen, ColorReset, sb.dashboardPort)
-	}
-}
-
-// renderSessionLimit prints the session cost limit if one is configured.
-func (sb *StatusBar) renderSessionLimit() {
-	if sb.costSource == nil {
-		return
-	}
-	globalCap := sb.costSource.GetGlobalCap()
-	if globalCap > 0 {
-		PrintInfo(fmt.Sprintf("Session limit: $%.2f", globalCap))
 	}
 }
 
@@ -498,7 +473,8 @@ func (sb *StatusBar) renderFooterLocked() {
 	if !sb.enabled || sb.status == nil || !sb.footerEnabled {
 		return
 	}
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
+	stdoutFd := int(os.Stdout.Fd()) // #nosec G115 -- fd fits in int on all supported platforms
+	if !term.IsTerminal(stdoutFd) {
 		return
 	}
 
@@ -510,7 +486,7 @@ func (sb *StatusBar) renderFooterLocked() {
 	// Save cursor, move to bottom line, clear, print, restore.
 	// Use DECSC/DECRC for broad terminal compatibility.
 	fmt.Print("\0337")
-	if _, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && h > 0 {
+	if _, h, err := term.GetSize(stdoutFd); err == nil && h > 0 {
 		fmt.Printf("\033[%d;1H", h)
 	} else {
 		fmt.Print("\r")
@@ -628,24 +604,35 @@ func (sb *StatusBar) formatCompactLine() string {
 
 // FormatTitleStatus returns a plain-text status string for the terminal title bar.
 // Format: "Context Gateway | port:18080 | $12.50 remaining | Pro"
+// This version takes explicit port/session args for initial display before fields are set.
 func (sb *StatusBar) FormatTitleStatus(port int, session string) string {
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 
-	base := fmt.Sprintf("Context Gateway | :%d", port)
-	if session != "" {
-		base += " | " + session
+	// Use explicit args if provided, otherwise fall back to stored fields
+	p := port
+	if p == 0 {
+		p = sb.dashboardPort
+	}
+	s := session
+	if s == "" {
+		s = sb.sessionName
+	}
+
+	base := fmt.Sprintf("Context Gateway | :%d", p)
+	if s != "" {
+		base += " | " + s
 	}
 
 	if !sb.enabled || sb.status == nil {
 		return base
 	}
 
-	s := sb.status
-	if s.IsAdmin {
-		return fmt.Sprintf("%s | unlimited | %s", base, formatTier(s.Tier))
+	st := sb.status
+	if st.IsAdmin {
+		return fmt.Sprintf("%s | unlimited | %s", base, formatTier(st.Tier))
 	}
-	return fmt.Sprintf("%s | $%.2f remaining | %s", base, s.CreditsRemainingUSD, formatTier(s.Tier))
+	return fmt.Sprintf("%s | $%.2f remaining | %s", base, st.CreditsRemainingUSD, formatTier(st.Tier))
 }
 
 // =============================================================================

@@ -113,6 +113,48 @@ func TestCalculateCostWithCache_OnlyCacheRead(t *testing.T) {
 	assert.Less(t, cost, fullPrice)
 }
 
+func TestGetModelPricing_EmptyString(t *testing.T) {
+	// Empty model name should not panic, returns default pricing
+	p := costcontrol.GetModelPricing("")
+	assert.Greater(t, p.InputPerMTok, 0.0)
+	assert.Greater(t, p.OutputPerMTok, 0.0)
+}
+
+func TestGetModelPricing_DatedVariants(t *testing.T) {
+	// Various dated format variants should all match family
+	variants := []string{
+		"claude-sonnet-4-5-20250514",
+		"claude-sonnet-4-5-latest",
+		"claude-sonnet-4-5-v2",
+	}
+	for _, v := range variants {
+		t.Run(v, func(t *testing.T) {
+			p := costcontrol.GetModelPricing(v)
+			assert.Equal(t, 3.0, p.InputPerMTok, "should match claude-sonnet-4-5 family")
+		})
+	}
+}
+
+func TestCalculateCost_LargeTokenCounts(t *testing.T) {
+	pricing := costcontrol.ModelPricing{InputPerMTok: 15, OutputPerMTok: 75}
+
+	// 10M input + 5M output — verify no overflow
+	cost := costcontrol.CalculateCost(10_000_000, 5_000_000, pricing)
+	expected := (10_000_000.0/1_000_000)*15 + (5_000_000.0/1_000_000)*75
+	assert.InDelta(t, expected, cost, 0.001)
+	assert.Greater(t, cost, 0.0)
+}
+
+func TestCalculateCostWithCache_AllCacheRead(t *testing.T) {
+	pricing := costcontrol.GetModelPricing("claude-sonnet-4-5")
+
+	// 0 fresh input, 0 output, 0 write, 100k cache read
+	cost := costcontrol.CalculateCostWithCache(0, 0, 0, 100_000, pricing)
+	expected := 100_000.0 / 1_000_000 * pricing.InputPerMTok * pricing.CacheReadMultiplier
+	assert.InDelta(t, expected, cost, 0.0000001)
+	assert.Greater(t, cost, 0.0)
+}
+
 func TestCalculateCostWithCache_OnlyCacheWrite(t *testing.T) {
 	pricing := costcontrol.ModelPricing{InputPerMTok: 5, OutputPerMTok: 25}
 

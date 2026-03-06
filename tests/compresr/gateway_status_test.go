@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/compresr/context-gateway/internal/compresr"
 )
@@ -102,5 +103,91 @@ func TestGetGatewayStatus_NoAPIKey(t *testing.T) {
 	_, err := client.GetGatewayStatus()
 	if err == nil {
 		t.Error("expected error when no API key configured")
+	}
+}
+
+func TestGetCachedStatus_ReturnsNilWithoutRefresh(t *testing.T) {
+	client := compresr.NewClient("http://localhost", "test-key")
+	// Without StartBackgroundRefresh or GetGatewayStatus, cache should be nil
+	status := client.GetCachedStatus()
+	if status != nil {
+		t.Error("expected nil cached status before any refresh")
+	}
+}
+
+func TestBackgroundRefresh_PopulatesCache(t *testing.T) {
+	mockResp := compresr.APIResponse[compresr.GatewayStatus]{
+		Success: true,
+		Data: compresr.GatewayStatus{
+			Tier:                "free",
+			CreditsRemainingUSD: 10.0,
+		},
+	}
+
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(mockResp)
+	}))
+	defer server.Close()
+
+	client := compresr.NewClient(server.URL, "test-key")
+
+	// Start background refresh with short interval for testing
+	client.StartBackgroundRefresh(50 * time.Millisecond)
+	defer client.StopBackgroundRefresh()
+
+	// Wait for initial refresh
+	time.Sleep(100 * time.Millisecond)
+
+	// Cache should now be populated
+	status := client.GetCachedStatus()
+	if status == nil {
+		t.Fatal("expected cached status after background refresh")
+	}
+	if status.Tier != "free" {
+		t.Errorf("expected tier 'free', got %q", status.Tier)
+	}
+	if status.CreditsRemainingUSD != 10.0 {
+		t.Errorf("expected credits 10.0, got %v", status.CreditsRemainingUSD)
+	}
+
+	// Verify at least one API call was made
+	if callCount < 1 {
+		t.Errorf("expected at least 1 API call, got %d", callCount)
+	}
+}
+
+func TestBackgroundRefresh_StopsOnStop(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		mockResp := compresr.APIResponse[compresr.GatewayStatus]{
+			Success: true,
+			Data:    compresr.GatewayStatus{Tier: "test"},
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(mockResp)
+	}))
+	defer server.Close()
+
+	client := compresr.NewClient(server.URL, "test-key")
+	client.StartBackgroundRefresh(20 * time.Millisecond)
+
+	// Wait for a few refreshes
+	time.Sleep(100 * time.Millisecond)
+	countAfterStart := callCount
+
+	// Stop the refresh
+	client.StopBackgroundRefresh()
+
+	// Wait and verify no more calls
+	time.Sleep(100 * time.Millisecond)
+	countAfterStop := callCount
+
+	// Should have stopped refreshing (allow for one extra in-flight call)
+	if countAfterStop > countAfterStart+1 {
+		t.Errorf("expected refresh to stop, but calls increased from %d to %d", countAfterStart, countAfterStop)
 	}
 }

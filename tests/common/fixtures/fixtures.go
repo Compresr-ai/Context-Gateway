@@ -80,7 +80,7 @@ func SimpleCompressionConfig() *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            100, // Low threshold to trigger compression
 				MaxBytes:            65536,
-				TargetRatio:         0.1, // Aggressive compression
+				TargetCompressionRatio: 0.1, // Aggressive compression
 				IncludeExpandHint:   true,
 				EnableExpandContext: true, // Key: enable expand_context
 			},
@@ -282,6 +282,143 @@ func OpenAIResponseWithExpandCall(toolCallID, shadowID string) []byte {
 							"function": map[string]interface{}{
 								"name":      "expand_context",
 								"arguments": `{"id":"` + shadowID + `"}`,
+							},
+						},
+					},
+				},
+				"finish_reason": "tool_calls",
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     100,
+			"completion_tokens": 50,
+			"total_tokens":      150,
+		},
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// AnthropicExpandOnlyResponse creates an Anthropic response where expand_context is the ONLY tool call.
+// Used to test stop_reason correction (tool_use -> end_turn).
+func AnthropicExpandOnlyResponse(toolUseID, shadowID string) []byte {
+	resp := map[string]interface{}{
+		"id":   "msg_001",
+		"type": "message",
+		"role": "assistant",
+		"content": []interface{}{
+			map[string]interface{}{
+				"type":  "tool_use",
+				"id":    toolUseID,
+				"name":  "expand_context",
+				"input": map[string]interface{}{"id": shadowID},
+			},
+		},
+		"stop_reason": "tool_use",
+		"usage": map[string]interface{}{
+			"input_tokens":  100,
+			"output_tokens": 50,
+		},
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// AnthropicMixedToolResponse creates an Anthropic response with expand_context AND another tool call.
+func AnthropicMixedToolResponse(expandToolUseID, shadowID, otherToolUseID string) []byte {
+	resp := map[string]interface{}{
+		"id":   "msg_001",
+		"type": "message",
+		"role": "assistant",
+		"content": []interface{}{
+			map[string]interface{}{
+				"type":  "tool_use",
+				"id":    expandToolUseID,
+				"name":  "expand_context",
+				"input": map[string]interface{}{"id": shadowID},
+			},
+			map[string]interface{}{
+				"type":  "tool_use",
+				"id":    otherToolUseID,
+				"name":  "read_file",
+				"input": map[string]interface{}{"path": "/tmp/test.txt"},
+			},
+		},
+		"stop_reason": "tool_use",
+		"usage": map[string]interface{}{
+			"input_tokens":  100,
+			"output_tokens": 50,
+		},
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// OpenAIExpandOnlyResponse creates an OpenAI response where expand_context is the ONLY tool call.
+func OpenAIExpandOnlyResponse(toolCallID, shadowID string) []byte {
+	resp := map[string]interface{}{
+		"id":      "chatcmpl-001",
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   "gpt-4",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": nil,
+					"tool_calls": []interface{}{
+						map[string]interface{}{
+							"id":   toolCallID,
+							"type": "function",
+							"function": map[string]interface{}{
+								"name":      "expand_context",
+								"arguments": `{"id":"` + shadowID + `"}`,
+							},
+						},
+					},
+				},
+				"finish_reason": "tool_calls",
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     100,
+			"completion_tokens": 50,
+			"total_tokens":      150,
+		},
+	}
+	data, _ := json.Marshal(resp)
+	return data
+}
+
+// OpenAIMixedToolResponse creates an OpenAI response with expand_context AND another tool call.
+func OpenAIMixedToolResponse(expandToolCallID, shadowID, otherToolCallID string) []byte {
+	resp := map[string]interface{}{
+		"id":      "chatcmpl-001",
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   "gpt-4",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": nil,
+					"tool_calls": []interface{}{
+						map[string]interface{}{
+							"id":   expandToolCallID,
+							"type": "function",
+							"function": map[string]interface{}{
+								"name":      "expand_context",
+								"arguments": `{"id":"` + shadowID + `"}`,
+							},
+						},
+						map[string]interface{}{
+							"id":   otherToolCallID,
+							"type": "function",
+							"function": map[string]interface{}{
+								"name":      "read_file",
+								"arguments": `{"path":"/tmp/test.txt"}`,
 							},
 						},
 					},

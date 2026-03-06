@@ -18,8 +18,8 @@ import (
 
 // V2: Default TTL values - re-exported from config for backward compatibility.
 const (
-	DefaultOriginalTTL   = 5 * time.Minute // Short TTL for original content
-	DefaultCompressedTTL = 24 * time.Hour  // Long TTL for compressed (KV-cache)
+	DefaultOriginalTTL   = 5 * time.Hour  // TTL for original content (expand_context)
+	DefaultCompressedTTL = 24 * time.Hour // Long TTL for compressed (KV-cache)
 )
 
 // Note: These match config.DefaultOriginalTTL and config.DefaultCompressedTTL.
@@ -241,6 +241,17 @@ func (s *MemoryStore) DeleteExpansion(key string) error {
 
 	delete(s.expansions, key)
 	return nil
+}
+
+// Reset clears all cached data without stopping the cleanup goroutine.
+// Call this when starting a new session to ensure a clean slate.
+func (s *MemoryStore) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.data = make(map[string]entry)
+	s.compressed = make(map[string]entry)
+	s.expansions = make(map[string]expansionEntry)
 }
 
 // Close stops the cleanup goroutine and clears data.

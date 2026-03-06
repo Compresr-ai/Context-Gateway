@@ -1,3 +1,4 @@
+// bedrock.go implements the AWS Bedrock adapter for message transformation and usage parsing.
 package adapters
 
 import (

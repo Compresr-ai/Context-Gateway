@@ -1,13 +1,14 @@
-// Tool output compression - main compression logic.
+// Package tool_output compresses tool call results to reduce context size.
 //
 // STATUS: Disabled in current release. Enable via config: pipes.tool_output.enabled: true
 //
 // FLOW:
-//  1. Extract ALL tool outputs from request messages via adapter
-//  2. For each output > minBytes: check cache → compress if miss
-//  3. Store original with short TTL, compressed with long TTL (dual TTL)
-//  4. Add <<<SHADOW:id>>> prefix at send-time (not storage-time)
-//  5. Apply compressed content back via adapter
+//  1. Extract tool outputs from request messages via adapter
+//  2. Skip already-compressed outputs (<<<SHADOW:>>> prefix from prior turns)
+//  3. For each new output > minBytes: compress via configured strategy
+//  4. Store original with short TTL, compressed with long TTL (dual TTL)
+//  5. Add <<<SHADOW:id>>> prefix at send-time (not storage-time)
+//  6. Apply compressed content back via adapter
 //
 // DESIGN: Pipes are provider-agnostic. They use adapters for:
 //   - ExtractToolOutput() to get tool results
@@ -19,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -30,8 +32,9 @@ import (
 	"github.com/compresr/context-gateway/internal/pipes"
 )
 
-// Process compresses large tool outputs before sending to LLM.
-// V2: Compresses ALL tool outputs for KV-cache preservation (C2).
+// Process compresses new tool outputs before sending to LLM.
+// Only new (uncompressed) outputs are processed — outputs compressed on prior turns
+// arrive with a <<<SHADOW:>>> prefix and are skipped to preserve KV-cache.
 // Returns the modified request body with compressed tool outputs.
 func (p *Pipe) Process(ctx *pipes.PipeContext) ([]byte, error) {
 	if !p.enabled {
@@ -57,11 +60,12 @@ func (p *Pipe) Process(ctx *pipes.PipeContext) ([]byte, error) {
 	return p.compressAllTools(ctx)
 }
 
-// compressAllTools compresses ALL tool outputs (V2: C2 Multi-Tool Batch).
+// compressAllTools compresses new tool outputs in the request.
 //
-// V2 Design:
-//   - Compress ALL tools, not just last (fixes KV-cache miss on parallel tools)
-//   - Cache lookup with TTL reset before compression
+// Design:
+//   - Only compress new (uncompressed) outputs — prior turns are already compressed
+//   - Already-compressed outputs are detected by <<<SHADOW:>>> prefix and skipped
+//   - Cache lookup with TTL reset for outputs seen before in the same content form
 //   - Rate-limited parallel compression (C11)
 //   - Prefix added at send-time (Refinement 2)
 //
@@ -121,6 +125,26 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 	skipSet := BuildSkipSet(p.skipCategories, ctx.Provider)
 
 	for _, ext := range extracted {
+		// Skip already-compressed outputs from prior turns.
+		// These arrive in conversation history with the <<<SHADOW:>>> prefix
+		// that was added when they were first compressed.
+		if strings.HasPrefix(ext.Content, ShadowPrefixMarker) {
+			log.Debug().
+				Str("tool", ext.ToolName).
+				Msg("tool_output: already compressed from prior turn, skipping")
+			ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, pipes.ToolOutputCompression{
+				ToolName:        ext.ToolName,
+				ToolCallID:      ext.ID,
+				OriginalBytes:   len(ext.Content),
+				CompressedBytes: len(ext.Content),
+				MappingStatus:   "already_compressed",
+				MinThreshold:    p.minBytes,
+				MaxThreshold:    p.maxBytes,
+				Model:           p.getEffectiveModel(),
+			})
+			continue
+		}
+
 		// Skip tools configured in skip_tools (resolved by provider)
 		if skipSet[ext.ToolName] {
 			log.Debug().
@@ -190,20 +214,36 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				log.Info().
 					Str("shadow_id", shadowID[:min(16, len(shadowID))]).
 					Str("tool", ext.ToolName).
+					Bool("expand_context_enabled", p.enableExpandContext).
 					Msg("tool_output: cache HIT, using compressed")
 
-				prefixedContent := fmt.Sprintf(PrefixFormat, shadowID, cachedCompressed)
-				p.touchOriginal(shadowID)
+				// Build content: prefixed with shadow ID if expand_context enabled, raw otherwise
+				var cachedFinalContent string
+				var cachedShadowRef string
+				if p.enableExpandContext {
+					// Full expand_context mode: prefix with shadow ID for retrieval
+					if p.includeExpandHint {
+						cachedFinalContent = fmt.Sprintf(PrefixFormatWithHint, shadowID, cachedCompressed, shadowID)
+					} else {
+						cachedFinalContent = fmt.Sprintf(PrefixFormat, shadowID, cachedCompressed)
+					}
+					p.touchOriginal(shadowID)
+					ctx.ShadowRefs[shadowID] = ext.Content
+					cachedShadowRef = shadowID
+				} else {
+					// No expand_context: use raw compressed content, no shadow tracking
+					cachedFinalContent = cachedCompressed
+					cachedShadowRef = ""
+				}
 
-				ctx.ShadowRefs[shadowID] = ext.Content
 				ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, pipes.ToolOutputCompression{
 					ToolName:          ext.ToolName,
 					ToolCallID:        ext.ID,
-					ShadowID:          shadowID,
+					ShadowID:          cachedShadowRef,
 					OriginalContent:   ext.Content,
-					CompressedContent: prefixedContent,
+					CompressedContent: cachedFinalContent,
 					OriginalBytes:     contentSize,
-					CompressedBytes:   len(prefixedContent),
+					CompressedBytes:   len(cachedFinalContent),
 					CacheHit:          true,
 					MappingStatus:     "cache_hit",
 					MinThreshold:      p.minBytes,
@@ -212,8 +252,8 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				})
 				results = append(results, adapters.CompressedResult{
 					ID:         ext.ID,
-					Compressed: prefixedContent,
-					ShadowRef:  shadowID,
+					Compressed: cachedFinalContent,
+					ShadowRef:  cachedShadowRef,
 				})
 				p.recordCacheHit()
 				ctx.OutputCompressed = true
@@ -224,11 +264,34 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 
 		p.recordCacheMiss()
 
+		// KV-cache protection: if this content was seen before (exists in original store),
+		// it was already sent to the LLM in a prior request — either uncompressed (because
+		// compression was rejected/failed) or in some other form. Mutating it now would
+		// invalidate the LLM's KV-cache prefix, forcing expensive re-caching.
+		// Only genuinely new content (not in the store) should be compressed.
 		if p.store != nil {
+			if _, seen := p.store.Get(shadowID); seen {
+				log.Debug().
+					Str("tool", ext.ToolName).
+					Str("shadow_id", shadowID[:min(16, len(shadowID))]).
+					Msg("tool_output: seen before (in store), preserving KV-cache prefix")
+				ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, pipes.ToolOutputCompression{
+					ToolName:        ext.ToolName,
+					ToolCallID:      ext.ID,
+					OriginalBytes:   contentSize,
+					CompressedBytes: contentSize,
+					MappingStatus:   "prior_turn_preserved",
+					MinThreshold:    p.minBytes,
+					MaxThreshold:    p.maxBytes,
+					Model:           p.getEffectiveModel(),
+				})
+				continue
+			}
+			// First time seeing this content — store it as the baseline
 			_ = p.store.Set(shadowID, ext.Content)
 		}
 
-		// Queue for compression
+		// Queue for compression — this is genuinely new content
 		tasks = append(tasks, compressionTask{
 			index:    ext.MessageIndex,
 			msg:      message{Content: ext.Content, ToolCallID: ext.ID},
@@ -241,7 +304,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 			Int("size", contentSize).
 			Str("tool_name", ext.ToolName).
 			Str("shadow_id", shadowID[:min(16, len(shadowID))]).
-			Msg("tool_output: queued for compression")
+			Msg("tool_output: queued for compression (new content)")
 	}
 
 	if len(tasks) > 0 {
@@ -280,16 +343,16 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				continue
 			}
 
-			// Only use compression if savings exceed threshold
+			// Only use compression if savings exceed refusal threshold (fixed at 0.9)
 			compressionRatio := float64(len(result.compressedContent)) / float64(len(result.originalContent))
-			if compressionRatio > p.targetRatio {
+			if compressionRatio > RefusalThreshold {
 				log.Warn().
 					Float64("ratio", compressionRatio).
-					Float64("max_ratio", p.targetRatio).
+					Float64("refusal_threshold", RefusalThreshold).
 					Int("original", len(result.originalContent)).
 					Int("compressed", len(result.compressedContent)).
 					Str("tool", result.toolName).
-					Msg("tool_output: compression ratio exceeds threshold, using original")
+					Msg("tool_output: compression ratio exceeds refusal threshold, using original")
 				ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, pipes.ToolOutputCompression{
 					ToolName:          result.toolName,
 					ToolCallID:        result.toolCallID,
@@ -299,7 +362,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 					OriginalBytes:     len(result.originalContent),
 					CompressedBytes:   len(result.compressedContent),
 					CacheHit:          false,
-					MappingStatus:     "expansion_skipped",
+					MappingStatus:     "ratio_exceeded",
 					Model:             p.getEffectiveModel(),
 				})
 				continue
@@ -312,16 +375,31 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				}
 			}
 
-			prefixedContent := fmt.Sprintf(PrefixFormat, result.shadowID, result.compressedContent)
-			ctx.ShadowRefs[result.shadowID] = result.originalContent
+			// Build content: prefixed with shadow ID if expand_context enabled, raw otherwise
+			var finalContent string
+			var shadowRef string
+			if p.enableExpandContext {
+				// Full expand_context mode: prefix with shadow ID for retrieval
+				if p.includeExpandHint {
+					finalContent = fmt.Sprintf(PrefixFormatWithHint, result.shadowID, result.compressedContent, result.shadowID)
+				} else {
+					finalContent = fmt.Sprintf(PrefixFormat, result.shadowID, result.compressedContent)
+				}
+				ctx.ShadowRefs[result.shadowID] = result.originalContent
+				shadowRef = result.shadowID
+			} else {
+				// No expand_context: use raw compressed content, no shadow tracking
+				finalContent = result.compressedContent
+				shadowRef = ""
+			}
 
-			bytesSaved := len(result.originalContent) - len(prefixedContent)
+			bytesSaved := len(result.originalContent) - len(finalContent)
 			ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, pipes.ToolOutputCompression{
 				ToolName:          result.toolName,
 				ToolCallID:        result.toolCallID,
-				ShadowID:          result.shadowID,
+				ShadowID:          shadowRef,
 				OriginalContent:   result.originalContent,
-				CompressedContent: prefixedContent,
+				CompressedContent: finalContent,
 				OriginalBytes:     len(result.originalContent),
 				CompressedBytes:   len(result.compressedContent),
 				CacheHit:          false,
@@ -333,8 +411,8 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 
 			results = append(results, adapters.CompressedResult{
 				ID:         result.toolCallID,
-				Compressed: prefixedContent,
-				ShadowRef:  result.shadowID,
+				Compressed: finalContent,
+				ShadowRef:  shadowRef,
 			})
 
 			p.recordCompressionOK(int64(bytesSaved))
@@ -343,8 +421,9 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 			log.Info().
 				Str("strategy", p.strategy).
 				Int("original", len(result.originalContent)).
-				Int("compressed", len(prefixedContent)).
-				Str("shadow_id", result.shadowID[:min(16, len(result.shadowID))]).
+				Int("compressed", len(finalContent)).
+				Bool("expand_context_enabled", p.enableExpandContext).
+				Str("shadow_id", shadowRef).
 				Str("tool", result.toolName).
 				Msg("tool_output: compressed successfully")
 		}
@@ -427,7 +506,7 @@ func (p *Pipe) compressOne(reqCtx context.Context, query, provider, capturedBear
 	case config.StrategyExternalProvider:
 		compressed, err = p.compressViaExternalProvider(reqCtx, query, t.original, t.toolName, capturedBearerToken, capturedBetaHeader)
 	case "simple":
-		// TEMPORARY: Simple first-words compression for testing expand_context
+		// Simple first-words compression for testing expand_context
 		compressed = p.CompressSimpleContent(t.original)
 		err = nil
 	default:
@@ -553,11 +632,12 @@ func (p *Pipe) compressViaCompresr(query, content, toolName, provider string) (s
 	source := "gateway:" + provider
 
 	params := compresr.CompressToolOutputParams{
-		ToolOutput: content,
-		UserQuery:  query,
-		ToolName:   toolName,
-		ModelName:  modelName,
-		Source:     source,
+		ToolOutput:             content,
+		UserQuery:              query,
+		ToolName:               toolName,
+		ModelName:              modelName,
+		Source:                 source,
+		TargetCompressionRatio: p.targetCompressionRatio,
 	}
 
 	result, err := p.compresrClient.CompressToolOutput(params)

@@ -593,7 +593,7 @@ func compressionConfig(compressionAPIURL string) *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            256,
 				MaxBytes:            65536,
-				TargetRatio:         0.5,
+				TargetCompressionRatio: 0.5,
 				IncludeExpandHint:   false,
 				EnableExpandContext: false,
 				Compresr: config.CompresrConfig{

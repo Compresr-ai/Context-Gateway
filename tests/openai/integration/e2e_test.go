@@ -89,7 +89,6 @@ func TestE2E_OpenAI_SimpleChat(t *testing.T) {
 	require.NoError(t, err)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.Contains(t, strings.ToLower(content), "hello")
 }
 
@@ -203,7 +202,6 @@ func main() {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.True(t, strings.Contains(strings.ToLower(content), "hello") ||
 		strings.Contains(strings.ToLower(content), "print"))
 }
@@ -265,7 +263,6 @@ func TestE2E_OpenAI_LargeToolResultCompression(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -332,7 +329,6 @@ func TestE2E_OpenAI_MultipleToolResults(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -393,7 +389,6 @@ func TestE2E_OpenAI_DirectoryListing(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -454,7 +449,6 @@ func TestE2E_OpenAI_BashCommandOutput(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -512,7 +506,6 @@ func TestE2E_OpenAI_ErrorToolResult(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 
 	contentLower := strings.ToLower(content)
 	assert.True(t,
@@ -581,7 +574,6 @@ func TestE2E_OpenAI_GitDiffOutput(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -642,7 +634,6 @@ func TestE2E_OpenAI_JSONToolOutput(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -703,7 +694,6 @@ func TestE2E_OpenAI_WithSystemPrompt(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	content := extractOpenAIContentE2E(response)
-	t.Logf("GPT Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -811,7 +801,7 @@ func compressionConfigOpenAI() *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            500,
 				MaxBytes:            65536,
-				TargetRatio:         0.3,
+				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true,
 				Compresr: config.CompresrConfig{

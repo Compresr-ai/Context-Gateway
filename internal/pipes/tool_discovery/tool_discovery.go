@@ -110,14 +110,14 @@ func New(cfg *config.Config) *Pipe {
 	// Search fallback behavior:
 	// - relevance strategy: disabled (pure score-based filtering only)
 	// - tool-search strategy: enabled (LLM uses gateway_search_tools phantom tool)
-	// - compresr strategy: disabled (direct Compresr API filtering, no phantom tool)
+	// - api strategy: disabled (direct API filtering, no phantom tool)
 	// - disabled pipe: forced off
 	enableSearchFallback := cfg.Pipes.ToolDiscovery.EnableSearchFallback
 	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyRelevance {
 		enableSearchFallback = false
 	}
-	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyCompresr {
-		enableSearchFallback = false // Compresr strategy filters directly, no phantom tool
+	if pipes.IsAPIStrategy(cfg.Pipes.ToolDiscovery.Strategy) {
+		enableSearchFallback = false // API strategy filters directly, no phantom tool
 	}
 	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyToolSearch {
 		enableSearchFallback = true
@@ -136,9 +136,9 @@ func New(cfg *config.Config) *Pipe {
 		maxSearchResults = DefaultMaxSearchResults
 	}
 
-	// Compresr strategy configuration
+	// API strategy configuration (accepts both "api" and "compresr" for backward compat)
 	compresrEndpoint := cfg.Pipes.ToolDiscovery.Compresr.Endpoint
-	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyCompresr {
+	if pipes.IsAPIStrategy(cfg.Pipes.ToolDiscovery.Strategy) {
 		if compresrEndpoint != "" {
 			// Prepend Compresr base URL if endpoint is relative
 			if !strings.HasPrefix(compresrEndpoint, "http://") && !strings.HasPrefix(compresrEndpoint, "https://") {
@@ -154,16 +154,16 @@ func New(cfg *config.Config) *Pipe {
 		compresrTimeout = 10 * time.Second
 	}
 
-	// Initialize Compresr client when strategy is 'compresr' and explicitly configured
+	// Initialize Compresr client when strategy is 'api' (or 'compresr' for backward compat)
 	var compresrClient *compresr.Client
-	if cfg.Pipes.ToolDiscovery.Strategy == config.StrategyCompresr {
+	if pipes.IsAPIStrategy(cfg.Pipes.ToolDiscovery.Strategy) {
 		baseURL := cfg.URLs.Compresr
 		compresrKey := cfg.Pipes.ToolDiscovery.Compresr.APIKey
 		if baseURL != "" || compresrKey != "" {
 			compresrClient = compresr.NewClient(baseURL, compresrKey)
-			log.Info().Str("base_url", baseURL).Msg("tool_discovery: initialized Compresr client for compresr strategy")
+			log.Info().Str("base_url", baseURL).Msg("tool_discovery: initialized Compresr client for api strategy")
 		} else {
-			log.Warn().Msg("tool_discovery: compresr strategy selected but no base URL or API key configured, will return tools unchanged")
+			log.Warn().Msg("tool_discovery: api strategy selected but no base URL or API key configured, will return tools unchanged")
 		}
 	}
 
@@ -222,11 +222,13 @@ func (p *Pipe) Process(ctx *pipes.PipeContext) ([]byte, error) {
 	// Set the model for logging
 	ctx.ToolDiscoveryModel = p.getEffectiveModel()
 
+	// Handle strategy routing (api and compresr both route to filterByAPI for backward compat)
+	if pipes.IsAPIStrategy(p.strategy) {
+		return p.filterByAPI(ctx)
+	}
 	switch p.strategy {
 	case config.StrategyRelevance:
 		return p.filterByRelevance(ctx)
-	case config.StrategyCompresr:
-		return p.filterByCompresr(ctx)
 	case config.StrategyToolSearch:
 		return p.prepareToolSearch(ctx)
 	default:
@@ -284,6 +286,8 @@ func (p *Pipe) prepareToolSearch(ctx *pipes.PipeContext) ([]byte, error) {
 	// Store all original tools for search and eventual re-injection.
 	ctx.DeferredTools = tools
 	ctx.ToolsFiltered = true
+	ctx.OriginalToolCount = len(tools)
+	ctx.FilteredToolCount = 1 // Only the gateway_search_tools tool
 
 	modified, err := p.replaceWithSearchToolOnly(ctx.OriginalRequest, ctx.Adapter.Provider())
 	if err != nil {
@@ -299,38 +303,43 @@ func (p *Pipe) prepareToolSearch(ctx *pipes.PipeContext) ([]byte, error) {
 	return modified, nil
 }
 
-// filterByCompresr filters tools by calling the Compresr API.
+// filterByAPI filters tools by calling the Compresr API with hybrid search fallback.
 // Strategy behavior:
 //  1. Extract all tools and user query from the request
 //  2. Call Compresr API with tools and query
 //  3. API returns selected tool names
 //  4. Filter request to keep only selected tools
-//  5. Forward filtered request to LLM (no phantom tool)
-func (p *Pipe) filterByCompresr(ctx *pipes.PipeContext) ([]byte, error) {
+//  5. Store deferred tools for gateway_search_tools fallback
+//  6. On subsequent requests (with history), inject gateway_search_tools
+func (p *Pipe) filterByAPI(ctx *pipes.PipeContext) ([]byte, error) {
 	if ctx.Adapter == nil || len(ctx.OriginalRequest) == 0 {
 		return ctx.OriginalRequest, nil
 	}
 
 	parsedAdapter, ok := ctx.Adapter.(adapters.ParsedRequestAdapter)
 	if !ok {
-		log.Warn().Str("adapter", ctx.Adapter.Name()).Msg("tool_discovery(compresr): adapter does not implement ParsedRequestAdapter, skipping")
+		log.Warn().Str("adapter", ctx.Adapter.Name()).Msg("tool_discovery(api): adapter does not implement ParsedRequestAdapter, skipping")
 		return ctx.OriginalRequest, nil
 	}
 
 	parsed, err := parsedAdapter.ParseRequest(ctx.OriginalRequest)
 	if err != nil {
-		log.Warn().Err(err).Msg("tool_discovery(compresr): parse failed, skipping")
+		log.Warn().Err(err).Msg("tool_discovery(api): parse failed, skipping")
 		return ctx.OriginalRequest, nil
 	}
 
 	tools, err := parsedAdapter.ExtractToolDiscoveryFromParsed(parsed, nil)
 	if err != nil {
-		log.Warn().Err(err).Msg("tool_discovery(compresr): extraction failed, skipping")
+		log.Warn().Err(err).Msg("tool_discovery(api): extraction failed, skipping")
 		return ctx.OriginalRequest, nil
 	}
 	if len(tools) == 0 {
 		return ctx.OriginalRequest, nil
 	}
+
+	// Set counts early - will be updated if filtering succeeds
+	ctx.OriginalToolCount = len(tools)
+	ctx.FilteredToolCount = len(tools) // Default: all tools kept
 
 	// Extract user query from the request
 	query := parsedAdapter.ExtractUserQueryFromParsed(parsed)
@@ -341,13 +350,13 @@ func (p *Pipe) filterByCompresr(ctx *pipes.PipeContext) ([]byte, error) {
 	// Call external API to select relevant tools
 	selectedNames, err := p.callToolSelectionAPI(tools, query, provider)
 	if err != nil {
-		log.Warn().Err(err).Msg("tool_discovery(compresr): API call failed, returning all tools")
+		log.Warn().Err(err).Msg("tool_discovery(api): API call failed, returning all tools")
 		return ctx.OriginalRequest, nil
 	}
 
 	// If no tools selected, return original
 	if len(selectedNames) == 0 {
-		log.Warn().Msg("tool_discovery(compresr): API returned no tools, returning all tools")
+		log.Warn().Msg("tool_discovery(api): API returned no tools, returning all tools")
 		return ctx.OriginalRequest, nil
 	}
 
@@ -362,9 +371,11 @@ func (p *Pipe) filterByCompresr(ctx *pipes.PipeContext) ([]byte, error) {
 		selectedSet[name] = true
 	}
 
-	// Build filter results
+	// Build filter results and track deferred tools
 	results := make([]adapters.CompressedResult, 0, len(tools))
 	keptNames := make([]string, 0)
+	deferred := make([]adapters.ExtractedContent, 0)
+	deferredNames := make([]string, 0)
 	for _, tool := range tools {
 		keep := selectedSet[tool.ToolName]
 		results = append(results, adapters.CompressedResult{
@@ -373,25 +384,35 @@ func (p *Pipe) filterByCompresr(ctx *pipes.PipeContext) ([]byte, error) {
 		})
 		if keep {
 			keptNames = append(keptNames, tool.ToolName)
+		} else {
+			deferred = append(deferred, tool)
+			deferredNames = append(deferredNames, tool.ToolName)
 		}
 	}
 
 	// Apply filtered tools to request
 	modified, err := parsedAdapter.ApplyToolDiscoveryToParsed(parsed, results)
 	if err != nil {
-		log.Warn().Err(err).Msg("tool_discovery(compresr): apply failed, returning original")
+		log.Warn().Err(err).Msg("tool_discovery(api): apply failed, returning original")
 		return ctx.OriginalRequest, nil
 	}
 
-	// Mark that filtering occurred
+	// Mark that filtering occurred and set counts
 	ctx.ToolsFiltered = true
+	ctx.OriginalToolCount = len(tools)
+	ctx.FilteredToolCount = len(keptNames)
+
+	// Store deferred tools for session tracking (no hybrid mode - API filtering only)
+	ctx.DeferredTools = deferred
 
 	log.Info().
 		Str("query", query).
 		Int("total", len(tools)).
 		Int("kept", len(keptNames)).
 		Strs("kept_tools", keptNames).
-		Msg("tool_discovery(compresr): filtered tools via API")
+		Int("deferred", len(deferred)).
+		Strs("deferred_tools", deferredNames).
+		Msg("tool_discovery(api): filtered tools via API")
 
 	return modified, nil
 }
@@ -526,6 +547,10 @@ func (p *Pipe) applyFilterResults(ctx *pipes.PipeContext, output *filterOutput, 
 	ctx.DeferredTools = output.deferred
 	ctx.ToolsFiltered = true
 
+	// Set counts for telemetry
+	ctx.OriginalToolCount = totalTools
+	ctx.FilteredToolCount = output.keptCount
+
 	// Inject search tool if enabled and we filtered tools
 	if p.enableSearchFallback && len(output.deferred) > 0 {
 		var err error
@@ -567,11 +592,14 @@ func (p *Pipe) filterByRelevanceParsed(ctx *pipes.PipeContext, parsedAdapter ada
 	tools, err := parsedAdapter.ExtractToolDiscoveryFromParsed(parsed, nil)
 	if err != nil {
 		log.Warn().Err(err).Msg("tool_discovery: extraction failed, skipping filtering")
+		ctx.ToolDiscoverySkipReason = "extraction_failed"
 		return ctx.OriginalRequest, nil
 	}
 
 	totalTools := len(tools)
 	if totalTools == 0 {
+		ctx.ToolDiscoverySkipReason = "no_tools"
+		ctx.ToolDiscoveryToolCount = 0
 		return ctx.OriginalRequest, nil
 	}
 
@@ -581,6 +609,9 @@ func (p *Pipe) filterByRelevanceParsed(ctx *pipes.PipeContext, parsedAdapter ada
 			Int("tools", totalTools).
 			Int("min_tools", p.minTools).
 			Msg("tool_discovery: below min threshold, skipping")
+		// Track skip reason for logging
+		ctx.ToolDiscoverySkipReason = "below_min_tools"
+		ctx.ToolDiscoveryToolCount = totalTools
 		return ctx.OriginalRequest, nil
 	}
 

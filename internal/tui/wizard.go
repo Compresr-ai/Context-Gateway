@@ -59,15 +59,16 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 		return nil, fmt.Errorf("all fields skipped")
 	}
 
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	stdinFd := int(os.Stdin.Fd()) // #nosec G115 -- fd fits in int on all supported platforms
+	if !term.IsTerminal(stdinFd) {
 		return runWizardFallback(title, activeFields)
 	}
 
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	oldState, err := term.MakeRaw(stdinFd)
 	if err != nil {
 		return runWizardFallback(title, activeFields)
 	}
-	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }()
+	defer func() { _ = term.Restore(stdinFd, oldState) }()
 
 	current := 0 // Current field index
 	editing := false
@@ -183,7 +184,7 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 		// Handle Ctrl+C in any mode
 		if b == 3 {
 			fmt.Print("\033[?25h") // Show cursor
-			_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			_ = term.Restore(stdinFd, oldState)
 			fmt.Println("\n\nInterrupted.")
 			os.Exit(130)
 		}
@@ -292,13 +293,13 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 					renderEditOptions(f.Options, editSelected)
 				case FieldTypeText, FieldTypePassword:
 					fmt.Print("\033[?25h")
-					_ = term.Restore(int(os.Stdin.Fd()), oldState)
+					_ = term.Restore(stdinFd, oldState)
 
 					prompt := fmt.Sprintf("\n  %s: ", f.Label)
 					var val string
 					if f.Type == FieldTypePassword {
 						fmt.Print(prompt)
-						password, _ := term.ReadPassword(int(os.Stdin.Fd()))
+						password, _ := term.ReadPassword(stdinFd)
 						val = strings.TrimSpace(string(password))
 						fmt.Println()
 					} else {
@@ -310,7 +311,7 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 					f.Value = val
 
 					// Re-enter raw mode
-					oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
+					oldState, _ = term.MakeRaw(stdinFd)
 					fmt.Print("\033[?25l") // Hide cursor
 					if current < len(activeFields)-1 {
 						current++
@@ -379,8 +380,9 @@ func runWizardFallback(title string, fields []WizardField) (*WizardResult, error
 				result.Values[f.ID] = 0
 			}
 		case FieldTypePassword:
-			if term.IsTerminal(int(os.Stdin.Fd())) {
-				password, _ := term.ReadPassword(int(os.Stdin.Fd()))
+			stdinFd := int(os.Stdin.Fd()) // #nosec G115 -- fd fits in int on all supported platforms
+			if term.IsTerminal(stdinFd) {
+				password, _ := term.ReadPassword(stdinFd)
 				result.Values[f.ID] = strings.TrimSpace(string(password))
 				fmt.Println()
 			} else {

@@ -41,7 +41,7 @@ var gatewayStartTime = time.Now()
 // Restricted to localhost to prevent external access to operational metrics.
 func (g *Gateway) handleStats(w http.ResponseWriter, r *http.Request) {
 	if !isLoopback(r.RemoteAddr) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		g.writeError(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	var resp StatsResponse

@@ -96,9 +96,6 @@ func TestHardIntegration_ThreeToolsAllLarge(t *testing.T) {
 		},
 	}
 
-	t.Logf("Output sizes: %d, %d, %d bytes",
-		len(largeOutput1), len(largeOutput2), len(largeOutput3))
-
 	bodyBytes, _ := json.Marshal(requestBody)
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -122,7 +119,6 @@ func TestHardIntegration_ThreeToolsAllLarge(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(bodyBytes, &response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -188,7 +184,6 @@ func TestHardIntegration_ToolResultIsError(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 
 	// Claude should acknowledge the error (various valid responses possible)
 	contentLower := strings.ToLower(content)
@@ -281,7 +276,6 @@ func TestHardIntegration_MixedSuccessAndError(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 
 	// Should mention both the config content and the error
 	contentLower := strings.ToLower(content)
@@ -340,8 +334,6 @@ func TestHardIntegration_LargeErrorMessage(t *testing.T) {
 		},
 	}
 
-	t.Logf("Traceback size: %d bytes", len(traceback.String()))
-
 	bodyBytes, _ := json.Marshal(requestBody)
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -360,8 +352,7 @@ func TestHardIntegration_LargeErrorMessage(t *testing.T) {
 
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
-	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
+	_ = extractAnthropicContent(response)
 
 	// Primary check: we got a valid API response (status 200 already checked)
 	// Secondary: Claude typically responds with the request content or acknowledges the error
@@ -468,7 +459,6 @@ func TestHardIntegration_MultiRoundToolUse(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(bodyBytes, &response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -593,8 +583,6 @@ Date:   Mon Jan %d 10:%02d:00 2024 +0000
 		},
 	}
 
-	t.Logf("Git log size: %d bytes", len(gitLog.String()))
-
 	bodyBytes, _ := json.Marshal(requestBody)
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -614,7 +602,6 @@ Date:   Mon Jan %d 10:%02d:00 2024 +0000
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -687,7 +674,6 @@ func TestHardIntegration_RealWorld_NPMInstall(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 
 	// Should mention vulnerabilities or deprecation
 	contentLower := strings.ToLower(content)
@@ -778,7 +764,6 @@ func TestHardIntegration_RealWorld_DockerBuild(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 
 	// LLM responses are non-deterministic; accept any reasonable response that indicates
 	// Claude understood the Docker build output
@@ -856,8 +841,7 @@ func TestHardIntegration_EmptyToolResult(t *testing.T) {
 
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
-	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
+	_ = extractAnthropicContent(response)
 
 	// Primary check: we got a valid API response (status 200 already checked)
 	// Claude may respond with text, tool calls, or acknowledge the empty result
@@ -933,7 +917,6 @@ func TestHardIntegration_SpecialCharactersInOutput(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 	assert.NotEmpty(t, content)
 }
 
@@ -1001,7 +984,6 @@ func TestHardIntegration_BinaryLikeContent(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&response)
 	content := extractAnthropicContent(response)
-	t.Logf("Claude Response: %s", content)
 
 	contentLower := strings.ToLower(content)
 	assert.True(t, strings.Contains(contentLower, "png") ||
@@ -1027,14 +1009,14 @@ func expandContextEnabledConfig() *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            500,
 				MaxBytes:            65536,
-				TargetRatio:         0.3,
+				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:   false,
 				EnableExpandContext: true, // Enable expand_context
 				Compresr: config.CompresrConfig{
-					Endpoint:  "/api/compress/tool-output",
-					APIKey: os.Getenv("COMPRESR_API_KEY"),
-					Model:     "toc_espresso_v1",
-					Timeout:   30 * time.Second,
+					Endpoint: "/api/compress/tool-output",
+					APIKey:   os.Getenv("COMPRESR_API_KEY"),
+					Model:    "toc_espresso_v1",
+					Timeout:  30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

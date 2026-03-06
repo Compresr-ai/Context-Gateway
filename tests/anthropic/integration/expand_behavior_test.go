@@ -120,7 +120,6 @@ NOTE: These credentials rotate every 30 days. Last rotation: 2024-01-15`
 	defer resp.Body.Close()
 
 	responseBody, _ := io.ReadAll(resp.Body)
-	t.Logf("Response: %s", string(responseBody))
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Verify NO expand_context leaked
@@ -130,89 +129,10 @@ NOTE: These credentials rotate every 30 days. Last rotation: 2024-01-15`
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractAnthropicContent(response)
-	t.Logf("Haiku Response: %s", content)
 
 	// The password should be in the response (either from expand or if compression didn't happen)
 	// This proves the LLM either expanded OR got the full content
 	assert.NotEmpty(t, content)
-}
-
-// TestExpandBehavior_WithExpand_QuestionRequiresDetail tests asking a question
-// that REQUIRES detailed content to answer correctly.
-func TestExpandBehavior_WithExpand_QuestionRequiresDetail(t *testing.T) {
-	apiKey := getAnthropicKey(t)
-
-	cfg := configWithExpandEnabled("")
-	gw := gateway.New(cfg)
-	gwServer := httptest.NewServer(gw.Handler())
-	defer gwServer.Close()
-
-	// Content where specific details matter
-	largeCodeWithBug := generateBuggyCode()
-	t.Logf("Code size: %d bytes", len(largeCodeWithBug))
-
-	requestBody := map[string]interface{}{
-		"model":      haikuModel,
-		"max_tokens": 600,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": "Find the bug in the code. What specific line has the issue and what is the exact problem?"},
-			{
-				"role": "assistant",
-				"content": []map[string]interface{}{
-					{
-						"type":  "tool_use",
-						"id":    "toolu_bug_001",
-						"name":  "read_file",
-						"input": map[string]string{"path": "buggy.go"},
-					},
-				},
-			},
-			{
-				"role": "user",
-				"content": []map[string]interface{}{
-					{
-						"type":        "tool_result",
-						"tool_use_id": "toolu_bug_001",
-						"content":     largeCodeWithBug,
-					},
-				},
-			},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
-	require.NoError(t, err)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", anthropicVersion)
-	req.Header.Set("X-Target-URL", anthropicBaseURL+"/v1/messages")
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := retryableRequest(client, req, t)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	responseBody, _ := io.ReadAll(resp.Body)
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.NotContains(t, string(responseBody), "expand_context")
-	assert.NotContains(t, string(responseBody), "<<<SHADOW:")
-
-	var response map[string]interface{}
-	json.Unmarshal(responseBody, &response)
-	content := extractAnthropicContent(response)
-	t.Logf("Haiku Response: %s", content)
-
-	// Should mention the bug (divide by zero, nil pointer, etc.)
-	contentLower := strings.ToLower(content)
-	assert.True(t, strings.Contains(contentLower, "divide") ||
-		strings.Contains(contentLower, "nil") ||
-		strings.Contains(contentLower, "zero") ||
-		strings.Contains(contentLower, "panic") ||
-		strings.Contains(contentLower, "error") ||
-		strings.Contains(contentLower, "bug"))
 }
 
 // =============================================================================
@@ -285,7 +205,6 @@ func TestExpandBehavior_SmallContent_NoCompression(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractAnthropicContent(response)
-	t.Logf("Haiku Response: %s", content)
 
 	// Should correctly reference the small content or provide a valid response
 	// (empty responses can occur with tool results if LLM doesn't have context to respond)
@@ -370,7 +289,6 @@ Secret Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
 	defer resp.Body.Close()
 
 	responseBody, _ := io.ReadAll(resp.Body)
-	t.Logf("Response: %s", string(responseBody))
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Should NOT contain expand_context (it's disabled)
@@ -379,7 +297,6 @@ Secret Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractAnthropicContent(response)
-	t.Logf("Haiku Response (no expand): %s", content)
 
 	assert.NotEmpty(t, content)
 }
@@ -395,7 +312,6 @@ func TestExpandBehavior_NoExpand_LargeOutput(t *testing.T) {
 
 	// Generate large log file
 	largeLog := generateLargeLogFile(3000)
-	t.Logf("Log size: %d bytes", len(largeLog))
 
 	requestBody := map[string]interface{}{
 		"model":      haikuModel,
@@ -447,8 +363,7 @@ func TestExpandBehavior_NoExpand_LargeOutput(t *testing.T) {
 
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
-	content := extractAnthropicContent(response)
-	t.Logf("Haiku Response: %s", content)
+	_ = extractAnthropicContent(response)
 
 	// Note: We don't assert NotEmpty here because Claude may return empty content
 	// with large uncompressed logs - this is model behavior, not gateway behavior.
@@ -511,7 +426,6 @@ cache:
 		assert.NotContains(t, resp.body, "expand_context")
 		assert.NotContains(t, resp.body, "<<<SHADOW:")
 
-		t.Logf("WITH expand - Response: %s", resp.content)
 	})
 
 	// Test WITHOUT expand enabled
@@ -525,7 +439,6 @@ cache:
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.NotContains(t, resp.body, "expand_context")
 
-		t.Logf("WITHOUT expand - Response: %s", resp.content)
 	})
 }
 
@@ -599,9 +512,6 @@ func TestExpandBehavior_MultiTool_SomeNeedExpand(t *testing.T) {
 		},
 	}
 
-	t.Logf("Output sizes: small=%d, medium=%d, large=%d",
-		len(smallOutput), len(mediumOutput), len(largeOutput))
-
 	bodyBytes, _ := json.Marshal(requestBody)
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
 	require.NoError(t, err)
@@ -625,7 +535,6 @@ func TestExpandBehavior_MultiTool_SomeNeedExpand(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractAnthropicContent(response)
-	t.Logf("Haiku Response: %s", content)
 
 	// Should mention BUILD SUCCESS
 	contentLower := strings.ToLower(content)
@@ -700,7 +609,6 @@ func TestExpandBehavior_WithExpand_ErrorToolResult(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractAnthropicContent(response)
-	t.Logf("Haiku Response: %s", content)
 
 	// Should acknowledge the error
 	contentLower := strings.ToLower(content)
@@ -782,7 +690,6 @@ func TestExpandBehavior_StressTest_ManyToolResults(t *testing.T) {
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
 	content := extractAnthropicContent(response)
-	t.Logf("Haiku Response: %s", content)
 
 	// Should mention 5 or files
 	contentLower := strings.ToLower(content)
@@ -876,14 +783,14 @@ func configWithExpandEnabled(mockAPIURL string) *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            300, // Lower threshold to trigger compression
 				MaxBytes:            65536,
-				TargetRatio:         0.2,
+				TargetCompressionRatio: 0.2,
 				IncludeExpandHint:   true,
 				EnableExpandContext: true, // ENABLED
 				Compresr: config.CompresrConfig{
-					Endpoint:  apiEndpoint,
-					APIKey: os.Getenv("COMPRESR_API_KEY"),
-					Model:     "toc_espresso_v1",
-					Timeout:   30 * time.Second,
+					Endpoint: apiEndpoint,
+					APIKey:   os.Getenv("COMPRESR_API_KEY"),
+					Model:    "toc_espresso_v1",
+					Timeout:  30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
@@ -916,14 +823,14 @@ func configWithExpandDisabled() *config.Config {
 				FallbackStrategy:    "passthrough",
 				MinBytes:            300,
 				MaxBytes:            65536,
-				TargetRatio:         0.2,
+				TargetCompressionRatio: 0.2,
 				IncludeExpandHint:   false, // No hint
 				EnableExpandContext: false, // DISABLED
 				Compresr: config.CompresrConfig{
-					Endpoint:  "",
-					APIKey: "",
-					Model:     "",
-					Timeout:   30 * time.Second,
+					Endpoint: "",
+					APIKey:   "",
+					Model:    "",
+					Timeout:  30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

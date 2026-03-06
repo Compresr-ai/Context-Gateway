@@ -57,5 +57,14 @@ func (mc *MetricsCollector) Stats() map[string]int64 {
 	}
 }
 
+// Reset zeros out all counters for a fresh session.
+func (mc *MetricsCollector) Reset() {
+	mc.requests.Store(0)
+	mc.successes.Store(0)
+	mc.compressions.Store(0)
+	mc.cacheHits.Store(0)
+	mc.cacheMisses.Store(0)
+}
+
 // Stop is a no-op for compatibility.
 func (mc *MetricsCollector) Stop() {}

@@ -40,9 +40,9 @@ const DefaultHashMessageCount = 3
 // STORE DEFAULTS
 // =============================================================================
 
-// DefaultOriginalTTL is the short TTL for original content in shadow context.
-// Only needed for expand_context calls during a request.
-const DefaultOriginalTTL = 5 * time.Minute
+// DefaultOriginalTTL is the TTL for original content in shadow context.
+// Needed for expand_context calls to retrieve uncompressed content.
+const DefaultOriginalTTL = 5 * time.Hour
 
 // DefaultCompressedTTL is the long TTL for compressed content.
 // Longer TTL preserves KV-cache across requests.

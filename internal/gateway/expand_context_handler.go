@@ -100,9 +100,11 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 					Msg("expand_context: retrieved content")
 			} else {
 				resultText = fmt.Sprintf("Error: shadow reference '%s' not found or expired", shadowID)
-				log.Warn().
+				log.Error().
 					Str("shadow_id", shadowID).
-					Msg("expand_context: shadow ID not found")
+					Str("request_id", h.requestID).
+					Str("reason", "ttl_expired_or_missing").
+					Msg("expand_context: shadow ID not found in store")
 			}
 			h.recordExpandEntry(shadowID, found, content)
 
@@ -136,9 +138,11 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 					Msg("expand_context: retrieved content")
 			} else {
 				resultText = fmt.Sprintf("Error: shadow reference '%s' not found or expired", shadowID)
-				log.Warn().
+				log.Error().
 					Str("shadow_id", shadowID).
-					Msg("expand_context: shadow ID not found")
+					Str("request_id", h.requestID).
+					Str("reason", "ttl_expired_or_missing").
+					Msg("expand_context: shadow ID not found in store")
 			}
 			h.recordExpandEntry(shadowID, found, content)
 
@@ -174,6 +178,7 @@ func (h *ExpandContextHandler) recordExpandEntry(shadowID string, found bool, co
 }
 
 // FilterFromResponse removes expand_context from the final response.
+// Also fixes stop_reason/finish_reason when all tool_use blocks are removed.
 func (h *ExpandContextHandler) FilterFromResponse(responseBody []byte) ([]byte, bool) {
 	var response map[string]any
 	if err := json.Unmarshal(responseBody, &response); err != nil {
@@ -202,6 +207,24 @@ func (h *ExpandContextHandler) FilterFromResponse(responseBody []byte) ([]byte, 
 			filteredContent = append(filteredContent, block)
 		}
 		response["content"] = filteredContent
+
+		// Fix stop_reason: if we removed all tool_use blocks, stop_reason should not be "tool_use"
+		if modified {
+			if stopReason, _ := response["stop_reason"].(string); stopReason == "tool_use" {
+				hasRemainingToolUse := false
+				for _, block := range filteredContent {
+					if blockMap, ok := block.(map[string]any); ok {
+						if blockMap["type"] == "tool_use" {
+							hasRemainingToolUse = true
+							break
+						}
+					}
+				}
+				if !hasRemainingToolUse {
+					response["stop_reason"] = "end_turn"
+				}
+			}
+		}
 	}
 
 	// OpenAI format
@@ -241,7 +264,15 @@ func (h *ExpandContextHandler) FilterFromResponse(responseBody []byte) ([]byte, 
 				filteredCalls = append(filteredCalls, tc)
 			}
 
-			message["tool_calls"] = filteredCalls
+			// Fix finish_reason: if we removed all tool_calls, update to "stop"
+			if modified && len(filteredCalls) == 0 {
+				delete(message, "tool_calls")
+				if finishReason, _ := choiceMap["finish_reason"].(string); finishReason == "tool_calls" {
+					choiceMap["finish_reason"] = "stop"
+				}
+			} else {
+				message["tool_calls"] = filteredCalls
+			}
 			choiceMap["message"] = message
 			choices[i] = choiceMap
 		}

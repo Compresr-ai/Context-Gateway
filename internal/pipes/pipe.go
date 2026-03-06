@@ -61,6 +61,14 @@ type PipeContext struct {
 
 	// Tool discovery model used for logging
 	ToolDiscoveryModel string // Model used for tool discovery (e.g., "tdc_coldbrew_v1")
+
+	// Tool discovery skip tracking
+	ToolDiscoverySkipReason string // Reason for skipping tool discovery (e.g., "below_min_tools", "no_tools")
+	ToolDiscoveryToolCount  int    // Number of tools in request when skipped
+
+	// Tool discovery counts for telemetry
+	OriginalToolCount int // Tools before filtering
+	FilteredToolCount int // Tools after filtering (kept)
 }
 
 // ToolOutputCompression tracks individual tool output compression.

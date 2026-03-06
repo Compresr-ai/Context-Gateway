@@ -257,3 +257,140 @@ func TestDetector_NoUserMessages(t *testing.T) {
 	// Should not match - only checks user messages for prompts
 	assert.False(t, result.IsCompactionRequest)
 }
+
+// =============================================================================
+// GENERIC DETECTOR TESTS (Header-based)
+// =============================================================================
+
+func TestGenericDetector_HeaderMatch(t *testing.T) {
+	cfg := preemptive.DetectorsConfig{
+		Generic: preemptive.GenericDetectorConfig{
+			Enabled:     true,
+			HeaderName:  "X-Request-Compaction",
+			HeaderValue: "true",
+		},
+	}
+
+	detector := preemptive.GetGenericDetector(cfg)
+	assert.NotNil(t, detector)
+
+	result := detector.DetectFromHeaders("true")
+
+	assert.True(t, result.IsCompactionRequest)
+	assert.Equal(t, "generic_header", result.DetectedBy)
+	assert.Equal(t, 1.0, result.Confidence)
+}
+
+func TestGenericDetector_HeaderNoMatch(t *testing.T) {
+	cfg := preemptive.DetectorsConfig{
+		Generic: preemptive.GenericDetectorConfig{
+			Enabled:     true,
+			HeaderName:  "X-Request-Compaction",
+			HeaderValue: "true",
+		},
+	}
+
+	detector := preemptive.GetGenericDetector(cfg)
+	assert.NotNil(t, detector)
+
+	result := detector.DetectFromHeaders("false")
+
+	assert.False(t, result.IsCompactionRequest)
+}
+
+func TestGenericDetector_Disabled(t *testing.T) {
+	cfg := preemptive.DetectorsConfig{
+		Generic: preemptive.GenericDetectorConfig{
+			Enabled:     false,
+			HeaderName:  "X-Request-Compaction",
+			HeaderValue: "true",
+		},
+	}
+
+	detector := preemptive.GetGenericDetector(cfg)
+	assert.Nil(t, detector, "Generic detector should be nil when disabled")
+}
+
+func TestGenericDetector_EmptyHeader(t *testing.T) {
+	cfg := preemptive.DetectorsConfig{
+		Generic: preemptive.GenericDetectorConfig{
+			Enabled:     true,
+			HeaderName:  "X-Request-Compaction",
+			HeaderValue: "true",
+		},
+	}
+
+	detector := preemptive.GetGenericDetector(cfg)
+	assert.NotNil(t, detector)
+
+	result := detector.DetectFromHeaders("")
+
+	assert.False(t, result.IsCompactionRequest)
+}
+
+func TestGenericDetector_HeaderName(t *testing.T) {
+	cfg := preemptive.DetectorsConfig{
+		Generic: preemptive.GenericDetectorConfig{
+			Enabled:     true,
+			HeaderName:  "X-Custom-Compaction",
+			HeaderValue: "yes",
+		},
+	}
+
+	detector := preemptive.GetGenericDetector(cfg)
+	assert.NotNil(t, detector)
+
+	assert.Equal(t, "X-Custom-Compaction", detector.HeaderName())
+}
+
+// =============================================================================
+// OPENCLAW PATTERN DETECTION TESTS
+// =============================================================================
+
+func TestOpenClawPatternDetection_MergeSummaries(t *testing.T) {
+	cfg := preemptive.DetectorsConfig{
+		ClaudeCode: preemptive.ClaudeCodeDetectorConfig{
+			Enabled: true,
+			PromptPatterns: []string{
+				"merge these partial summaries into a single cohesive summary",
+			},
+		},
+	}
+
+	detector := preemptive.GetDetector(adapters.ProviderAnthropic, cfg)
+
+	body := []byte(`{
+		"messages": [
+			{"role": "user", "content": "Merge these partial summaries into a single cohesive summary. Preserve decisions, TODOs, open questions, and any constraints."}
+		]
+	}`)
+
+	result := detector.Detect(body)
+
+	assert.True(t, result.IsCompactionRequest)
+	assert.Equal(t, "claude_code_prompt", result.DetectedBy)
+}
+
+func TestOpenClawPatternDetection_PreserveIdentifiers(t *testing.T) {
+	cfg := preemptive.DetectorsConfig{
+		Codex: preemptive.CodexDetectorConfig{
+			Enabled: true,
+			PromptPatterns: []string{
+				"preserve all opaque identifiers exactly as written",
+			},
+		},
+	}
+
+	detector := preemptive.GetDetector(adapters.ProviderOpenAI, cfg)
+
+	body := []byte(`{
+		"messages": [
+			{"role": "user", "content": "Preserve all opaque identifiers exactly as written (no shortening or reconstruction), including UUIDs, hashes, IDs, tokens."}
+		]
+	}`)
+
+	result := detector.Detect(body)
+
+	assert.True(t, result.IsCompactionRequest)
+	assert.Equal(t, "openai_prompt", result.DetectedBy)
+}

@@ -13,6 +13,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net"
@@ -20,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -146,7 +148,8 @@ type Gateway struct {
 	router      *Router
 	store       store.Store
 	tracker     *monitoring.Tracker
-	savings     *monitoring.SavingsTracker // Real-time compression savings
+	savings     *monitoring.SavingsTracker // Legacy: Real-time compression savings
+	aggregator  *monitoring.LogAggregator  // New: Background log aggregator (single source of truth)
 	trajectory  *monitoring.TrajectoryManager
 	httpClient  *http.Client
 	server      *http.Server
@@ -165,7 +168,7 @@ type Gateway struct {
 	// Provider-specific auth handlers (subscription/fallback)
 	authRegistry *auth.Registry
 
-	// Legacy expander (for streaming - to be migrated)
+	// Expander rewrites compressed history for streaming expand_context
 	expander *tooloutput.Expander
 
 	// AWS Bedrock support
@@ -173,6 +176,13 @@ type Gateway struct {
 
 	// Expand context log (in-memory ring buffer for dashboard)
 	expandLog *monitoring.ExpandLog
+
+	// Search tool log (in-memory ring buffer for dashboard)
+	searchLog *monitoring.SearchLog
+
+	// Current session ID (for filtering dashboard/savings to current session)
+	currentSessionID   string
+	currentSessionIDMu sync.RWMutex
 
 	// Logging components
 	logger        *monitoring.Logger
@@ -188,6 +198,27 @@ type Gateway struct {
 
 	// Compresr API client for account status (optional)
 	compresrClient *compresr.Client
+
+	// Lazy session initialization
+	// Session directory is created on first LLM request, not at gateway startup
+	lazySessionPath   string     // Prepared session path (may not exist yet)
+	lazySessionConfig []byte     // Config data to write when session is created
+	lazySessionOnce   sync.Once  // Ensures session is created only once
+	lazySessionMu     sync.Mutex // Protects lazySessionPath during creation
+}
+
+// getCurrentSessionID returns the current session ID (thread-safe).
+func (g *Gateway) getCurrentSessionID() string {
+	g.currentSessionIDMu.RLock()
+	defer g.currentSessionIDMu.RUnlock()
+	return g.currentSessionID
+}
+
+// setCurrentSessionID updates the current session ID (thread-safe).
+func (g *Gateway) setCurrentSessionID(id string) {
+	g.currentSessionIDMu.Lock()
+	defer g.currentSessionIDMu.Unlock()
+	g.currentSessionID = id
 }
 
 // StatusReporter allows the gateway to update a CLI status display.
@@ -198,7 +229,7 @@ type StatusReporter interface {
 
 // New creates a new gateway.
 func New(cfg *config.Config) *Gateway {
-	st := store.NewMemoryStore(cfg.Store.TTL)
+	st := store.NewMemoryStoreWithDualTTL(store.DefaultOriginalTTL, store.DefaultCompressedTTL)
 	registry := adapters.NewRegistry()
 	r := NewRouter(cfg, st)
 
@@ -291,30 +322,57 @@ func New(cfg *config.Config) *Gateway {
 		authRegistry = auth.NewRegistry() // Empty registry
 	}
 
-	g := &Gateway{
-		config:         cfg,
-		registry:       registry,
-		router:         r,
-		store:          st,
-		tracker:        tracker,
-		savings:        monitoring.NewSavingsTracker(),
-		trajectory:     trajectoryMgr,
-		expander:       tooloutput.NewExpander(st, tracker), // Legacy for streaming
-		httpClient:     &http.Client{Timeout: clientTimeout, Transport: transport},
-		rateLimiter:    newRateLimiter(DefaultRateLimit),
-		costTracker:    costcontrol.NewTracker(cfg.CostControl),
-		preemptive:     preemptive.NewManager(cfg.ResolvePreemptiveProviderWithLogging(cfg.Monitoring.TelemetryEnabled)),
-		toolSessions:   toolSessions,
-		authMode:       newAuthFallbackStore(time.Hour),
-		authRegistry:   authRegistry,
-		bedrockSigner:  bedrockSigner,
-		expandLog:      monitoring.NewExpandLog(),
-		logger:         logger,
-		requestLogger:  requestLogger,
-		metrics:        metrics,
-		alerts:         alerts,
-		compresrClient: compresr.NewClient("", ""), // Uses env vars COMPRESR_BASE_URL, COMPRESR_API_KEY
+	// Initialize log aggregator for /savings (parses logs incrementally in background)
+	// Determine logs directory and current session ID
+	var logsDir string
+	var currentSessionID string
+	if cfg.Monitoring.TelemetryPath != "" {
+		// TelemetryPath is like "logs/session_xxx/telemetry.jsonl"
+		// sessionDir = "logs/session_xxx", logsDir = "logs"
+		sessionDir := filepath.Dir(cfg.Monitoring.TelemetryPath)
+		logsDir = filepath.Dir(sessionDir)
+		currentSessionID = filepath.Base(sessionDir) // "session_xxx"
+	} else {
+		logsDir = "logs"
 	}
+	aggregator := monitoring.NewLogAggregator(logsDir, 10*time.Second)
+	if currentSessionID != "" {
+		// Restrict to current session only — don't accumulate stale data from old sessions.
+		aggregator.ResetForNewSession(currentSessionID)
+	}
+	aggregator.Start()
+
+	g := &Gateway{
+		config:           cfg,
+		registry:         registry,
+		router:           r,
+		store:            st,
+		tracker:          tracker,
+		savings:          monitoring.NewSavingsTracker(),
+		aggregator:       aggregator,
+		trajectory:       trajectoryMgr,
+		expander:         tooloutput.NewExpander(st, tracker), // Legacy for streaming
+		httpClient:       &http.Client{Timeout: clientTimeout, Transport: transport},
+		rateLimiter:      newRateLimiter(DefaultRateLimit),
+		costTracker:      costcontrol.NewTracker(cfg.CostControl),
+		preemptive:       preemptive.NewManager(cfg.ResolvePreemptiveProviderWithLogging(cfg.Monitoring.TelemetryEnabled)),
+		toolSessions:     toolSessions,
+		authMode:         newAuthFallbackStore(time.Hour),
+		authRegistry:     authRegistry,
+		bedrockSigner:    bedrockSigner,
+		expandLog:        monitoring.NewExpandLog(),
+		searchLog:        monitoring.NewSearchLog(),
+		currentSessionID: currentSessionID,
+		logger:           logger,
+		requestLogger:    requestLogger,
+		metrics:          metrics,
+		alerts:           alerts,
+		compresrClient:   compresr.NewClient("", ""), // Uses env vars COMPRESR_BASE_URL, COMPRESR_API_KEY
+	}
+
+	// Start background refresh for instant /savings and /costs responses
+	// Refreshes every 5s to match dashboard auto-refresh rate
+	g.compresrClient.StartBackgroundRefresh(5 * time.Second)
 
 	mux := http.NewServeMux()
 	g.setupRoutes(mux)
@@ -360,16 +418,141 @@ func (g *Gateway) SetDashboardFS(fsys fs.FS) {
 	g.dashboardFS = http.FileServerFS(fsys)
 }
 
+// SetLazySession configures lazy session creation.
+// The session directory is only created when the first LLM request arrives.
+// This prevents empty session folders when the gateway starts but receives no traffic.
+func (g *Gateway) SetLazySession(sessionPath string, configData []byte) {
+	g.lazySessionMu.Lock()
+	defer g.lazySessionMu.Unlock()
+	g.lazySessionPath = sessionPath
+	g.lazySessionConfig = configData
+}
+
+// EnsureSession writes the session config if it hasn't been written yet.
+// Called on first LLM request to lazily write config.yaml.
+// Session directory is created at gateway startup (for gateway.log), but config.yaml
+// is only written when actual LLM traffic arrives.
+// Returns true if config was just written, false if already done.
+func (g *Gateway) EnsureSession() bool {
+	created := false
+	g.lazySessionOnce.Do(func() {
+		g.lazySessionMu.Lock()
+		sessionPath := g.lazySessionPath
+		configData := g.lazySessionConfig
+		g.lazySessionMu.Unlock()
+
+		if sessionPath == "" {
+			return // No lazy session configured
+		}
+
+		// Ensure session directory exists (should already exist from cmd/agent.go)
+		if err := os.MkdirAll(sessionPath, 0750); err != nil {
+			log.Error().Err(err).Str("path", sessionPath).Msg("failed to create session directory")
+			return
+		}
+
+		// Write config.yaml if provided (marks this as a "real" session with LLM traffic)
+		if len(configData) > 0 {
+			configPath := filepath.Join(sessionPath, "config.yaml")
+			if err := os.WriteFile(configPath, configData, 0600); err != nil {
+				log.Warn().Err(err).Str("path", configPath).Msg("failed to write session config")
+			}
+		}
+
+		// Update current session ID (thread-safe)
+		g.setCurrentSessionID(filepath.Base(sessionPath))
+
+		// Reset all trackers so every variable starts at 0 for the new session
+		g.resetForNewSession()
+
+		log.Info().Str("session", g.getCurrentSessionID()).Msg("session config written on first LLM request")
+		created = true
+	})
+	return created
+}
+
+// resetForNewSession zeros out all accumulated metrics and state
+// so that every variable starts at 0 for the new session.
+func (g *Gateway) resetForNewSession() {
+	// Reset in-memory savings tracker
+	if g.savings != nil {
+		g.savings.Reset()
+	}
+
+	// Reset log aggregator — restrict to current session only (ignore old logs on disk)
+	if g.aggregator != nil {
+		g.aggregator.ResetForNewSession(g.getCurrentSessionID())
+	}
+
+	// Reset cost tracker
+	if g.costTracker != nil {
+		g.costTracker.ResetGlobalCost()
+	}
+
+	// Reset expand context log
+	if g.expandLog != nil {
+		g.expandLog.Reset()
+	}
+
+	// Reset search tool log
+	if g.searchLog != nil {
+		g.searchLog.Reset()
+	}
+
+	// Reset operational metrics
+	if g.metrics != nil {
+		g.metrics.Reset()
+	}
+
+	// Reset shadow context store (cached compressed content from previous sessions)
+	if ms, ok := g.store.(*store.MemoryStore); ok {
+		ms.Reset()
+	}
+
+	// Reset tool session store (deferred/expanded tools from previous sessions)
+	if g.toolSessions != nil {
+		g.toolSessions.Reset()
+	}
+
+	// Reset auth fallback state
+	if g.authMode != nil {
+		g.authMode.Reset()
+	}
+
+	log.Debug().Msg("all session variables reset to 0")
+}
+
 // setupRoutes configures the HTTP routes for the gateway.
 func (g *Gateway) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", g.handleHealth)
 	mux.HandleFunc("/expand", g.handleExpand)
 	mux.HandleFunc("/api/dashboard", g.handleDashboardAPI)
+	mux.HandleFunc("/api/savings", g.handleSavingsAPI)
 	mux.HandleFunc("/api/account", g.handleAccountAPI)
-	mux.HandleFunc("/costs", g.handleCostDashboard)  // exact match, redirects to /costs/
-	mux.HandleFunc("/costs/", g.handleCostDashboard) // prefix match for SPA + assets
+	mux.HandleFunc("/api/compress/", g.handleCompressAPINotFound) // Reject Compresr API calls to gateway
+	mux.HandleFunc("/costs", g.handleCostDashboard)               // exact match, redirects to /costs/
+	mux.HandleFunc("/costs/", g.handleCostDashboard)              // prefix match for SPA + assets
 	mux.HandleFunc("/stats", g.handleStats)
+	mux.HandleFunc("/v1/models", g.handleModels)
 	mux.HandleFunc("/", g.handleProxy)
+}
+
+// handleCompressAPINotFound returns a helpful error when Compresr API calls hit the gateway.
+// This prevents misconfigured clients from sending compression requests to the proxy endpoint.
+func (g *Gateway) handleCompressAPINotFound(w http.ResponseWriter, r *http.Request) {
+	log.Warn().
+		Str("path", r.URL.Path).
+		Str("client_ip", r.RemoteAddr).
+		Msg("rejected Compresr API call to gateway - this endpoint should target api.compresr.ai")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]string{
+			"message": "Compresr API endpoint not available on gateway. Use https://api.compresr.ai or check your COMPRESR_BASE_URL configuration.",
+			"type":    "configuration_error",
+		},
+	})
 }
 
 // Start starts the gateway.
@@ -412,6 +595,16 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	// Stop savings tracker cleanup goroutine
 	if g.savings != nil {
 		g.savings.Stop()
+	}
+
+	// Stop log aggregator
+	if g.aggregator != nil {
+		g.aggregator.Stop()
+	}
+
+	// Stop Compresr client background refresh
+	if g.compresrClient != nil {
+		g.compresrClient.StopBackgroundRefresh()
 	}
 
 	// Close all trajectory trackers (writes final trajectory files per session)

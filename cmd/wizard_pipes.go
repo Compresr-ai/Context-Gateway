@@ -152,7 +152,7 @@ func editToolDiscovery(state *ConfigState) {
 			)
 
 			// API strategy: show model and API key
-			if state.ToolDiscoveryStrategy == pipes.StrategyCompresr {
+			if pipes.IsAPIStrategy(state.ToolDiscoveryStrategy) {
 				items = append(items,
 					tui.MenuItem{Label: "Model", Description: state.ToolDiscoveryModel, Value: "model"},
 				)
@@ -358,7 +358,7 @@ func editToolDiscoveryAdvanced(state *ConfigState) {
 
 func selectToolDiscoveryStrategy(state *ConfigState) {
 	items := []tui.MenuItem{
-		{Label: "compresr", Description: "Compresr API selects relevant tools", Value: pipes.StrategyCompresr},
+		{Label: "api", Description: "Compresr API selects tools + hybrid search", Value: pipes.StrategyAPI},
 		{Label: "tool-search", Description: "LLM searches via regex pattern", Value: pipes.StrategyToolSearch},
 		{Label: "relevance", Description: "local keyword scoring", Value: pipes.StrategyRelevance},
 		{Label: "passthrough", Description: "no filtering", Value: pipes.StrategyPassthrough},
@@ -372,8 +372,8 @@ func selectToolDiscoveryStrategy(state *ConfigState) {
 
 	selectedStrategy := items[idx].Value
 
-	// If compresr strategy selected, fetch pricing (skip API key prompt if key exists in env)
-	if selectedStrategy == pipes.StrategyCompresr {
+	// If api strategy selected, fetch pricing (skip API key prompt if key exists in env)
+	if pipes.IsAPIStrategy(selectedStrategy) {
 		envKey := os.Getenv(tui.CompresrModels.EnvVar)
 		if envKey != "" {
 			// Key exists in env — use it directly, skip prompt
@@ -492,7 +492,7 @@ func editToolOutputCompression(state *ConfigState) {
 			)
 
 			// Show different options based on strategy
-			if state.ToolOutputStrategy == pipes.StrategyCompresr {
+			if pipes.IsAPIStrategy(state.ToolOutputStrategy) {
 				// API strategy: show Compresr model and API key
 				items = append(items,
 					tui.MenuItem{Label: "Model", Description: state.ToolOutputModel, Value: "compresr_model"},
@@ -526,7 +526,7 @@ func editToolOutputCompression(state *ConfigState) {
 			}
 
 			// Advanced settings (shown for all strategies when enabled)
-			advancedDesc := fmt.Sprintf("min_bytes: %d", state.ToolOutputMinBytes)
+			advancedDesc := fmt.Sprintf("min: %dB, ratio: %.2f", state.ToolOutputMinBytes, state.ToolOutputTargetRatio)
 			items = append(items, tui.MenuItem{Label: "Advanced Settings", Description: advancedDesc, Value: "advanced"})
 		}
 
@@ -543,7 +543,7 @@ func editToolOutputCompression(state *ConfigState) {
 		case "strategy":
 			selectToolOutputStrategy(state)
 			// Reset model when strategy changes
-			if state.ToolOutputStrategy == pipes.StrategyCompresr {
+			if pipes.IsAPIStrategy(state.ToolOutputStrategy) {
 				state.ToolOutputModel = tui.CompresrModels.ToolOutput.DefaultModel
 			} else {
 				state.ToolOutputModel = state.ToolOutputProvider.DefaultModel
@@ -569,6 +569,7 @@ func editToolOutputAdvanced(state *ConfigState) {
 	for {
 		items := []tui.MenuItem{
 			{Label: "Min Bytes", Description: strconv.Itoa(state.ToolOutputMinBytes), Value: "min_bytes", Editable: true},
+			{Label: "Target Ratio", Description: fmt.Sprintf("%.2f", state.ToolOutputTargetRatio), Value: "target_ratio", Editable: true},
 			{Label: "← Back", Value: "back"},
 		}
 
@@ -576,6 +577,7 @@ func editToolOutputAdvanced(state *ConfigState) {
 
 		// Process editable fields BEFORE checking for back (user may have edited inline)
 		minBytesInvalid := false
+		targetRatioInvalid := false
 		for _, item := range items {
 			switch item.Value {
 			case "min_bytes":
@@ -585,6 +587,15 @@ func editToolOutputAdvanced(state *ConfigState) {
 						state.ToolOutputMinBytes = v
 					} else {
 						minBytesInvalid = true
+					}
+				}
+			case "target_ratio":
+				expected := fmt.Sprintf("%.2f", state.ToolOutputTargetRatio)
+				if item.Editable && item.Description != expected {
+					if v, parseErr := strconv.ParseFloat(strings.TrimSpace(item.Description), 64); parseErr == nil && v > 0 && v <= 1 {
+						state.ToolOutputTargetRatio = v
+					} else {
+						targetRatioInvalid = true
 					}
 				}
 			}
@@ -598,13 +609,17 @@ func editToolOutputAdvanced(state *ConfigState) {
 			fmt.Printf("%s⚠%s Min Bytes must be a whole number >= 0.\n", tui.ColorYellow, tui.ColorReset)
 			continue
 		}
+		if targetRatioInvalid {
+			fmt.Printf("%s⚠%s Target Ratio must be between 0 and 1 (higher = more aggressive compression).\n", tui.ColorYellow, tui.ColorReset)
+			continue
+		}
 	}
 }
 
 // selectToolOutputStrategy shows strategy selection for tool output compression
 func selectToolOutputStrategy(state *ConfigState) {
 	items := []tui.MenuItem{
-		{Label: "compresr", Description: "Compresr API compresses tool outputs", Value: pipes.StrategyCompresr},
+		{Label: "api", Description: "Compresr API compresses tool outputs", Value: pipes.StrategyAPI},
 		{Label: "external_provider", Description: "Use LLM provider to compress", Value: pipes.StrategyExternalProvider},
 		{Label: "← Back", Value: "back"},
 	}
@@ -616,8 +631,8 @@ func selectToolOutputStrategy(state *ConfigState) {
 
 	selectedStrategy := items[idx].Value
 
-	// If compresr strategy selected, fetch pricing (skip API key prompt if key exists in env)
-	if selectedStrategy == pipes.StrategyCompresr {
+	// If api strategy selected, fetch pricing (skip API key prompt if key exists in env)
+	if pipes.IsAPIStrategy(selectedStrategy) {
 		envKey := os.Getenv(tui.CompresrModels.EnvVar)
 		if envKey != "" {
 			// Key exists in env — use it directly, skip prompt

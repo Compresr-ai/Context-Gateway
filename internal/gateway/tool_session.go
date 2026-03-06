@@ -51,6 +51,13 @@ func NewToolSessionStore(ttl time.Duration) *ToolSessionStore {
 	return store
 }
 
+// Reset clears all tool sessions for a fresh start.
+func (s *ToolSessionStore) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions = make(map[string]*ToolSession)
+}
+
 // Get retrieves a session by ID (returns nil if not found).
 func (s *ToolSessionStore) Get(sessionID string) *ToolSession {
 	s.mu.RLock()

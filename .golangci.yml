@@ -40,17 +40,12 @@ linters:
         - fieldalignment
     gosec:
       excludes:
-        # G101: Hardcoded credentials - false positive on URL constants and config templates
+        # G101: Struct field names match secret patterns - these ARE credential config structs
         - G101
-        # G107: SSRF - false positive on constructed URLs from trusted config
-        - G107
-        # G204: Subprocess with variable - legitimate CLI commands from trusted agent configs
-        - G204
-        # G302/G306: File permissions - executables need 0755, hook scripts need 0700
-        - G302
-        - G306
-        # G304: File inclusion - legitimate config file loading for CLI tool
+        # G304: Path traversal - paths from os.TempDir()/UserHomeDir() with hardcoded filenames
         - G304
+        # G107: SSRF - HTTP requests to URLs from trusted config, not user input
+        - G107
 
 formatters:
   enable:

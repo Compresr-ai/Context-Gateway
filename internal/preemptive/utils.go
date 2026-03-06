@@ -248,7 +248,7 @@ func BuildAnthropicResponse(summary string, messages []json.RawMessage, lastInde
 			var msg map[string]interface{}
 			if err := json.Unmarshal(messages[i], &msg); err == nil {
 				role, _ := msg["role"].(string)
-				content := extractContent(msg["content"])
+				content := ExtractText(msg["content"])
 				_, _ = fmt.Fprintf(&text, "[%s]: %s\n\n", role, content)
 				recentCount++
 			}
@@ -287,26 +287,6 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-// extractContent extracts text content from Anthropic message content field.
-func extractContent(content interface{}) string {
-	switch c := content.(type) {
-	case string:
-		return c
-	case []interface{}:
-		var parts []string
-		for _, item := range c {
-			if m, ok := item.(map[string]interface{}); ok {
-				if t, ok := m["text"].(string); ok {
-					parts = append(parts, t)
-				}
-			}
-		}
-		return strings.Join(parts, " ")
-	default:
-		return fmt.Sprintf("%v", content)
-	}
 }
 
 // BuildOpenAICompactedRequest creates a compacted request for OpenAI API.
@@ -363,6 +343,5 @@ func WithDefaults(cfg Config) Config {
 	if len(cfg.Detectors.ClaudeCode.PromptPatterns) == 0 {
 		cfg.Detectors.ClaudeCode.PromptPatterns = DefaultClaudeCodePromptPatterns
 	}
-	// (Codex prompt pattern logic removed)
 	return cfg
 }

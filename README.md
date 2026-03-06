@@ -24,10 +24,10 @@ Context Gateway sits between your AI agent (Claude Code, Cursor, etc.) and the L
 ## Quick Start
 
 ```bash
-# 1. Install (from GitHub)
-curl -fsSL https://compresr.ai/api/download_cli | sh
+# Install gateway binary
+curl -fsSL https://compresr.ai/api/install | sh
 
-# 2. Select an agent (opens interactive TUI wizard)
+# Then select an agent (opens interactive TUI wizard)
 context-gateway
 ```
 

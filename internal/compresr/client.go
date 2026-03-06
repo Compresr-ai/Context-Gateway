@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -42,6 +43,10 @@ type Client struct {
 	statusMu    sync.RWMutex
 	statusCache *GatewayStatus
 	statusTime  time.Time
+
+	// Background refresh goroutine control
+	refreshStopCh chan struct{}
+	refreshOnce   sync.Once
 }
 
 // ClientOption configures the Client.
@@ -98,6 +103,58 @@ func (c *Client) HasAPIKey() bool {
 // SetAPIKey updates the API key.
 func (c *Client) SetAPIKey(key string) {
 	c.apiKey = key
+}
+
+// StartBackgroundRefresh starts a goroutine that refreshes gateway status periodically.
+// This ensures /savings and /costs endpoints return instantly without blocking on API calls.
+// Safe to call multiple times - only starts once.
+func (c *Client) StartBackgroundRefresh(interval time.Duration) {
+	if c.apiKey == "" {
+		return // No point refreshing without an API key
+	}
+
+	c.refreshOnce.Do(func() {
+		c.refreshStopCh = make(chan struct{})
+		go c.backgroundRefreshLoop(interval)
+	})
+}
+
+// StopBackgroundRefresh stops the background refresh goroutine.
+func (c *Client) StopBackgroundRefresh() {
+	if c.refreshStopCh != nil {
+		select {
+		case <-c.refreshStopCh:
+			// Already closed
+		default:
+			close(c.refreshStopCh)
+		}
+	}
+}
+
+// backgroundRefreshLoop runs in a goroutine and refreshes status at the given interval.
+func (c *Client) backgroundRefreshLoop(interval time.Duration) {
+	// Do an initial refresh immediately
+	_, _ = c.getGatewayStatus(true)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.refreshStopCh:
+			return
+		case <-ticker.C:
+			_, _ = c.getGatewayStatus(true) // Bypass cache to get fresh data
+		}
+	}
+}
+
+// GetCachedStatus returns the cached gateway status without making an API call.
+// Returns nil if no cached status is available. Use this for instant /savings responses.
+func (c *Client) GetCachedStatus() *GatewayStatus {
+	c.statusMu.RLock()
+	defer c.statusMu.RUnlock()
+	return c.statusCache
 }
 
 // =============================================================================
@@ -320,17 +377,19 @@ func (c *Client) CompressToolOutput(params CompressToolOutputParams) (*CompressT
 	}
 
 	payload := struct {
-		ToolOutput string `json:"tool_output"`
-		Query      string `json:"query,omitempty"`
-		ToolName   string `json:"tool_name"`
-		ModelName  string `json:"compression_model_name"`
-		Source     string `json:"source,omitempty"`
+		ToolOutput             string  `json:"tool_output"`
+		Query                  string  `json:"query,omitempty"`
+		ToolName               string  `json:"tool_name"`
+		ModelName              string  `json:"compression_model_name"`
+		Source                 string  `json:"source,omitempty"`
+		TargetCompressionRatio float64 `json:"target_compression_ratio,omitempty"`
 	}{
-		ToolOutput: params.ToolOutput,
-		Query:      params.UserQuery,
-		ToolName:   params.ToolName,
-		ModelName:  modelName,
-		Source:     params.Source,
+		ToolOutput:             params.ToolOutput,
+		Query:                  params.UserQuery,
+		ToolName:               params.ToolName,
+		ModelName:              modelName,
+		Source:                 params.Source,
+		TargetCompressionRatio: params.TargetCompressionRatio,
 	}
 
 	var resp APIResponse[CompressToolOutputResponse]
@@ -408,9 +467,17 @@ func (c *Client) FilterTools(params FilterToolsParams) (*FilterToolsResponse, er
 // =============================================================================
 
 func (c *Client) get(path string, result interface{}) error {
-	url := c.baseURL + path
+	reqURL := c.baseURL + path
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	parsedURL, err := url.Parse(reqURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsedURL.Scheme != "https" && parsedURL.Scheme != "http" {
+		return fmt.Errorf("URL must use http or https scheme, got %q", parsedURL.Scheme)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
@@ -448,14 +515,22 @@ func (c *Client) get(path string, result interface{}) error {
 }
 
 func (c *Client) post(path string, payload interface{}, result interface{}) error {
-	url := c.baseURL + path
+	reqURL := c.baseURL + path
+
+	parsedURL, err := url.Parse(reqURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsedURL.Scheme != "https" && parsedURL.Scheme != "http" {
+		return fmt.Errorf("URL must use http or https scheme, got %q", parsedURL.Scheme)
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}

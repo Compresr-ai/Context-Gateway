@@ -1,3 +1,4 @@
+// gemini.go implements the Google Gemini adapter for message transformation and usage parsing.
 package adapters
 
 import (

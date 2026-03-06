@@ -1,3 +1,4 @@
+// openai.go implements the OpenAI adapter for message transformation and usage parsing.
 package adapters
 
 import (
@@ -268,7 +269,9 @@ func extractStringContent(v any) string {
 // =============================================================================
 
 // ExtractToolDiscovery extracts tool definitions for filtering.
-// OpenAI format: tools: [{type: "function", function: {name, description, parameters}}]
+// Supports both formats:
+// - Responses API (flat): tools: [{type: "function", name: "...", description: "...", parameters: {...}}]
+// - Chat Completions (nested): tools: [{type: "function", function: {name, description, parameters}}]
 // Stores full tool JSON in Metadata["raw_json"] for later injection.
 func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
 	var req map[string]any
@@ -281,6 +284,10 @@ func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOpt
 		return nil, nil
 	}
 
+	// Detect format: Responses API has "input" key, Chat Completions has "messages" key
+	_, hasInput := req["input"]
+	isResponsesAPI := hasInput
+
 	extracted := make([]ExtractedContent, 0, len(tools))
 	for i, toolAny := range tools {
 		tool, ok := toolAny.(map[string]any)
@@ -288,16 +295,24 @@ func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOpt
 			continue
 		}
 
-		fn, ok := tool["function"].(map[string]any)
-		if !ok {
-			continue
+		var name, description string
+		if isResponsesAPI {
+			// Responses API: flat format {"type": "function", "name": "...", "description": "..."}
+			name = getString(tool, "name")
+			description = getString(tool, "description")
+		} else {
+			// Chat Completions: nested format {"type": "function", "function": {"name": "..."}}
+			fn, ok := tool["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			name = getString(fn, "name")
+			description = getString(fn, "description")
 		}
 
-		name := getString(fn, "name")
 		if name == "" {
 			continue
 		}
-		description := getString(fn, "description")
 
 		// Serialize full tool definition for later injection
 		rawJSON, _ := json.Marshal(toolAny)
@@ -318,6 +333,7 @@ func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOpt
 }
 
 // ApplyToolDiscovery filters tools based on Keep flag in results.
+// Supports both Responses API (flat) and Chat Completions (nested) formats.
 func (a *OpenAIAdapter) ApplyToolDiscovery(body []byte, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 {
 		return body, nil
@@ -340,17 +356,30 @@ func (a *OpenAIAdapter) ApplyToolDiscovery(body []byte, results []CompressedResu
 		return body, nil
 	}
 
+	// Detect format: Responses API has "input" key
+	_, hasInput := req["input"]
+	isResponsesAPI := hasInput
+
 	filtered := make([]any, 0, len(keepSet))
 	for _, toolAny := range tools {
 		tool, ok := toolAny.(map[string]any)
 		if !ok {
 			continue
 		}
-		fn, ok := tool["function"].(map[string]any)
-		if !ok {
-			continue
+
+		var name string
+		if isResponsesAPI {
+			// Responses API: flat format
+			name = getString(tool, "name")
+		} else {
+			// Chat Completions: nested format
+			fn, ok := tool["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			name = getString(fn, "name")
 		}
-		name := getString(fn, "name")
+
 		if keepSet[name] {
 			filtered = append(filtered, toolAny)
 		}
@@ -395,11 +424,18 @@ func (a *OpenAIAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
 }
 
 // ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
-// OpenAI format: tools: [{type: "function", function: {name, description, parameters}}]
+// Supports both formats:
+// - Responses API (flat): tools: [{type: "function", name: "...", description: "...", parameters: {...}}]
+// - Chat Completions (nested): tools: [{type: "function", function: {name, description, parameters}}]
 func (a *OpenAIAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
 	if parsed == nil || len(parsed.Tools) == 0 {
 		return nil, nil
 	}
+
+	// Detect format from parsed.Raw
+	req, _ := parsed.Raw.(map[string]any)
+	_, hasInput := req["input"]
+	isResponsesAPI := hasInput
 
 	extracted := make([]ExtractedContent, 0, len(parsed.Tools))
 	for i, toolAny := range parsed.Tools {
@@ -408,16 +444,24 @@ func (a *OpenAIAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, op
 			continue
 		}
 
-		fn, ok := tool["function"].(map[string]any)
-		if !ok {
-			continue
+		var name, description string
+		if isResponsesAPI {
+			// Responses API: flat format {"type": "function", "name": "...", "description": "..."}
+			name = getString(tool, "name")
+			description = getString(tool, "description")
+		} else {
+			// Chat Completions: nested format {"type": "function", "function": {"name": "..."}}
+			fn, ok := tool["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			name = getString(fn, "name")
+			description = getString(fn, "description")
 		}
 
-		name := getString(fn, "name")
 		if name == "" {
 			continue
 		}
-		description := getString(fn, "description")
 
 		// Serialize full tool definition for later injection
 		rawJSON, _ := json.Marshal(toolAny)
@@ -606,6 +650,7 @@ func (a *OpenAIAdapter) extractToolOutputFromParsedChatCompletions(parsed *Parse
 }
 
 // ApplyToolDiscoveryToParsed filters tools and returns modified body.
+// Supports both Responses API (flat) and Chat Completions (nested) formats.
 func (a *OpenAIAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 || parsed == nil {
 		return utils.MarshalNoEscape(parsed.Raw)
@@ -623,17 +668,30 @@ func (a *OpenAIAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, result
 		return nil, fmt.Errorf("invalid parsed request type")
 	}
 
+	// Detect format: Responses API has "input" key
+	_, hasInput := req["input"]
+	isResponsesAPI := hasInput
+
 	filtered := make([]any, 0, len(keepSet))
 	for _, toolAny := range parsed.Tools {
 		tool, ok := toolAny.(map[string]any)
 		if !ok {
 			continue
 		}
-		fn, ok := tool["function"].(map[string]any)
-		if !ok {
-			continue
+
+		var name string
+		if isResponsesAPI {
+			// Responses API: flat format
+			name = getString(tool, "name")
+		} else {
+			// Chat Completions: nested format
+			fn, ok := tool["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			name = getString(fn, "name")
 		}
-		name := getString(fn, "name")
+
 		if keepSet[name] {
 			filtered = append(filtered, toolAny)
 		}

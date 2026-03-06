@@ -150,16 +150,11 @@ fi
 CMD="$BINARY_PATH serve --config $CONFIG_FILE"
 [ "$DEBUG_MODE" = "true" ] && CMD="$CMD --debug"
 
-# Check if already running
-if check_gateway_running "$PORT"; then
-    print_warn "Gateway already running"
-    exit 0
-fi
+# Stop all running gateways to ensure clean session isolation
+kill_all_gateways 2>/dev/null || true
 
-# Stop any existing on same port
-if [ -n "$PORT" ]; then
-    kill_gateway_on_port "$PORT" "$PROJECT_DIR"
-fi
+# Small delay to ensure processes are terminated
+sleep 0.2
 
 print_step "Starting gateway..."
 print_info "Config: $(basename "$CONFIG_FILE")"
