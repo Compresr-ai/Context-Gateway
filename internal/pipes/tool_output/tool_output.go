@@ -658,8 +658,30 @@ func (p *Pipe) compressViaCompresr(query, content, toolName, provider string) (s
 // Uses the api config (endpoint, api_key, model) from the config file.
 // Provider is auto-detected from endpoint URL or can be set explicitly.
 func (p *Pipe) compressViaExternalProvider(reqCtx context.Context, query, content, toolName, capturedBearerToken, capturedBetaHeader string) (string, error) {
+	// Structured data prefix: detect format and extract verbatim prefix.
+	// When content starts with JSON/YAML/XML, preserve the first minBytes verbatim
+	// so the downstream model can parse the structure. Only the tail goes to LLM.
+	// Note: content here is always > minBytes (smaller content is filtered earlier).
+	// ExtractVerbatimPrefix handles the case where content <= minBytes*2 (passthrough).
+	var verbatimPrefix, structuredFormat string
+	format, _ := DetectStructuredFormat(content)
+	if format != "" {
+		verbatim, rest := ExtractVerbatimPrefix(content, format, p.minBytes)
+		if rest == "" {
+			// Entire content fits in prefix — passthrough (triggers "ineffective" fallback)
+			return content, nil
+		}
+		verbatimPrefix = verbatim
+		structuredFormat = format
+		content = rest // only compress the tail
+	}
+
 	var systemPrompt, userPrompt string
-	if p.compresrQueryAgnostic || query == "" {
+	if verbatimPrefix != "" {
+		// Structured tail: specialized prompt
+		systemPrompt = external.SystemPromptStructuredTail
+		userPrompt = external.UserPromptStructuredTail(structuredFormat, toolName, content)
+	} else if p.compresrQueryAgnostic || query == "" {
 		systemPrompt = external.SystemPromptQueryAgnostic
 		userPrompt = external.UserPromptQueryAgnostic(toolName, content)
 	} else {
@@ -700,10 +722,22 @@ func (p *Pipe) compressViaExternalProvider(reqCtx context.Context, query, conten
 		return "", err
 	}
 
-	// Validate compression reduced size
-	if len(result.Content) >= len(content) {
+	compressed := result.Content
+
+	// Validate compression reduced size (compared to what was sent, not original)
+	if len(compressed) >= len(content) {
 		return "", fmt.Errorf("external_provider compression ineffective: output (%d bytes) >= input (%d bytes)",
-			len(result.Content), len(content))
+			len(compressed), len(content))
+	}
+
+	// Reassemble: verbatim prefix + separator + compressed tail
+	if verbatimPrefix != "" {
+		compressed = verbatimPrefix + "\n" + StructuredSeparator + "\n" + compressed
+		log.Debug().
+			Str("format", structuredFormat).
+			Int("prefix_size", len(verbatimPrefix)).
+			Int("tail_compressed_size", len(result.Content)).
+			Msg("tool_output: structured prefix preserved verbatim")
 	}
 
 	log.Debug().
@@ -711,9 +745,9 @@ func (p *Pipe) compressViaExternalProvider(reqCtx context.Context, query, conten
 		Str("model", p.compresrModel).
 		Bool("query_agnostic", p.compresrQueryAgnostic).
 		Int("original_size", len(content)).
-		Int("compressed_size", len(result.Content)).
-		Float64("ratio", float64(len(result.Content))/float64(len(content))).
+		Int("compressed_size", len(compressed)).
+		Float64("ratio", float64(len(compressed))/float64(len(content))).
 		Msg("tool_output: external_provider compression completed")
 
-	return result.Content, nil
+	return compressed, nil
 }
