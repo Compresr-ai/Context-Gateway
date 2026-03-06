@@ -526,7 +526,7 @@ func editToolOutputCompression(state *ConfigState) {
 			}
 
 			// Advanced settings (shown for all strategies when enabled)
-			advancedDesc := fmt.Sprintf("min_bytes: %d", state.ToolOutputMinBytes)
+			advancedDesc := fmt.Sprintf("min: %dB, ratio: %.2f", state.ToolOutputMinBytes, state.ToolOutputTargetRatio)
 			items = append(items, tui.MenuItem{Label: "Advanced Settings", Description: advancedDesc, Value: "advanced"})
 		}
 
@@ -569,6 +569,7 @@ func editToolOutputAdvanced(state *ConfigState) {
 	for {
 		items := []tui.MenuItem{
 			{Label: "Min Bytes", Description: strconv.Itoa(state.ToolOutputMinBytes), Value: "min_bytes", Editable: true},
+			{Label: "Target Ratio", Description: fmt.Sprintf("%.2f", state.ToolOutputTargetRatio), Value: "target_ratio", Editable: true},
 			{Label: "← Back", Value: "back"},
 		}
 
@@ -576,6 +577,7 @@ func editToolOutputAdvanced(state *ConfigState) {
 
 		// Process editable fields BEFORE checking for back (user may have edited inline)
 		minBytesInvalid := false
+		targetRatioInvalid := false
 		for _, item := range items {
 			switch item.Value {
 			case "min_bytes":
@@ -587,6 +589,15 @@ func editToolOutputAdvanced(state *ConfigState) {
 						minBytesInvalid = true
 					}
 				}
+			case "target_ratio":
+				expected := fmt.Sprintf("%.2f", state.ToolOutputTargetRatio)
+				if item.Editable && item.Description != expected {
+					if v, parseErr := strconv.ParseFloat(strings.TrimSpace(item.Description), 64); parseErr == nil && v > 0 && v <= 1 {
+						state.ToolOutputTargetRatio = v
+					} else {
+						targetRatioInvalid = true
+					}
+				}
 			}
 		}
 
@@ -596,6 +607,10 @@ func editToolOutputAdvanced(state *ConfigState) {
 
 		if minBytesInvalid {
 			fmt.Printf("%s⚠%s Min Bytes must be a whole number >= 0.\n", tui.ColorYellow, tui.ColorReset)
+			continue
+		}
+		if targetRatioInvalid {
+			fmt.Printf("%s⚠%s Target Ratio must be between 0 and 1 (higher = more aggressive compression).\n", tui.ColorYellow, tui.ColorReset)
 			continue
 		}
 	}

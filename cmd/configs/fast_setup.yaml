@@ -74,7 +74,7 @@ pipes:
     strategy: "compresr"
     enable_expand_context: false
     include_expand_hint: false
-    min_bytes: 8192
+    min_bytes: 4096
     max_bytes: 512000
     target_compression_ratio: 0.5  # Sent to API: 0.5 = 50% compression strength
     compresr:

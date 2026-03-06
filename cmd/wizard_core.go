@@ -97,7 +97,7 @@ func runConfigCreationWizard(agentName string, ac *AgentConfig) string {
 	state.ToolOutputStrategy = pipes.StrategyCompresr
 	state.ToolOutputModel = tui.CompresrModels.ToolOutput.DefaultModel
 	state.ToolOutputMinBytes = 2048
-	state.ToolOutputTargetRatio = 0.15
+	state.ToolOutputTargetRatio = 0.5
 	// Fallback external provider settings (used if user switches to external_provider)
 	state.ToolOutputProvider = tui.SupportedProviders[1] // gemini
 	state.ToolOutputAPIKey = "${" + state.ToolOutputProvider.EnvVar + ":-}"
@@ -496,6 +496,16 @@ func loadConfigToState(configName string) *ConfigState {
 					}
 				}
 			}
+			// Extract min_bytes (handles both int and float64 from YAML)
+			if minBytes, ok := toolOutput["min_bytes"].(int); ok {
+				state.ToolOutputMinBytes = minBytes
+			} else if minBytesF, ok := toolOutput["min_bytes"].(float64); ok {
+				state.ToolOutputMinBytes = int(minBytesF)
+			}
+			// Extract target_compression_ratio
+			if targetRatio, ok := toolOutput["target_compression_ratio"].(float64); ok {
+				state.ToolOutputTargetRatio = targetRatio
+			}
 			// Extract model from compresr section (or legacy api section)
 			if compresrCfg, ok := toolOutput["compresr"].(map[string]interface{}); ok {
 				if model, ok := compresrCfg["model"].(string); ok {
@@ -554,6 +564,13 @@ func loadConfigToState(configName string) *ConfigState {
 	// Set tool_output defaults if not found
 	if state.ToolOutputStrategy == "" {
 		state.ToolOutputStrategy = pipes.StrategyCompresr
+	}
+	// Set min_bytes and target_compression_ratio defaults
+	if state.ToolOutputMinBytes == 0 {
+		state.ToolOutputMinBytes = 2048
+	}
+	if state.ToolOutputTargetRatio == 0 {
+		state.ToolOutputTargetRatio = 0.5
 	}
 	// Set model based on strategy
 	if state.ToolOutputModel == "" {
