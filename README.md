@@ -52,4 +52,4 @@ Supported agents:
 
 ## Contributing
 
-We welcome contributions! Please join our [Discord](https://discord.gg/PeaVWNjT) to contribute.
+We welcome contributions! Please join our [Discord](https://discord.gg/qJnqWxfZEx) to contribute.
