@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -147,7 +148,7 @@ func TestExternalProvider_E2E_OpenAI(t *testing.T) {
 				{"role": "assistant", "content": nil, "tool_calls": []map[string]interface{}{
 					{"id": "call_1", "type": "function", "function": map[string]interface{}{"name": "bash", "arguments": "{}"}},
 				}},
-				{"role": "tool", "tool_call_id": "call_1", "content": "status: running\npid: 1234\nmemory: 512MB"},
+				{"role": "tool", "tool_call_id": "call_1", "content": "Process running (PID 1234), memory usage 512MB, uptime 3 days"},
 			},
 		}
 		reqBody, _ := json.Marshal(openaiReq)
@@ -220,7 +221,7 @@ func TestExternalProvider_E2E_Anthropic(t *testing.T) {
 					{
 						"type":        "tool_result",
 						"tool_use_id": "toolu_123",
-						"content":     "server:\n  port: 8080\n  host: localhost\ndatabase:\n  url: postgres://...\n  pool_size: 10",
+						"content":     "Viewing /app/config.yaml (6 lines) - contains server config with port 8080, localhost binding, postgres DB with pool_size 10",
 					},
 				}},
 			},
@@ -504,6 +505,160 @@ func handleUsers(w http.ResponseWriter, r *http.Request) {
 		// Verify the request was sent with the content
 		assert.True(t, len(receivedBody) > 0)
 		assert.True(t, bytes.Contains(receivedBody, []byte("user service")))
+	})
+}
+
+// TestStructuredPrefix_E2E tests the structured verbatim prefix pipeline end-to-end.
+func TestStructuredPrefix_E2E(t *testing.T) {
+	t.Run("large_json_gets_verbatim_prefix_and_compressed_tail", func(t *testing.T) {
+		var receivedReq external.OpenAIChatRequest
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &receivedReq)
+
+			// Return a short compressed summary (must be shorter than the tail)
+			resp := external.OpenAIChatResponse{
+				Choices: []struct {
+					Index   int `json:"index"`
+					Message struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					} `json:"message"`
+					FinishReason string `json:"finish_reason"`
+				}{
+					{Message: struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					}{Role: "assistant", Content: "10 more items with same schema"}},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		}))
+		defer server.Close()
+
+		// MinBytes=55: first JSON object ends with }, at ~position 53, within search zone
+		c := cfg(server.URL)
+		c.Pipes.ToolOutput.MinBytes = 55
+		st := store.NewMemoryStore(time.Hour)
+		pipe := tooloutput.New(c, st)
+
+		// Build a JSON array large enough that prefix+separator+compressed < original.
+		// Need ~400+ bytes so overhead (prefix ~40 + separator ~50 + summary ~30) is well under total.
+		jsonContent := `[` +
+			`{"id":1,"name":"alpha","status":"active","value":100},` +
+			`{"id":2,"name":"bravo","status":"active","value":200},` +
+			`{"id":3,"name":"charlie","status":"paused","value":300},` +
+			`{"id":4,"name":"delta","status":"active","value":400},` +
+			`{"id":5,"name":"echo","status":"active","value":500},` +
+			`{"id":6,"name":"foxtrot","status":"paused","value":600},` +
+			`{"id":7,"name":"golf","status":"active","value":700},` +
+			`{"id":8,"name":"hotel","status":"active","value":800}]`
+
+		openaiReq := map[string]interface{}{
+			"model": "gpt-5",
+			"messages": []map[string]interface{}{
+				{"role": "user", "content": "list items"},
+				{"role": "assistant", "content": nil, "tool_calls": []map[string]interface{}{
+					{"id": "call_1", "type": "function", "function": map[string]interface{}{"name": "bash", "arguments": "{}"}},
+				}},
+				{"role": "tool", "tool_call_id": "call_1", "content": jsonContent},
+			},
+		}
+		reqBody, _ := json.Marshal(openaiReq)
+
+		adapter := adapters.NewOpenAIAdapter()
+		ctx := pipes.NewPipeContext(adapter, reqBody)
+
+		result, err := pipe.Process(ctx)
+		require.NoError(t, err)
+		assert.NotNil(t, result)
+
+		// Verify structured tail prompt was used (not the standard one)
+		assert.Contains(t, receivedReq.Messages[0].Content, "TAIL portion")
+		assert.Contains(t, receivedReq.Messages[1].Content, "Format: json")
+
+		// Verify the compressed output contains verbatim prefix + separator
+		// Extract the tool result from the processed request
+		var processed map[string]interface{}
+		json.Unmarshal(result, &processed)
+		msgs := processed["messages"].([]interface{})
+		toolMsg := msgs[len(msgs)-1].(map[string]interface{})
+		compressedContent := toolMsg["content"].(string)
+
+		assert.Contains(t, compressedContent, tooloutput.StructuredSeparator)
+
+		// Verbatim prefix should start with valid JSON
+		parts := strings.SplitN(compressedContent, tooloutput.StructuredSeparator, 2)
+		prefix := strings.TrimSpace(parts[0])
+		assert.True(t, strings.HasPrefix(prefix, "["), "prefix should start with JSON array")
+		// Prefix should end at a JSON boundary
+		lastChar := prefix[len(prefix)-1]
+		assert.Contains(t, ",}]", string(lastChar), "prefix should end at JSON boundary")
+	})
+
+	t.Run("small_structured_content_passthrough", func(t *testing.T) {
+		callCount := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+			// Should not be called — content is too small for compression
+			resp := external.OpenAIChatResponse{
+				Choices: []struct {
+					Index   int `json:"index"`
+					Message struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					} `json:"message"`
+					FinishReason string `json:"finish_reason"`
+				}{
+					{Message: struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					}{Role: "assistant", Content: "summary"}},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		}))
+		defer server.Close()
+
+		// MinBytes=50: content 30 bytes < 50 → passthrough before even reaching compression
+		c := cfg(server.URL)
+		c.Pipes.ToolOutput.MinBytes = 50
+		st := store.NewMemoryStore(time.Hour)
+		pipe := tooloutput.New(c, st)
+
+		// Small JSON — below min_bytes threshold
+		smallJSON := `{"status":"ok","count":3}`
+
+		openaiReq := map[string]interface{}{
+			"model": "gpt-5",
+			"messages": []map[string]interface{}{
+				{"role": "user", "content": "check status"},
+				{"role": "assistant", "content": nil, "tool_calls": []map[string]interface{}{
+					{"id": "call_1", "type": "function", "function": map[string]interface{}{"name": "bash", "arguments": "{}"}},
+				}},
+				{"role": "tool", "tool_call_id": "call_1", "content": smallJSON},
+			},
+		}
+		reqBody, _ := json.Marshal(openaiReq)
+
+		adapter := adapters.NewOpenAIAdapter()
+		ctx := pipes.NewPipeContext(adapter, reqBody)
+
+		result, err := pipe.Process(ctx)
+		require.NoError(t, err)
+		assert.NotNil(t, result)
+
+		// Verify content passed through unchanged (no compression, no separator)
+		var processed map[string]interface{}
+		json.Unmarshal(result, &processed)
+		msgs := processed["messages"].([]interface{})
+		toolMsg := msgs[len(msgs)-1].(map[string]interface{})
+		content := toolMsg["content"].(string)
+
+		assert.Equal(t, smallJSON, content, "small structured content should pass through unchanged")
+		assert.NotContains(t, content, tooloutput.StructuredSeparator)
+		assert.Equal(t, 0, callCount, "no LLM call should be made for small content")
 	})
 }
 

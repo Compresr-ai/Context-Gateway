@@ -65,6 +65,9 @@ const (
 
 	// ShadowPrefixMarker is the prefix used to detect already-compressed content
 	ShadowPrefixMarker = "<<<SHADOW:"
+
+	// StructuredSeparator separates verbatim prefix from compressed tail
+	StructuredSeparator = "--- COMPRESSED SUMMARY (above is verbatim) ---"
 )
 
 // Pipe compresses tool outputs dynamically and stores raw data for retrieval.
