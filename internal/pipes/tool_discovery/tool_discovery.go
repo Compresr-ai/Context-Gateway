@@ -55,11 +55,9 @@ var SearchToolSchema = map[string]any{
 
 // Score weights for relevance signals.
 const (
-	scoreExpanded     = 1000 // Tool was found via search (never filter again)
-	scoreRecentlyUsed = 100  // Tool was used in conversation history
-	scoreAlwaysKeep   = 100  // Tool is in the always-keep list
-	scoreExactName    = 50   // Query contains exact tool name
-	scoreWordMatch    = 10   // Per-word overlap between query and tool name/description
+	scoreRecentlyUsed = 100 // Tool was used in conversation history
+	scoreExactName    = 50  // Query contains exact tool name
+	scoreWordMatch    = 10  // Per-word overlap between query and tool name/description
 )
 
 // Pipe filters tools dynamically based on relevance to the current query.
@@ -488,43 +486,67 @@ type scoredTool struct {
 }
 
 // scoreAndFilterTools scores tools and determines which to keep.
+//
+// Two-phase approach:
+//  1. Protected tools (always_keep + expanded) are separated upfront — they are
+//     always kept regardless of the cap, so their guarantee is explicit and does
+//     not depend on sort position or score equality.
+//  2. The remaining candidate tools are scored, sorted, and fill the leftover
+//     slots (keepCount - len(protected)), up to the configured max.
 func (p *Pipe) scoreAndFilterTools(input *filterInput) *filterOutput {
 	totalTools := len(input.tools)
 
-	// Score each tool
-	scored := make([]scoredTool, 0, totalTools)
+	// Phase 1: separate protected tools from candidates.
+	protected := make([]adapters.ExtractedContent, 0)
+	candidates := make([]adapters.ExtractedContent, 0, totalTools)
 	for _, tool := range input.tools {
-		score := p.scoreToolWithExpanded(tool, input.query, input.recentTools, input.expandedTools)
+		if p.alwaysKeep[tool.ToolName] || input.expandedTools[tool.ToolName] {
+			protected = append(protected, tool)
+		} else {
+			candidates = append(candidates, tool)
+		}
+	}
+
+	// Phase 2: score and sort candidates by relevance.
+	scored := make([]scoredTool, 0, len(candidates))
+	for _, tool := range candidates {
+		score := p.scoreTool(tool, input.query, input.recentTools)
 		scored = append(scored, scoredTool{tool: tool, score: score})
 	}
 
-	// Sort by score descending (simple insertion sort — tool counts are small)
+	// Sort by score descending (insertion sort — tool counts are small).
 	for i := 1; i < len(scored); i++ {
 		for j := i; j > 0 && scored[j].score > scored[j-1].score; j-- {
 			scored[j], scored[j-1] = scored[j-1], scored[j]
 		}
 	}
 
-	// Determine how many tools to keep
+	// Determine remaining slots after accounting for protected tools.
 	keepCount := p.calculateKeepCount(totalTools)
+	remainingSlots := keepCount - len(protected)
+	if remainingSlots < 0 {
+		remainingSlots = 0
+		log.Warn().
+			Int("always_keep_count", len(protected)).
+			Int("max_tools", p.maxTools).
+			Msg("tool_discovery: always_keep tools exceed max_tools cap; all candidates will be deferred")
+	}
 
-	// Build results with Keep flag and track deferred tools
+	// Build results: protected tools first (always kept), then top candidates.
 	results := make([]adapters.CompressedResult, 0, totalTools)
+	keptNames := make([]string, 0, keepCount)
 	deferred := make([]adapters.ExtractedContent, 0)
-	keptNames := make([]string, 0)
 	deferredNames := make([]string, 0)
-	kept := 0
 
-	for _, s := range scored {
-		// Force-keep: alwaysKeep list OR expanded tools (found via search)
-		forceKeep := p.alwaysKeep[s.tool.ToolName] || input.expandedTools[s.tool.ToolName]
-		keep := kept < keepCount || forceKeep
-		results = append(results, adapters.CompressedResult{
-			ID:   s.tool.ID,
-			Keep: keep,
-		})
+	for _, tool := range protected {
+		results = append(results, adapters.CompressedResult{ID: tool.ID, Keep: true})
+		keptNames = append(keptNames, tool.ToolName)
+	}
+
+	for i, s := range scored {
+		keep := i < remainingSlots
+		results = append(results, adapters.CompressedResult{ID: s.tool.ID, Keep: keep})
 		if keep {
-			kept++
 			keptNames = append(keptNames, s.tool.ToolName)
 		} else {
 			deferred = append(deferred, s.tool)
@@ -537,7 +559,7 @@ func (p *Pipe) scoreAndFilterTools(input *filterInput) *filterOutput {
 		deferred:      deferred,
 		keptNames:     keptNames,
 		deferredNames: deferredNames,
-		keptCount:     kept,
+		keptCount:     len(keptNames),
 	}
 }
 
@@ -677,21 +699,11 @@ func (p *Pipe) calculateKeepCount(total int) int {
 	return keep
 }
 
-// scoreToolWithExpanded computes a relevance score including expanded tools.
-func (p *Pipe) scoreToolWithExpanded(tool adapters.ExtractedContent, query string, recentTools map[string]bool, expandedTools map[string]bool) int {
+// scoreTool computes a relevance score for a candidate tool (not in always_keep or expanded).
+func (p *Pipe) scoreTool(tool adapters.ExtractedContent, query string, recentTools map[string]bool) int {
 	score := 0
 
-	// Signal 0: Expanded tools (found via search) - highest priority
-	if expandedTools != nil && expandedTools[tool.ToolName] {
-		score += scoreExpanded
-	}
-
-	// Signal 1: Always-keep list
-	if p.alwaysKeep[tool.ToolName] {
-		score += scoreAlwaysKeep
-	}
-
-	// Signal 2: Recently used in conversation
+	// Signal 0: Recently used in conversation
 	if recentTools[tool.ToolName] {
 		score += scoreRecentlyUsed
 	}
@@ -703,12 +715,12 @@ func (p *Pipe) scoreToolWithExpanded(tool adapters.ExtractedContent, query strin
 	queryLower := strings.ToLower(query)
 	toolNameLower := strings.ToLower(tool.ToolName)
 
-	// Signal 3: Exact tool name appears in query
+	// Signal 1: Exact tool name appears in query
 	if strings.Contains(queryLower, toolNameLower) {
 		score += scoreExactName
 	}
 
-	// Signal 4: Word overlap between query and tool name + description
+	// Signal 2: Word overlap between query and tool name + description
 	queryWords := tokenize(queryLower)
 	toolWords := tokenize(toolNameLower + " " + strings.ToLower(tool.Content))
 
