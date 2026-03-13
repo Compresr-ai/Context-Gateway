@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/compresr/context-gateway/internal/retry"
 	"github.com/rs/zerolog/log"
 )
 
@@ -129,42 +130,71 @@ func CallLLM(ctx context.Context, params CallLLMParams) (*CallLLMResult, error) 
 	ctx, cancel := context.WithTimeout(ctx, params.Timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, params.Endpoint, bytes.NewReader(body))
+	parsedEndpoint, err := url.Parse(params.Endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create %s request: %w", provider, err)
+		return nil, fmt.Errorf("invalid %s endpoint URL: %w", provider, err)
+	}
+	if parsedEndpoint.Scheme != "https" && parsedEndpoint.Scheme != "http" {
+		return nil, fmt.Errorf("invalid %s endpoint scheme %q: must be http or https", provider, parsedEndpoint.Scheme)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	setAuthHeaders(req, provider, params.ProviderKey, params.BearerAuth)
-	for k, v := range params.ExtraHeaders {
-		req.Header.Set(k, v)
+	httpClient := params.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{} // timeout via context, not client
 	}
 
-	client := params.HTTPClient
-	if client == nil {
-		client = &http.Client{} // timeout via context, not client
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%s request failed: %w", provider, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read %s response: %w", provider, err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		errBody := string(respBody)
-		if len(errBody) > maxErrorBodyLen {
-			errBody = errBody[:maxErrorBodyLen] + "... (truncated)"
+	validatedEndpoint := parsedEndpoint.String()
+	var lastErr error
+	for attempt := 0; attempt < retry.MaxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(retry.Backoff(attempt - 1))
 		}
-		return nil, fmt.Errorf("%s API returned status %d: %s", provider, resp.StatusCode, errBody)
+
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, validatedEndpoint, bytes.NewReader(body)) //#nosec G704 -- scheme validated above
+		if reqErr != nil {
+			return nil, fmt.Errorf("failed to create %s request: %w", provider, reqErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		setAuthHeaders(req, provider, params.ProviderKey, params.BearerAuth)
+		for k, v := range params.ExtraHeaders {
+			req.Header.Set(k, v)
+		}
+
+		resp, doErr := httpClient.Do(req)
+		if doErr != nil {
+			if !retry.IsTransientErr(doErr) {
+				return nil, fmt.Errorf("%s request failed: %w", provider, doErr)
+			}
+			lastErr = fmt.Errorf("%s request failed: %w", provider, doErr)
+			continue
+		}
+
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read %s response: %w", provider, readErr)
+		}
+
+		if retry.IsTransientStatus(resp.StatusCode) {
+			errBody := string(respBody)
+			if len(errBody) > maxErrorBodyLen {
+				errBody = errBody[:maxErrorBodyLen] + "... (truncated)"
+			}
+			lastErr = fmt.Errorf("%s API returned status %d: %s", provider, resp.StatusCode, errBody)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			errBody := string(respBody)
+			if len(errBody) > maxErrorBodyLen {
+				errBody = errBody[:maxErrorBodyLen] + "... (truncated)"
+			}
+			return nil, fmt.Errorf("%s API returned status %d: %s", provider, resp.StatusCode, errBody)
+		}
+
+		return parseResponse(provider, respBody)
 	}
 
-	return parseResponse(provider, respBody)
+	return nil, lastErr
 }
 
 // DetectProvider infers the LLM provider from an endpoint URL.

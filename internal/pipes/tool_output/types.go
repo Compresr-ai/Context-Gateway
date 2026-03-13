@@ -61,10 +61,21 @@ const (
 	PrefixFormat = "<<<SHADOW:%s>>>\n%s"
 
 	// PrefixFormatWithHint includes usage instructions for expand_context
-	PrefixFormatWithHint = "<<<SHADOW:%s>>>\n%s\n\n[To retrieve full content, call: expand_context(id=\"%s\")]"
+	// Hint goes BEFORE compressed content so the LLM sees it first.
+	PrefixFormatWithHint = "[COMPRESSED — content below is a lossy summary with tokens removed. To see the full uncompressed content, you MUST call: expand_context(id=\"%s\")]\n<<<SHADOW:%s>>>\n%s"
 
 	// ShadowPrefixMarker is the prefix used to detect already-compressed content
 	ShadowPrefixMarker = "<<<SHADOW:"
+
+	// ExpandContextTextPrefix is the prefix for text-based expand_context patterns.
+	// LLM outputs <<<EXPAND:shadow_xxx>>> to request full content.
+	ExpandContextTextPrefix = "<<<EXPAND:"
+
+	// ExpandContextTextSuffix is the suffix for text-based expand_context patterns.
+	ExpandContextTextSuffix = ">>>"
+
+	// StructuredSeparator separates verbatim prefix from compressed tail
+	StructuredSeparator = "--- COMPRESSED SUMMARY (above is verbatim) ---"
 )
 
 // Pipe compresses tool outputs dynamically and stores raw data for retrieval.
@@ -78,6 +89,7 @@ type Pipe struct {
 	targetCompressionRatio float64 // Target compression ratio sent to API (0-1 strength or >1 factor)
 	includeExpandHint      bool    // Add expand_context() hint to compressed output
 	enableExpandContext    bool    // Enable expand_context feature (tool injection, hint, expand loop)
+	bypassCostCheck        bool    // Skip automatic cost-based compression skip (for testing)
 	store                  store.Store
 
 	// Compresr API client (used when strategy=compresr)
@@ -99,9 +111,6 @@ type Pipe struct {
 	// V2: Metrics
 	mu      sync.RWMutex
 	metrics *Metrics
-
-	// V2: Idempotent tools (E5: safe to re-execute)
-	idempotentTools map[string]bool
 
 	// Tools to skip compression for, as generic categories (e.g., "read", "edit")
 	skipCategories []string
@@ -232,16 +241,6 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 	maxConcurrent := MaxConcurrentCompressions
 	maxPerSecond := MaxCompressionsPerSecond
 
-	// V2: Default idempotent tools (E5)
-	idempotentTools := map[string]bool{
-		"read_file":       true,
-		"search_code":     true,
-		"list_directory":  true,
-		"grep_search":     true,
-		"list_dir":        true,
-		"semantic_search": true,
-	}
-
 	// Store skip categories from config
 	skipCategories := cfg.Pipes.ToolOutput.SkipTools
 
@@ -258,8 +257,9 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 		minBytes:               minBytes,
 		maxBytes:               maxBytes,
 		targetCompressionRatio: targetCompressionRatio,
-		includeExpandHint:      cfg.Pipes.ToolOutput.IncludeExpandHint,
+		includeExpandHint:      cfg.Pipes.ToolOutput.IncludeExpandHint || cfg.Pipes.ToolOutput.EnableExpandContext,
 		enableExpandContext:    cfg.Pipes.ToolOutput.EnableExpandContext,
+		bypassCostCheck:        cfg.Pipes.ToolOutput.BypassCostCheck,
 		store:                  st,
 
 		// Compresr strategy config (used by both compresr and external_provider strategies)
@@ -275,9 +275,6 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 		semaphore:     make(chan struct{}, maxConcurrent),
 		rateLimiter:   NewRateLimiter(maxPerSecond),
 		metrics:       &Metrics{},
-
-		// V2: Idempotent tools
-		idempotentTools: idempotentTools,
 
 		// Skip tools (categories resolved per-request based on provider)
 		skipCategories: skipCategories,
@@ -331,11 +328,6 @@ func (p *Pipe) Close() {
 	}
 }
 
-// IsIdempotent checks if a tool is idempotent (E5: safe to re-execute).
-func (p *Pipe) IsIdempotent(toolName string) bool {
-	return p.idempotentTools[toolName]
-}
-
 // IsQueryAgnostic returns whether the model should receive an empty query.
 // Query-agnostic models (LLM/cmprsr) don't need the user query.
 // Query-dependent models (reranker) need the user query for relevance scoring.
@@ -345,11 +337,13 @@ func (p *Pipe) IsQueryAgnostic() bool {
 
 // compressionTask holds data for parallel compression
 type compressionTask struct {
-	index    int
-	msg      message
-	toolName string
-	shadowID string
-	original string
+	index        int
+	msg          message
+	toolName     string
+	shadowID     string
+	original     string
+	messageIndex int // Position in messages array (for sjson path)
+	blockIndex   int // Position within content blocks (for sjson path)
 }
 
 // message is a minimal message struct for internal use
@@ -370,22 +364,12 @@ type compressionResult struct {
 	usedFallback      bool // True if fallback strategy was applied
 	_                 bool // Reserved for future cache tracking
 	err               error
+	messageIndex      int // Position in messages array (for sjson path)
+	blockIndex        int // Position within content blocks (for sjson path)
 }
 
 // ExpandContextCall represents an expand_context request from the LLM (V2)
 type ExpandContextCall struct {
 	ToolUseID string // The tool_use block ID
 	ShadowID  string // The shadow reference to expand
-}
-
-// ExpandContextToolSchema is the JSON schema for the expand_context tool
-var ExpandContextToolSchema = map[string]interface{}{
-	"type": "object",
-	"properties": map[string]interface{}{
-		"id": map[string]interface{}{
-			"type":        "string",
-			"description": "The shadow reference ID to expand (from <<<SHADOW:xxx>>> prefix)",
-		},
-	},
-	"required": []string{"id"},
 }

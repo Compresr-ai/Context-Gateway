@@ -126,7 +126,7 @@ func (t *Tracker) RecordRequest(event *RequestEvent) {
 		log.Info().
 			Str("request_id", reqID).
 			Str("pipe", string(event.PipeType)).
-			Int("tokens_saved", event.TokensSaved).
+			// Int("tokens_saved", event.TokensSaved).
 			Bool("success", event.Success).
 			Msg("telemetry")
 	}

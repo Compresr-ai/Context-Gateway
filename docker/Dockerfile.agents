@@ -1,0 +1,9 @@
+FROM alpine:3.19
+
+RUN apk add --no-cache curl jq bash
+
+COPY agents/entrypoint.sh /entrypoint.sh
+COPY agents/ /scripts/
+RUN chmod +x /entrypoint.sh /scripts/*.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

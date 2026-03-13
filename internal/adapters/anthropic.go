@@ -4,8 +4,12 @@ package adapters
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/compresr/context-gateway/internal/utils"
+	"github.com/rs/zerolog/log"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // AnthropicAdapter handles Anthropic API format requests.
@@ -111,68 +115,27 @@ func (a *AnthropicAdapter) ExtractToolOutput(body []byte) ([]ExtractedContent, e
 }
 
 // ApplyToolOutput applies compressed tool results back to the Anthropic format request.
+// Uses sjson for byte-level replacement to preserve JSON field ordering and KV-cache prefix.
 func (a *AnthropicAdapter) ApplyToolOutput(body []byte, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 {
 		return body, nil
 	}
 
-	// Build lookup map
-	resultMap := make(map[string]string)
-	for _, r := range results {
-		resultMap[r.ID] = r.Compressed
-	}
-
-	// Parse and modify
-	var req map[string]interface{}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("failed to parse request: %w", err)
-	}
-
-	messages, ok := req["messages"].([]interface{})
-	if !ok {
-		return body, nil
-	}
-
-	for i, msgInterface := range messages {
-		msg, ok := msgInterface.(map[string]interface{})
-		if !ok {
+	modified := body
+	// Process in reverse order to maintain correct byte offsets
+	for i := len(results) - 1; i >= 0; i-- {
+		r := results[i]
+		// Anthropic: messages[N].content[M].content where M is the tool_result block
+		path := fmt.Sprintf("messages.%d.content.%d.content", r.MessageIndex, r.BlockIndex)
+		var err error
+		modified, err = sjson.SetBytes(modified, path, r.Compressed)
+		if err != nil {
+			log.Warn().Err(err).Str("path", path).Str("id", r.ID).
+				Msg("sjson set failed for tool output, skipping")
 			continue
 		}
-
-		role, _ := msg["role"].(string)
-		if role != "user" {
-			continue
-		}
-
-		content, ok := msg["content"].([]interface{})
-		if !ok {
-			continue
-		}
-
-		for j, blockInterface := range content {
-			block, ok := blockInterface.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			blockType, _ := block["type"].(string)
-			if blockType != "tool_result" {
-				continue
-			}
-
-			toolUseID, _ := block["tool_use_id"].(string)
-			if compressed, found := resultMap[toolUseID]; found {
-				block["content"] = compressed
-				content[j] = block
-			}
-		}
-
-		msg["content"] = content
-		messages[i] = msg
 	}
-
-	req["messages"] = messages
-	return json.Marshal(req)
+	return modified, nil
 }
 
 // =============================================================================
@@ -225,6 +188,7 @@ func (a *AnthropicAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscovery
 }
 
 // ApplyToolDiscovery filters tools based on Keep flag in results.
+// Uses gjson/sjson to preserve original JSON byte representation and KV-cache prefix.
 func (a *AnthropicAdapter) ApplyToolDiscovery(body []byte, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 {
 		return body, nil
@@ -237,38 +201,38 @@ func (a *AnthropicAdapter) ApplyToolDiscovery(body []byte, results []CompressedR
 		}
 	}
 
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("failed to parse request: %w", err)
-	}
-
-	tools, ok := req["tools"].([]any)
-	if !ok {
+	// Extract each kept tool's raw JSON bytes from the original body
+	toolsResult := gjson.GetBytes(body, "tools")
+	if !toolsResult.Exists() {
 		return body, nil
 	}
 
-	filtered := make([]any, 0, len(keepSet))
-	for _, toolAny := range tools {
-		tool, ok := toolAny.(map[string]any)
-		if !ok {
-			continue
-		}
-		name, _ := tool["name"].(string)
+	var keptRaw []byte
+	keptRaw = append(keptRaw, '[')
+	first := true
+	toolsResult.ForEach(func(_, value gjson.Result) bool {
+		name := value.Get("name").String()
 		if keepSet[name] {
-			filtered = append(filtered, toolAny)
+			if !first {
+				keptRaw = append(keptRaw, ',')
+			}
+			keptRaw = append(keptRaw, value.Raw...)
+			first = false
 		}
-	}
+		return true
+	})
+	keptRaw = append(keptRaw, ']')
 
-	req["tools"] = filtered
-	return utils.MarshalNoEscape(req)
+	return sjson.SetRawBytes(body, "tools", keptRaw)
 }
 
 // =============================================================================
 // QUERY EXTRACTION
 // =============================================================================
 
-// ExtractUserQuery extracts the last user message content from Anthropic format.
-// Looks for messages[] with role:"user"
+// ExtractUserQuery extracts the last real user question from Anthropic format.
+// Skips tool_result messages and system-reminder injections to find the actual
+// user intent that triggered the tool calls being compressed.
 func (a *AnthropicAdapter) ExtractUserQuery(body []byte) string {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -284,7 +248,8 @@ func (a *AnthropicAdapter) ExtractUserQuery(body []byte) string {
 		return ""
 	}
 
-	// Iterate backwards to find the last user message
+	// Iterate backwards to find the last real user message.
+	// Skip messages that are only tool_result blocks (not actual user text).
 	for i := len(msgArray) - 1; i >= 0; i-- {
 		m, ok := msgArray[i].(map[string]any)
 		if !ok {
@@ -292,7 +257,7 @@ func (a *AnthropicAdapter) ExtractUserQuery(body []byte) string {
 		}
 		role, _ := m["role"].(string)
 		if role == "user" {
-			content := a.extractMessageContent(m["content"])
+			content := a.extractUserTextContent(m["content"])
 			if content != "" {
 				return content
 			}
@@ -301,34 +266,184 @@ func (a *AnthropicAdapter) ExtractUserQuery(body []byte) string {
 	return ""
 }
 
-// extractMessageContent extracts text from Anthropic message content.
-// Content can be a string or an array of content blocks.
-func (a *AnthropicAdapter) extractMessageContent(content any) string {
+// ExtractAssistantIntent extracts the LLM's reasoning from the last assistant
+// message that contains tool_use calls. In Anthropic format, assistant messages
+// have content blocks: [{type:"text", text:"reasoning..."}, {type:"tool_use", ...}].
+// The text blocks contain the LLM's justification for calling the tool.
+func (a *AnthropicAdapter) ExtractAssistantIntent(body []byte) string {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	msgArray, ok := req["messages"].([]any)
+	if !ok {
+		return ""
+	}
+
+	// Iterate backwards to find the last assistant message with tool_use
+	for i := len(msgArray) - 1; i >= 0; i-- {
+		m, ok := msgArray[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		if role != "assistant" {
+			continue
+		}
+
+		arr, ok := m["content"].([]any)
+		if !ok {
+			continue
+		}
+
+		// Check if this assistant message has tool_use blocks
+		hasToolUse := false
+		var intentText string
+		for _, item := range arr {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			blockType, _ := block["type"].(string)
+			if blockType == "tool_use" {
+				hasToolUse = true
+			}
+			if blockType == "text" {
+				if t, ok := block["text"].(string); ok && !isSystemReminder(t) {
+					if intentText != "" {
+						intentText += " "
+					}
+					intentText += t
+				}
+			}
+		}
+
+		if hasToolUse && intentText != "" {
+			return intentText
+		}
+	}
+	return ""
+}
+
+// extractUserTextContent extracts only real user text from a message,
+// filtering out tool_result blocks and system-reminder injections.
+// Returns empty string if the message has no genuine user text.
+func (a *AnthropicAdapter) extractUserTextContent(content any) string {
 	if content == nil {
 		return ""
 	}
 
-	// String content
+	// String content — check for system-reminder
 	if str, ok := content.(string); ok {
+		if isSystemReminder(str) {
+			return ""
+		}
 		return str
 	}
 
-	// Array content - extract text blocks
-	if arr, ok := content.([]any); ok {
-		var text string
-		for _, item := range arr {
-			if itemMap, ok := item.(map[string]any); ok {
-				if itemMap["type"] == "text" {
-					if t, ok := itemMap["text"].(string); ok {
-						text += t
-					}
-				}
-			}
-		}
-		return text
+	// Array content — skip tool_result blocks, filter system reminders from text blocks
+	arr, ok := content.([]any)
+	if !ok {
+		return ""
 	}
 
-	return ""
+	var text string
+	hasToolResult := false
+	for _, item := range arr {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		itemType, _ := itemMap["type"].(string)
+		if itemType == "tool_result" {
+			hasToolResult = true
+			continue
+		}
+		if itemType == "text" {
+			if t, ok := itemMap["text"].(string); ok && !isSystemReminder(t) {
+				text += t
+			}
+		}
+	}
+
+	// If this message is purely tool results (no real user text), return empty
+	// so the caller keeps searching backward for the actual user question
+	if text == "" && hasToolResult {
+		return ""
+	}
+	return text
+}
+
+// isSystemReminder checks if text is a system-reminder injection from the client.
+func isSystemReminder(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), "<system-reminder>")
+}
+
+// =============================================================================
+// LAST USER CONTENT - Structural extraction for classification
+// =============================================================================
+
+// ExtractLastUserContent extracts text blocks and tool_result flag from the last user message.
+// Returns individual text blocks (not concatenated) and whether tool_result blocks exist.
+// This fixes Bug D: human text in mixed tool_result + text messages is no longer lost.
+func (a *AnthropicAdapter) ExtractLastUserContent(body []byte) ([]string, bool) {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, false
+	}
+
+	messages, ok := req["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return nil, false
+	}
+
+	// Find last user message
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messages[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role != "user" {
+			continue
+		}
+
+		content := msg["content"]
+		if content == nil {
+			return nil, false
+		}
+
+		// String content — always a single text block, never has tool_results
+		if str, isStr := content.(string); isStr {
+			return []string{str}, false
+		}
+
+		// Array content — iterate blocks
+		arr, isArr := content.([]any)
+		if !isArr {
+			return nil, false
+		}
+
+		var textBlocks []string
+		hasToolResults := false
+		for _, item := range arr {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			blockType, _ := block["type"].(string)
+			switch blockType {
+			case "text":
+				if text, ok := block["text"].(string); ok && text != "" {
+					textBlocks = append(textBlocks, text)
+				}
+			case "tool_result":
+				hasToolResults = true
+			}
+		}
+		return textBlocks, hasToolResults
+	}
+	return nil, false
 }
 
 // =============================================================================
@@ -412,7 +527,7 @@ func (a *AnthropicAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) str
 		}
 		role, _ := m["role"].(string)
 		if role == "user" {
-			content := a.extractMessageContent(m["content"])
+			content := a.extractUserTextContent(m["content"])
 			if content != "" {
 				return content
 			}
@@ -510,6 +625,8 @@ func (a *AnthropicAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([
 }
 
 // ApplyToolDiscoveryToParsed filters tools and returns modified body.
+// Note: ParsedRequest doesn't preserve original bytes, so we use MarshalNoEscape here.
+// For KV-cache preservation, prefer the byte-level ApplyToolDiscovery when possible.
 func (a *AnthropicAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 || parsed == nil {
 		return utils.MarshalNoEscape(parsed.Raw)

@@ -147,6 +147,13 @@ func runConfigEditor(state *ConfigState, agentName string) string {
 			{Label: "Cost Cap $", Description: costCapDesc, Value: "edit_cost_cap", Editable: true},
 		}
 
+		// Print feature descriptions above the menu
+		fmt.Printf("\n%s  Compact:%s Proactively compresses conversation history before you hit the context limit\n", tui.ColorDim, tui.ColorReset)
+		fmt.Printf("%s  Tool Compression:%s Compresses large tool outputs to save context space\n", tui.ColorDim, tui.ColorReset)
+		fmt.Printf("%s  Tool Discovery:%s Filters irrelevant tool definitions to reduce token usage\n", tui.ColorDim, tui.ColorReset)
+		fmt.Printf("%s  Cost Cap:%s Set spending limits to manage API costs\n", tui.ColorDim, tui.ColorReset)
+		fmt.Println()
+
 		// Telemetry toggle
 		telemetryStatus := "○ Disabled"
 		if state.TelemetryEnabled {
@@ -282,7 +289,7 @@ func toolDiscoverySummary(state *ConfigState) string {
 func deleteConfig() {
 	userConfigs := listUserConfigs()
 	if len(userConfigs) == 0 {
-		fmt.Printf("%s[INFO]%s No custom configurations to delete\n", tui.ColorYellow, tui.ColorReset)
+		fmt.Printf("  %s·%s No custom configurations to delete\n", tui.ColorDim, tui.ColorReset)
 		return
 	}
 
@@ -324,7 +331,7 @@ func deleteConfig() {
 func editConfig(agentName string) {
 	configs := listAvailableConfigs()
 	if len(configs) == 0 {
-		fmt.Printf("%s[INFO]%s No configurations to edit\n", tui.ColorYellow, tui.ColorReset)
+		fmt.Printf("  %s·%s No configurations to edit\n", tui.ColorDim, tui.ColorReset)
 		return
 	}
 
@@ -360,7 +367,7 @@ func editConfig(agentName string) {
 	if isPredefined {
 		timestamp := time.Now().Format("20060102")
 		state.Name = fmt.Sprintf("%s_custom_%s", configName, timestamp)
-		fmt.Printf("%s[INFO]%s Editing predefined config - will save as: %s\n", tui.ColorYellow, tui.ColorReset, state.Name)
+		fmt.Printf("  %s·%s Editing predefined config — will save as: %s\n", tui.ColorDim, tui.ColorReset, state.Name)
 	}
 
 	// Run config editor

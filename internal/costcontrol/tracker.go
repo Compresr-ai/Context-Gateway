@@ -37,6 +37,13 @@ func NewTracker(cfg CostControlConfig) *Tracker {
 	return t
 }
 
+// UpdateConfig swaps the cost control configuration (hot-reload).
+func (t *Tracker) UpdateConfig(cfg CostControlConfig) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.config = cfg
+}
+
 // Close stops the background cleanup goroutine. Safe to call multiple times.
 func (t *Tracker) Close() {
 	t.closeOnce.Do(func() {

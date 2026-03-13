@@ -56,6 +56,19 @@ type Adapter interface {
 	// Used by tool_output pipe to provide query context to compression API.
 	ExtractUserQuery(body []byte) string
 
+	// ExtractAssistantIntent extracts the LLM's reasoning text from the last
+	// assistant message that contains tool calls. This captures WHY the LLM
+	// called the tool (e.g., "I'll read the file to understand the code..."),
+	// which is more relevant for compression than the original user question.
+	ExtractAssistantIntent(body []byte) string
+
+	// ExtractLastUserContent extracts text blocks and tool_result flag from the last user message.
+	// Pure structural extraction — returns raw text blocks with no semantic filtering.
+	// Anthropic: iterates content blocks, returns type="text" blocks, detects type="tool_result".
+	// OpenAI: returns content string from last role="user" message. hasToolResults=false (separate role="tool").
+	// Gemini: returns text from parts[] of last user contents entry.
+	ExtractLastUserContent(body []byte) (textBlocks []string, hasToolResults bool)
+
 	// =========================================================================
 	// USAGE EXTRACTION - Get token usage from API response
 	// =========================================================================
@@ -83,4 +96,10 @@ func (a *BaseAdapter) Name() string {
 // Provider returns the provider type.
 func (a *BaseAdapter) Provider() Provider {
 	return a.provider
+}
+
+// ExtractAssistantIntent default implementation returns empty string.
+// Overridden by Anthropic and OpenAI adapters.
+func (a *BaseAdapter) ExtractAssistantIntent(_ []byte) string {
+	return ""
 }

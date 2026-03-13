@@ -78,6 +78,17 @@ func waitForGateway(port int, timeout time.Duration) bool {
 	return false
 }
 
+// isDashboardRunning checks if the dashboard port is already listening.
+// Used to avoid re-opening the browser when a dashboard is already open.
+func isDashboardRunning(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 // stopExistingBackgroundGateway stops any existing background gateway.
 // Used to ensure only one background gateway runs at a time.
 // Silently returns if no gateway is running.
@@ -494,8 +505,21 @@ func listAvailableConfigsPrint() {
 // prepareSessionPath computes a session directory path without creating it.
 // The actual directory is created lazily on first LLM request via ensureSessionDir().
 // This prevents empty session folders when the gateway starts but receives no traffic.
-func prepareSessionPath(baseDir string) string {
+// If customName is non-empty, it is used as the session directory name instead of
+// the auto-generated "session_N_timestamp" format.
+func prepareSessionPath(baseDir string, customName string) string {
 	_ = os.MkdirAll(baseDir, 0750)
+
+	if customName != "" {
+		// Sanitize: replace spaces/special chars with underscores, keep it filesystem-safe
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '_'
+		}, customName)
+		return filepath.Join(baseDir, safe)
+	}
 
 	now := time.Now().Format("20060102_150405")
 
@@ -574,11 +598,11 @@ func printHeader(title string) {
 }
 
 func printSuccess(msg string) {
-	fmt.Printf("\033[0;32m[OK]\033[0m %s\n", msg)
+	fmt.Printf("\r\033[0;32m[OK]\033[0m %s\n", msg)
 }
 
 func printInfo(msg string) {
-	fmt.Printf("\033[0;34m[INFO]\033[0m %s\n", msg)
+	fmt.Printf("  \033[2m·\033[0m %s\n", msg)
 }
 
 func printWarn(msg string) {
@@ -602,7 +626,7 @@ func printAgentHelp() {
 	fmt.Println("  -a, --agent AGENT    Select agent directly (claude_code, openclaw, codex, etc.)")
 	fmt.Println("  -c, --config [NAME]  Config menu if NAME omitted, uses NAME directly if provided")
 	fmt.Println("  --config list        List available configs")
-	fmt.Println("  -p, --port PORT      Gateway port (default: 18080)")
+	fmt.Println("  -p, --port PORT      Gateway port (default: 18081)")
 	fmt.Println("  -d, --debug          Enable debug logging")
 	fmt.Println("  --proxy MODE         auto (default), start, skip")
 	fmt.Println("  --reset-api-key      Reset Compresr API key and re-run setup")

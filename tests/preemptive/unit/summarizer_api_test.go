@@ -77,10 +77,10 @@ func newAPISummarizer(serverURL string) *preemptive.Summarizer {
 		Strategy:        preemptive.StrategyCompresr,
 		CompresrBaseURL: serverURL, // httptest server URL as base (like cfg.URLs.Compresr)
 		Compresr: &preemptive.CompresrConfig{
-			Endpoint: "/api/compress/history/",
-			AuthParam:   "cmp_test-key-12345",
-			Model:    "hcc_espresso_v1",
-			Timeout:  30 * time.Second,
+			Endpoint:  "/api/compress/history/",
+			AuthParam: "cmp_test-key-12345",
+			Model:     "hcc_espresso_v1",
+			Timeout:   30 * time.Second,
 		},
 		KeepRecentCount: 3,
 	}
@@ -268,10 +268,10 @@ func TestSummarizeViaAPI_KeepRecentDefaultsTo3(t *testing.T) {
 		Strategy:        preemptive.StrategyCompresr,
 		CompresrBaseURL: server.URL,
 		Compresr: &preemptive.CompresrConfig{
-			Endpoint: "/api/compress/history/",
-			AuthParam:   "cmp_test-key",
-			Model:    "hcc_espresso_v1",
-			Timeout:  30 * time.Second,
+			Endpoint:  "/api/compress/history/",
+			AuthParam: "cmp_test-key",
+			Model:     "hcc_espresso_v1",
+			Timeout:   30 * time.Second,
 		},
 		KeepRecentCount: 0, // Not set
 	}
@@ -296,14 +296,14 @@ func TestSummarizeViaAPI_KeepRecentDefaultsTo3(t *testing.T) {
 
 func TestSummarizeViaAPI_LastSummarizedIndex(t *testing.T) {
 	tests := []struct {
-		name             string
-		totalMessages    int
-		messagesKept     int
-		expectedLastIdx  int
+		name            string
+		totalMessages   int
+		messagesKept    int
+		expectedLastIdx int
 	}{
-		{"10 msgs, 3 kept", 10, 3, 6},    // 10 - 3 - 1 = 6
-		{"5 msgs, 2 kept", 5, 2, 2},      // 5 - 2 - 1 = 2
-		{"3 msgs, 1 kept", 3, 1, 1},      // 3 - 1 - 1 = 1
+		{"10 msgs, 3 kept", 10, 3, 6},     // 10 - 3 - 1 = 6
+		{"5 msgs, 2 kept", 5, 2, 2},       // 5 - 2 - 1 = 2
+		{"3 msgs, 1 kept", 3, 1, 1},       // 3 - 1 - 1 = 1
 		{"4 msgs, 4 kept (all)", 4, 4, 0}, // max(4-4-1, 0) = 0
 		{"2 msgs, 2 kept (all)", 2, 2, 0}, // max(2-2-1, 0) = 0
 	}
@@ -594,10 +594,10 @@ func TestSummarizeViaAPI_ModelNamePassedCorrectly(t *testing.T) {
 				Strategy:        preemptive.StrategyCompresr,
 				CompresrBaseURL: server.URL,
 				Compresr: &preemptive.CompresrConfig{
-					Endpoint: "/api/compress/history/",
-					AuthParam:   "cmp_key",
-					Model:    model,
-					Timeout:  30 * time.Second,
+					Endpoint:  "/api/compress/history/",
+					AuthParam: "cmp_key",
+					Model:     model,
+					Timeout:   30 * time.Second,
 				},
 			}
 			summarizer := preemptive.NewSummarizer(cfg)
@@ -654,10 +654,10 @@ func TestSummarizeViaAPI_ResponseFieldMapping(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "This is the compressed summary of the conversation.", result.Summary)
-	assert.Equal(t, 500, result.SummaryTokens)      // mapped from compressed_tokens
-	assert.Equal(t, 2500, result.InputTokens)        // mapped from original_tokens
-	assert.Equal(t, 500, result.OutputTokens)         // mapped from compressed_tokens
-	assert.Equal(t, 6, result.LastSummarizedIndex)   // 10 - 3 - 1 = 6
+	assert.Equal(t, 500, result.SummaryTokens)     // mapped from compressed_tokens
+	assert.Equal(t, 2500, result.InputTokens)      // mapped from original_tokens
+	assert.Equal(t, 500, result.OutputTokens)      // mapped from compressed_tokens
+	assert.Equal(t, 6, result.LastSummarizedIndex) // 10 - 3 - 1 = 6
 }
 
 // =============================================================================

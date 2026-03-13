@@ -408,16 +408,20 @@ func TestOpenAI_ApplyToolDiscovery_InvalidJSON(t *testing.T) {
 	adapter := adapters.NewOpenAIAdapter()
 
 	results := []adapters.CompressedResult{{ID: "test", Keep: true}}
-	_, err := adapter.ApplyToolDiscovery([]byte(`not json`), results)
+	// sjson/gjson-based implementation is lenient: no tools found → returns body unchanged
+	result, err := adapter.ApplyToolDiscovery([]byte(`not json`), results)
 
-	assert.Error(t, err)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte(`not json`), result)
 }
 
 func TestAnthropic_ApplyToolDiscovery_InvalidJSON(t *testing.T) {
 	adapter := adapters.NewAnthropicAdapter()
 
 	results := []adapters.CompressedResult{{ID: "test", Keep: true}}
-	_, err := adapter.ApplyToolDiscovery([]byte(`not json`), results)
+	// sjson/gjson-based implementation is lenient: no tools found → returns body unchanged
+	result, err := adapter.ApplyToolDiscovery([]byte(`not json`), results)
 
-	assert.Error(t, err)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte(`not json`), result)
 }

@@ -36,6 +36,11 @@ func TestProviderIdentification_ExplicitHeader(t *testing.T) {
 			expectedName: "gemini",
 		},
 		{
+			name:         "X-Provider: litellm",
+			headerValue:  "litellm",
+			expectedName: "litellm",
+		},
+		{
 			name:         "X-Provider: unknown (falls back to openai)",
 			headerValue:  "unknown",
 			expectedName: "openai", // Falls back to OpenAI
@@ -224,6 +229,14 @@ func TestAdapterRegistry_BuiltInAdapters(t *testing.T) {
 	if openai != nil && openai.Name() != "openai" {
 		t.Errorf("Expected openai, got %s", openai.Name())
 	}
+
+	litellm := registry.Get("litellm")
+	if litellm == nil {
+		t.Error("LiteLLM adapter not found in registry")
+	}
+	if litellm != nil && litellm.Name() != "litellm" {
+		t.Errorf("Expected litellm, got %s", litellm.Name())
+	}
 }
 
 // TestAdapterRegistry_GetByName tests retrieving specific adapters
@@ -238,6 +251,7 @@ func TestAdapterRegistry_GetByName(t *testing.T) {
 	}{
 		{"anthropic exists", "anthropic", true, "anthropic"},
 		{"openai exists", "openai", true, "openai"},
+		{"litellm exists", "litellm", true, "litellm"},
 		{"unknown does not exist", "unknown", false, ""},
 		{"empty name does not exist", "", false, ""},
 	}

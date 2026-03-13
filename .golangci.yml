@@ -42,10 +42,6 @@ linters:
       excludes:
         # G101: Struct field names match secret patterns - these ARE credential config structs
         - G101
-        # G304: Path traversal - paths validated via filepath.Clean + prefix checks.
-        - G304
-        # G107: SSRF - URLs from trusted config with scheme validation (http/https only).
-        - G107
 
 formatters:
   enable:

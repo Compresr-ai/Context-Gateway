@@ -52,6 +52,13 @@ type PipelineContext struct {
 	OriginalTokenCount   int
 	CompressedTokenCount int
 	// Note: OriginalToolCount and FilteredToolCount are in embedded PipeContext
+
+	// Session monitoring
+	MonitorSessionID string // Session ID for the monitoring dashboard
+
+	// Unified user message classification — single source of truth.
+	// Computed once at the top of handleProxy, used by all downstream consumers.
+	Classification MessageClassification
 }
 
 // NewPipelineContext creates a new pipeline context.
@@ -59,9 +66,10 @@ func NewPipelineContext(provider adapters.Provider, adapter adapters.Adapter, bo
 	pipeCtx := pipes.NewPipeContext(adapter, body)
 	pipeCtx.Provider = provider
 	return &PipelineContext{
-		PipeContext:  pipeCtx,
-		OriginalPath: path,
-		ReceivedAt:   time.Now(),
+		PipeContext:    pipeCtx,
+		OriginalPath:   path,
+		ReceivedAt:     time.Now(),
+		Classification: classifyUserMessage(body, adapter),
 	}
 }
 

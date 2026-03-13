@@ -16,6 +16,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/compresr/context-gateway/internal/retry"
 )
 
 // Default model names for each service.
@@ -477,41 +479,56 @@ func (c *Client) get(path string, result interface{}) error {
 		return fmt.Errorf("URL must use http or https scheme, got %q", parsedURL.Scheme)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+	validatedURL := parsedURL.String()
+	var lastErr error
+	for attempt := 0; attempt < retry.MaxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(retry.Backoff(attempt - 1))
+		}
+
+		req, reqErr := http.NewRequest(http.MethodGet, validatedURL, nil) //#nosec G704 -- scheme validated above
+		if reqErr != nil {
+			return fmt.Errorf("creating request: %w", reqErr)
+		}
+		if c.apiKey != "" {
+			req.Header.Set("X-API-Key", c.apiKey)
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "compresr-gateway/1.0")
+
+		resp, doErr := c.httpClient.Do(req)
+		if doErr != nil {
+			if !retry.IsTransientErr(doErr) {
+				return fmt.Errorf("request failed: %w", doErr)
+			}
+			lastErr = fmt.Errorf("request failed: %w", doErr)
+			continue
+		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("reading response: %w", readErr)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			return fmt.Errorf("invalid API key")
+		}
+		if retry.IsTransientStatus(resp.StatusCode) {
+			lastErr = fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+		}
+
+		if unmarshalErr := json.Unmarshal(body, result); unmarshalErr != nil {
+			return fmt.Errorf("parsing response: %w", unmarshalErr)
+		}
+		return nil
 	}
 
-	if c.apiKey != "" {
-		req.Header.Set("X-API-Key", c.apiKey)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "compresr-gateway/1.0")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("invalid API key")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
-	}
-
-	if err := json.Unmarshal(body, result); err != nil {
-		return fmt.Errorf("parsing response: %w", err)
-	}
-
-	return nil
+	return lastErr
 }
 
 func (c *Client) post(path string, payload interface{}, result interface{}) error {
@@ -530,40 +547,55 @@ func (c *Client) post(path string, payload interface{}, result interface{}) erro
 		return fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+	validatedURL := parsedURL.String()
+	var lastErr error
+	for attempt := 0; attempt < retry.MaxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(retry.Backoff(attempt - 1))
+		}
+
+		req, reqErr := http.NewRequest(http.MethodPost, validatedURL, bytes.NewReader(body)) //#nosec G704 -- scheme validated above
+		if reqErr != nil {
+			return fmt.Errorf("creating request: %w", reqErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if c.apiKey != "" {
+			req.Header.Set("X-API-Key", c.apiKey)
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "compresr-gateway/1.0")
+
+		resp, doErr := c.httpClient.Do(req)
+		if doErr != nil {
+			if !retry.IsTransientErr(doErr) {
+				return fmt.Errorf("request failed: %w", doErr)
+			}
+			lastErr = fmt.Errorf("request failed: %w", doErr)
+			continue
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("reading response: %w", readErr)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			return fmt.Errorf("invalid API key")
+		}
+		if retry.IsTransientStatus(resp.StatusCode) {
+			lastErr = fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		if unmarshalErr := json.Unmarshal(respBody, result); unmarshalErr != nil {
+			return fmt.Errorf("parsing response: %w", unmarshalErr)
+		}
+		return nil
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("X-API-Key", c.apiKey)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "compresr-gateway/1.0")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("invalid API key")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	if err := json.Unmarshal(respBody, result); err != nil {
-		return fmt.Errorf("parsing response: %w", err)
-	}
-
-	return nil
+	return lastErr
 }

@@ -60,8 +60,8 @@ func (g *Gateway) handleStats(w http.ResponseWriter, r *http.Request) {
 	// Savings
 	if g.savings != nil {
 		report := g.savings.GetReport()
-		resp.Savings.TokensSaved = report.TotalTokensSaved
-		resp.Savings.TokenSavedPct = report.TotalSavedPct
+		// resp.Savings.TokensSaved = report.TotalTokensSaved
+		// resp.Savings.TokenSavedPct = report.TotalSavedPct
 		resp.Savings.OriginalTokens = report.OriginalTokens
 		resp.Savings.CompressedTokens = report.CompressedTokens
 		resp.Savings.CostSavedUSD = report.CostSavedUSD

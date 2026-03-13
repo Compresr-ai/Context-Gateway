@@ -16,6 +16,8 @@
 coverage.*
 *.coverprofile
 profile.cov
+.env.test.dev
+.env.test.prod
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -39,6 +41,13 @@ go.work.sum
 .LSOverride
 
 logs/*.jsonl
+
+# Compiled binary
+context-gateway
+
+# AI assistant / planning docs
+CLAUDE.md
+Tool-discovery-rework.md
 
 # Context-Gateway specific
 #.claude/

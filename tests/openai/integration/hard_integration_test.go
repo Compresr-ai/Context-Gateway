@@ -804,14 +804,14 @@ func hardCompressionConfigOpenAI() *config.Config {
 		},
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            config.StrategyCompresr,
-				FallbackStrategy:    "passthrough",
-				MinBytes:            500,
-				MaxBytes:            65536,
+				Enabled:                true,
+				Strategy:               config.StrategyCompresr,
+				FallbackStrategy:       "passthrough",
+				MinBytes:               500,
+				MaxBytes:               65536,
 				TargetCompressionRatio: 0.3,
-				IncludeExpandHint:   true,
-				EnableExpandContext: true,
+				IncludeExpandHint:      true,
+				EnableExpandContext:    true,
 				Compresr: config.CompresrConfig{
 					Endpoint:  os.Getenv("COMPRESR_API_URL") + "/api/compress/tool-output",
 					AuthParam: os.Getenv("COMPRESR_API_KEY"),

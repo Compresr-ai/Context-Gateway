@@ -180,10 +180,9 @@ func TestPipe_Process_Relevance_DoesNotInjectSearchTool(t *testing.T) {
 	assert.NotContains(t, names, "gateway_search_tools")
 }
 
-func TestPipe_Process_API_ReplacesWithSearchToolOnly(t *testing.T) {
-	// API strategy now filters directly (no phantom tool).
-	// Without a valid API endpoint, it returns original request unchanged.
-	cfg := testConfig(config.StrategyCompresr, 1, 10, 0.8, []string{"run_tests"})
+func TestPipe_Process_CompresrStrategy_IsUnknown(t *testing.T) {
+	// "compresr" is no longer a valid tool discovery strategy
+	cfg := testConfig("compresr", 1, 10, 0.8, []string{"run_tests"})
 	pipe := tooldiscovery.New(cfg)
 
 	body := openAIRequestWithToolsAndQuery(6, "search for code")
@@ -192,11 +191,11 @@ func TestPipe_Process_API_ReplacesWithSearchToolOnly(t *testing.T) {
 	result, err := pipe.Process(ctx)
 	require.NoError(t, err)
 
-	// API strategy without endpoint returns original tools unchanged
+	// Unknown strategy returns original request unchanged
 	var req map[string]any
 	require.NoError(t, json.Unmarshal(result, &req))
 	tools := req["tools"].([]any)
-	assert.Len(t, tools, 6) // All tools returned (API not configured)
+	assert.Len(t, tools, 6) // All tools returned (unknown strategy = passthrough)
 }
 
 func TestPipe_Process_ToolSearch_ReplacesWithSearchToolOnly(t *testing.T) {
@@ -506,19 +505,18 @@ func TestToolDiscoveryConfig_Validate_Relevance(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestToolDiscoveryConfig_Validate_APIMissingEndpoint(t *testing.T) {
+func TestToolDiscoveryConfig_Validate_ToolSearchValid(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Pipes.ToolDiscovery.Enabled = true
-	cfg.Pipes.ToolDiscovery.Strategy = config.StrategyCompresr
+	cfg.Pipes.ToolDiscovery.Strategy = config.StrategyToolSearch
 	err := cfg.Pipes.ToolDiscovery.Validate()
-	assert.Error(t, err)
+	assert.NoError(t, err) // tool-search is valid even without API config (falls back to local regex)
 }
 
-func TestToolDiscoveryConfig_Validate_APIWithProvider(t *testing.T) {
+func TestToolDiscoveryConfig_Validate_CompresrIsValid(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Pipes.ToolDiscovery.Enabled = true
-	cfg.Pipes.ToolDiscovery.Strategy = config.StrategyCompresr
-	cfg.Pipes.ToolDiscovery.Provider = "some_provider"
+	cfg.Pipes.ToolDiscovery.Strategy = "compresr" // Compresr API-backed filtering; falls back to local relevance if unavailable
 	err := cfg.Pipes.ToolDiscovery.Validate()
 	assert.NoError(t, err)
 }

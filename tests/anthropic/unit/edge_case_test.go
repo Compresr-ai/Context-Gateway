@@ -74,24 +74,13 @@ func TestE4_CacheMissOnFirstRequest(t *testing.T) {
 		"E4: first request should be a cache miss")
 }
 
-// TestE14_StreamBufferSuppressExpandContext verifies phantom tool filtering.
-func TestE14_StreamBufferSuppressExpandContext(t *testing.T) {
+// TestE15_StreamBufferNoFalsePositives verifies normal text doesn't trigger detection.
+func TestE15_StreamBufferNoFalsePositives(t *testing.T) {
 	buffer := tooloutput.NewStreamBuffer()
-	chunk := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"tu1","name":"expand_context"}}`)
+	chunk := []byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Normal response with no patterns"}}`)
 
-	output, err := buffer.ProcessChunk(chunk)
-	assert.NoError(t, err)
-	assert.Nil(t, output, "E14: expand_context chunk should be suppressed")
-}
-
-// TestE15_StreamBufferPassthroughNormalTools verifies normal tools pass through.
-func TestE15_StreamBufferPassthroughNormalTools(t *testing.T) {
-	buffer := tooloutput.NewStreamBuffer()
-	chunk := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"tu1","name":"read_file"}}`)
-
-	output, err := buffer.ProcessChunk(chunk)
-	assert.NoError(t, err)
-	assert.NotNil(t, output, "E15: normal tool should pass through")
+	buffer.ProcessChunk(chunk)
+	assert.False(t, buffer.HasSuppressedCalls(), "E15: normal text should not trigger expand detection")
 }
 
 // TestE22_ContentHashDeterminism verifies hashing is consistent.

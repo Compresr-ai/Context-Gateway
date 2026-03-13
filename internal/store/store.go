@@ -1,8 +1,8 @@
 // Package store provides shadow context storage for expand_context.
 //
 // V2 DESIGN: When tool outputs are compressed, we use dual TTL:
-//   - Original content: short TTL (5 min) - only needed for expand_context
-//   - Compressed content: long TTL (24 hours) - preserves KV-cache
+//   - Original content: 5 hour TTL - needed for expand_context during session
+//   - Compressed content: 24 hour TTL - preserves KV-cache across sessions
 //
 // This optimizes memory while maintaining KV-cache consistency.
 //
@@ -13,6 +13,7 @@ package store
 import (
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,15 @@ import (
 const (
 	DefaultOriginalTTL   = 5 * time.Hour  // TTL for original content (expand_context)
 	DefaultCompressedTTL = 24 * time.Hour // Long TTL for compressed (KV-cache)
+
+	// MaxCompressedEntries is the maximum number of compressed cache entries.
+	// Prevents unbounded memory growth in long-running sessions.
+	// At ~2KB avg per entry, 10K entries ≈ 20MB.
+	MaxCompressedEntries = 10_000
+
+	// MaxOriginalEntries caps the original content map.
+	// Original content is larger (~5KB avg), so 5K entries ≈ 25MB.
+	MaxOriginalEntries = 5_000
 )
 
 // Note: These match config.DefaultOriginalTTL and config.DefaultCompressedTTL.
@@ -70,6 +80,13 @@ type Store interface {
 	Close() error
 }
 
+// CacheMetrics tracks cache hit/miss/eviction statistics.
+type CacheMetrics struct {
+	CompressedHits      atomic.Int64
+	CompressedMisses    atomic.Int64
+	CompressedEvictions atomic.Int64
+}
+
 // MemoryStore is a simple in-memory implementation of Store.
 // V2: Supports dual TTL for original and compressed content.
 type MemoryStore struct {
@@ -81,6 +98,10 @@ type MemoryStore struct {
 	compressedTTL time.Duration // V2: Long TTL for compressed
 	stopChan      chan struct{}
 	stopped       bool
+	wg            sync.WaitGroup // Waits for cleanup goroutine to exit
+
+	maxCompressed int          // Max entries in compressed cache (0 = unlimited)
+	Metrics       CacheMetrics // Observable cache statistics
 }
 
 type entry struct {
@@ -94,7 +115,7 @@ type expansionEntry struct {
 }
 
 // NewMemoryStore creates a new in-memory store with default TTLs.
-// V2: Uses dual TTL (5 min original, 24 hour compressed).
+// V2: Uses dual TTL (5 hour original, 24 hour compressed).
 func NewMemoryStore(ttl time.Duration) *MemoryStore {
 	return NewMemoryStoreWithDualTTL(ttl, ttl)
 }
@@ -108,9 +129,11 @@ func NewMemoryStoreWithDualTTL(originalTTL, compressedTTL time.Duration) *Memory
 		originalTTL:   originalTTL,
 		compressedTTL: compressedTTL,
 		stopChan:      make(chan struct{}),
+		maxCompressed: MaxCompressedEntries,
 	}
 
 	// Start cleanup goroutine
+	s.wg.Add(1)
 	go s.cleanup()
 
 	return s
@@ -123,6 +146,22 @@ func (s *MemoryStore) Set(key, value string) error {
 
 	if s.stopped {
 		return nil
+	}
+
+	// Cap original entries to prevent unbounded growth
+	if len(s.data) >= MaxOriginalEntries {
+		// Evict oldest entry
+		var oldestKey string
+		var oldestTime time.Time
+		for k, e := range s.data {
+			if oldestKey == "" || e.expiresAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = e.expiresAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.data, oldestKey)
+		}
 	}
 
 	s.data[key] = entry{
@@ -154,6 +193,9 @@ func (s *MemoryStore) Delete(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.stopped {
+		return nil
+	}
 	delete(s.data, key)
 	delete(s.compressed, key)
 	return nil
@@ -166,6 +208,13 @@ func (s *MemoryStore) SetCompressed(key, compressed string) error {
 
 	if s.stopped {
 		return nil
+	}
+
+	// Evict oldest entries if at capacity (skip if updating existing key)
+	if s.maxCompressed > 0 && len(s.compressed) >= s.maxCompressed {
+		if _, exists := s.compressed[key]; !exists {
+			s.evictOldestCompressed()
+		}
 	}
 
 	s.compressed[key] = entry{
@@ -182,13 +231,16 @@ func (s *MemoryStore) GetCompressed(key string) (string, bool) {
 
 	e, exists := s.compressed[key]
 	if !exists {
+		s.Metrics.CompressedMisses.Add(1)
 		return "", false
 	}
 
 	if time.Now().After(e.expiresAt) {
+		s.Metrics.CompressedMisses.Add(1)
 		return "", false
 	}
 
+	s.Metrics.CompressedHits.Add(1)
 	return e.value, true
 }
 
@@ -197,6 +249,9 @@ func (s *MemoryStore) DeleteCompressed(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.stopped {
+		return nil
+	}
 	delete(s.compressed, key)
 	return nil
 }
@@ -239,8 +294,36 @@ func (s *MemoryStore) DeleteExpansion(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.stopped {
+		return nil
+	}
 	delete(s.expansions, key)
 	return nil
+}
+
+// evictOldestCompressed removes the entry with the earliest expiry (called with lock held).
+func (s *MemoryStore) evictOldestCompressed() {
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
+	for k, e := range s.compressed {
+		if first || e.expiresAt.Before(oldestTime) {
+			oldestKey = k
+			oldestTime = e.expiresAt
+			first = false
+		}
+	}
+	if oldestKey != "" {
+		delete(s.compressed, oldestKey)
+		s.Metrics.CompressedEvictions.Add(1)
+	}
+}
+
+// CompressedSize returns the number of entries in the compressed cache.
+func (s *MemoryStore) CompressedSize() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.compressed)
 }
 
 // Reset clears all cached data without stopping the cleanup goroutine.
@@ -257,20 +340,27 @@ func (s *MemoryStore) Reset() {
 // Close stops the cleanup goroutine and clears data.
 func (s *MemoryStore) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !s.stopped {
 		s.stopped = true
 		close(s.stopChan)
-		s.data = nil
-		s.compressed = nil
-		s.expansions = nil
 	}
+	s.mu.Unlock()
+
+	// Wait for cleanup goroutine to exit before niling maps.
+	s.wg.Wait()
+
+	s.mu.Lock()
+	s.data = nil
+	s.compressed = nil
+	s.expansions = nil
+	s.mu.Unlock()
+
 	return nil
 }
 
 // cleanup periodically removes expired entries.
 func (s *MemoryStore) cleanup() {
+	defer s.wg.Done()
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 

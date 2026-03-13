@@ -31,67 +31,20 @@ const (
 // ANTHROPIC API KEY SETUP
 // =============================================================================
 
-// setupAnthropicAPIKey interactively prompts for the Anthropic API key if not set.
-// For claude_code agent, the key is optional since we can capture it from requests.
-// For agents with skip_api_key_setup: true, the prompt is skipped entirely.
+// setupAnthropicAPIKey checks if the gateway needs an explicit API key.
+// The gateway captures auth from agent requests (OAuth capture), so an explicit
+// API key is only needed for the preemptive summarizer when using external_provider
+// strategy. All agents handle their own auth — the gateway just proxies it.
 // Returns true if setup was successful or skipped, false if user cancelled.
 func setupAnthropicAPIKey(ac *AgentConfig) bool {
-	// Check if already set
+	// Already set — nothing to do
 	if os.Getenv("ANTHROPIC_API_KEY") != "" {
 		return true
 	}
 
-	agentName := ""
-	if ac != nil {
-		agentName = ac.Agent.Name
-
-		// Agent handles its own API key configuration (e.g., OpenClaw)
-		if ac.Agent.SkipAPIKeySetup {
-			return true
-		}
-	}
-
-	fmt.Println()
-	printHeader("API Key Setup")
-	fmt.Println()
-
-	// For claude_code, API key is optional - we can capture from /login credentials
-	if agentName == "claude_code" {
-		printInfo("Using credentials from Claude Code /login (no API key prompt)")
-		fmt.Println()
-		fmt.Println("  Note: Make sure you're logged into Claude Code with /login")
-		fmt.Println("  The gateway will capture your auth token automatically.")
-		fmt.Println()
-		return true
-	} else {
-		fmt.Println("  ANTHROPIC_API_KEY is required to use Context Gateway.")
-		fmt.Println("  Get your key at: https://console.anthropic.com/settings/keys")
-		fmt.Println()
-	}
-
-	// Prompt for key
-	apiKey := promptOptional("Enter your Anthropic API key (sk-ant-...): ")
-	if apiKey == "" {
-		if agentName == "claude_code" {
-			printInfo("No key entered - will use credentials from Claude Code /login")
-			return true
-		}
-		printError("API key is required for this agent. Cannot continue without it.")
-		return false
-	}
-
-	// Validate format (basic check)
-	if !strings.HasPrefix(apiKey, "sk-ant-") {
-		printWarn("Key doesn't start with 'sk-ant-'. Proceeding anyway...")
-	}
-
-	// Ask for scope
-	scope := promptCredentialScope("Save API key for")
-	persistCredential("ANTHROPIC_API_KEY", apiKey, scope)
-
-	_ = os.Setenv("ANTHROPIC_API_KEY", apiKey)
-	printSuccess("API key configured")
-
+	// All agents delegate auth to the agent itself.
+	// The gateway captures the auth token from the agent's outgoing requests.
+	// No explicit API key prompt needed.
 	return true
 }
 
@@ -296,12 +249,21 @@ func removeCredentialFromEnvFile(envPath, key string) {
 	if len(lines) > 0 {
 		output += "\n"
 	}
-	cleanPath := filepath.Clean(envPath)
+	_ = safeWriteUnderHome(envPath, []byte(output))
+}
+
+// safeWriteUnderHome writes data to path only if it's inside the user's home directory.
+// filepath.Clean is applied at point-of-use to prevent path traversal.
+func safeWriteUnderHome(path string, data []byte) error {
 	homeDir, err := os.UserHomeDir()
-	if err != nil || !strings.HasPrefix(cleanPath, filepath.Clean(homeDir)) {
-		return // refuse to write outside home directory
+	if err != nil {
+		return err
 	}
-	_ = os.WriteFile(cleanPath, []byte(output), 0600)
+	clean := filepath.Clean(path)
+	if !strings.HasPrefix(clean, filepath.Clean(homeDir)+string(filepath.Separator)) {
+		return fmt.Errorf("path %q is outside home directory", path)
+	}
+	return os.WriteFile(clean, data, 0600) //#nosec G703 -- path is filepath.Clean'd and prefix-checked against HomeDir above
 }
 
 // =============================================================================

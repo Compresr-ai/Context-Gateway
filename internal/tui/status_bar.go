@@ -352,7 +352,7 @@ func (sb *StatusBar) formatTitleStatusLocked() string {
 	if s.IsAdmin {
 		return fmt.Sprintf("%s | unlimited | %s", base, formatTier(s.Tier))
 	}
-	return fmt.Sprintf("%s | $%.2f remaining | %s", base, s.CreditsRemainingUSD, formatTier(s.Tier))
+	return fmt.Sprintf("%s | $%.2f | %s", base, s.CreditsRemainingUSD, formatTier(s.Tier))
 }
 
 // RenderBox prints the dashboard URL at startup.
@@ -364,38 +364,29 @@ func (sb *StatusBar) RenderBox() {
 	sb.renderDashboardURL()
 }
 
-// RenderStartup prints plan, usage, and session info in green at startup.
+// RenderStartup prints a clean startup block with name, port, plan, and session info.
 func (sb *StatusBar) RenderStartup(sessionName string) {
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
 
-	// Plan
-	if sb.enabled && sb.status != nil {
-		s := sb.status
-		tier := formatTier(s.Tier)
-		fmt.Printf("%s[OK]%s %sPlan:%s %s\n", ColorGreen, ColorReset, ColorGreen, ColorReset, tier)
-
-		// Usage
-		if s.Tier == "enterprise" || s.IsAdmin {
-			fmt.Printf("%s[OK]%s %sUsage this month:%s $%.2f (pay-as-you-go)\n",
-				ColorGreen, ColorReset, ColorGreen, ColorReset, s.CreditsUsedThisMonth)
-		} else {
-			fmt.Printf("%s[OK]%s %sCredits:%s $%.2f remaining\n",
-				ColorGreen, ColorReset, ColorGreen, ColorReset, s.CreditsRemainingUSD)
-		}
+	// Context Gateway header
+	fmt.Printf("\n  %s%sContext Gateway%s", ColorBrand, ColorBold, ColorReset)
+	if sb.dashboardPort > 0 {
+		fmt.Printf("  %s:%d%s", ColorDim, sb.dashboardPort, ColorReset)
 	}
+	fmt.Println()
 
 	// Session
 	if sessionName != "" {
-		fmt.Printf("%s[OK]%s %sSession:%s %s\n", ColorGreen, ColorReset, ColorGreen, ColorReset, sessionName)
+		fmt.Printf("  %s✓%s %sSession:%s %s\n", ColorGreen, ColorReset, ColorDim, ColorReset, sessionName)
 	}
 }
 
-// renderDashboardURL prints the cost dashboard URL if port is set.
+// renderDashboardURL prints the dashboard URL (always on fixed port 18080).
 func (sb *StatusBar) renderDashboardURL() {
 	if sb.dashboardPort > 0 {
-		fmt.Printf("%s[OK]%s %sCost dashboard:%s http://localhost:%d/costs/\n",
-			ColorGreen, ColorReset, ColorGreen, ColorReset, sb.dashboardPort)
+		fmt.Printf("  %s✓%s %sDashboard:%s http://localhost:18080/dashboard/\n",
+			ColorGreen, ColorReset, ColorDim, ColorReset)
 	}
 }
 
@@ -408,21 +399,23 @@ func (sb *StatusBar) RenderSummary() {
 	if sb.enabled && sb.status != nil {
 		s := sb.status
 		tier := formatTier(s.Tier)
-		PrintInfo(fmt.Sprintf("Plan: %s%s%s", ColorBold, tier, ColorReset))
+		fmt.Printf("  %s·%s Plan: %s%s%s\n", ColorDim, ColorReset, ColorBold, tier, ColorReset)
 
 		if s.Tier == "enterprise" || s.IsAdmin {
-			PrintInfo(fmt.Sprintf("Usage this month: $%.2f (pay-as-you-go)", s.CreditsUsedThisMonth))
+			fmt.Printf("  %s·%s Usage this month: $%.2f (pay-as-you-go)\n",
+				ColorDim, ColorReset, s.CreditsUsedThisMonth)
 		} else {
 			balanceColor := getBalanceColor(s.CreditsRemainingUSD)
 			if s.MonthlyBudgetUSD > 0 {
-				totalCredits, usedPercent, remainingPercent := calcCreditPercents(s)
-				PrintInfo(fmt.Sprintf("Credits: %s$%.2f%s / $%.2f  %s %.1f%% remaining",
+				totalCredits := s.CreditsRemainingUSD + s.CreditsUsedThisMonth
+				fmt.Printf("  %s·%s Credits: %s$%.2f%s / $%.2f\n",
+					ColorDim, ColorReset,
 					balanceColor, s.CreditsRemainingUSD, ColorReset,
-					totalCredits,
-					renderMiniBar(usedPercent, 15), remainingPercent))
+					totalCredits)
 			} else {
-				PrintInfo(fmt.Sprintf("Credits: %s$%.2f%s remaining",
-					balanceColor, s.CreditsRemainingUSD, ColorReset))
+				fmt.Printf("  %s·%s Credits: %s$%.2f%s\n",
+					ColorDim, ColorReset,
+					balanceColor, s.CreditsRemainingUSD, ColorReset)
 			}
 		}
 	}
@@ -432,30 +425,11 @@ func (sb *StatusBar) RenderSummary() {
 		globalCost := sb.costSource.GetGlobalCost()
 		globalCap := sb.costSource.GetGlobalCap()
 		if globalCap > 0 {
-			spendPercent := (globalCost / globalCap) * 100
-			if spendPercent > 100 {
-				spendPercent = 100
-			}
-			PrintInfo(fmt.Sprintf("Session spend: $%.4f / $%.2f  %s %.0f%%",
-				globalCost, globalCap,
-				renderMiniBar(spendPercent, 15), spendPercent))
+			fmt.Printf("  %s·%s Session spend: $%.4f / $%.2f\n",
+				ColorDim, ColorReset, globalCost, globalCap)
 		} else {
-			PrintInfo(fmt.Sprintf("Session spend: $%.4f", globalCost))
-		}
-	}
-
-	// Compression savings — always show
-	if sb.savingsSource != nil {
-		tokensSaved, costSaved, compressed, total := sb.savingsSource.GetSavingsSummary()
-		if tokensSaved > 0 {
-			PrintSuccess(fmt.Sprintf("Savings: %s%d tokens%s saved (%s$%.4f%s) across %d/%d requests",
-				ColorGreen, tokensSaved, ColorReset,
-				ColorGreen, costSaved, ColorReset,
-				compressed, total))
-		} else if total > 0 {
-			PrintInfo(fmt.Sprintf("Savings: %d requests (no savings yet)", total))
-		} else {
-			PrintInfo("Savings: no compression requests this session")
+			fmt.Printf("  %s·%s Session spend: $%.4f\n",
+				ColorDim, ColorReset, globalCost)
 		}
 	}
 }
@@ -540,12 +514,12 @@ func (sb *StatusBar) formatStatusLine() string {
 	}
 
 	// Append savings if available
-	if sb.savingsSource != nil {
-		tokensSaved, costSaved, _, _ := sb.savingsSource.GetSavingsSummary()
-		if tokensSaved > 0 {
-			line += fmt.Sprintf(" │ %s↓ %d tok saved ($%.4f)%s", ColorGreen, tokensSaved, costSaved, ColorReset)
-		}
-	}
+	// if sb.savingsSource != nil {
+	// 	tokensSaved, costSaved, _, _ := sb.savingsSource.GetSavingsSummary()
+	// 	if tokensSaved > 0 {
+	// 		line += fmt.Sprintf(" │ %s↓ %d tok saved ($%.4f)%s", ColorGreen, tokensSaved, costSaved, ColorReset)
+	// 	}
+	// }
 
 	return line
 }
@@ -591,19 +565,19 @@ func (sb *StatusBar) formatCompactLine() string {
 
 	// Savings (if available)
 	savingsPart := ""
-	if sb.savingsSource != nil {
-		tokensSaved, costSaved, _, _ := sb.savingsSource.GetSavingsSummary()
-		if tokensSaved > 0 {
-			savingsPart = fmt.Sprintf(" │ %sSaved: %d tok ($%.4f)%s",
-				ColorGreen, tokensSaved, costSaved, ColorReset)
-		}
-	}
+	// if sb.savingsSource != nil {
+	// 	tokensSaved, costSaved, _, _ := sb.savingsSource.GetSavingsSummary()
+	// 	if tokensSaved > 0 {
+	// 		savingsPart = fmt.Sprintf(" │ %sSaved: %d tok ($%.4f)%s",
+	// 			ColorGreen, tokensSaved, costSaved, ColorReset)
+	// 	}
+	// }
 
 	return fmt.Sprintf("%s[%s%s%s]%s", ColorDim, creditsPart, spendPart, savingsPart, ColorReset)
 }
 
 // FormatTitleStatus returns a plain-text status string for the terminal title bar.
-// Format: "Context Gateway | port:18080 | $12.50 remaining | Pro"
+// Format: "Context Gateway | port:18081 | $12.50 | Pro"
 // This version takes explicit port/session args for initial display before fields are set.
 func (sb *StatusBar) FormatTitleStatus(port int, session string) string {
 	sb.mu.RLock()

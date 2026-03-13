@@ -60,7 +60,7 @@ agent:
 # ------
 # - Uses fast_setup.yaml automatically (can be overridden with --config flag)
 # - Fast Setup includes all optimizations: summarization + compression + discovery
-# - Gateway port defaults to 18080 or can be overridden with --port flag
+# - Gateway port defaults to 18081 or can be overridden with --port flag
 # - All environment variable substitution uses ${VAR} syntax
 # - Variables are sourced from .env file at project root
 # - Gateway starts automatically if not running (unless --proxy skip flag is used)

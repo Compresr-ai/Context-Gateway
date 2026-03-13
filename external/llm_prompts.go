@@ -76,6 +76,37 @@ Compress the tool output above, preserving essential structure and key informati
 }
 
 // =============================================================================
+// Structured Tail Prompts (verbatim prefix preserved, only tail compressed)
+// =============================================================================
+
+// SystemPromptStructuredTail is used when the beginning of structured output
+// has been preserved verbatim and only the tail needs compression.
+const SystemPromptStructuredTail = `You are compressing the TAIL portion of a structured data output.
+The BEGINNING of this output has already been preserved verbatim and will be shown to the user.
+Your job is to summarize only the remaining data.
+
+Guidelines:
+1. PRESERVE all unique keys/field names not already visible in the preserved prefix
+2. PRESERVE counts and aggregates (e.g., "15 items total, 12 completed")
+3. PRESERVE error messages, status values, and important identifiers
+4. SUMMARIZE repetitive structures (e.g., "N more entries with same schema as above")
+5. Do NOT repeat information already shown in the verbatim prefix
+6. OUTPUT only the summary - no explanations or meta-commentary
+
+Target: Concise summary of remaining data that complements the verbatim prefix.`
+
+// UserPromptStructuredTail formats the compression prompt for a structured tail.
+func UserPromptStructuredTail(format, toolName, tailContent string) string {
+	return fmt.Sprintf(`Format: %s
+Tool Name: %s
+
+Remaining data to summarize (beginning was preserved verbatim):
+%s
+
+Summarize the remaining data above.`, format, toolName, tailContent)
+}
+
+// =============================================================================
 // Request Builders
 // =============================================================================
 

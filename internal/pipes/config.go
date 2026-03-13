@@ -7,7 +7,7 @@
 //   - ToolOutput:    Compress tool results, store originals for expand_context
 //   - ToolDiscovery: Filter irrelevant tools
 //
-// Each pipe has a STRATEGY: "passthrough" (noop) or "compresr" (call compression service).
+// Each pipe has a STRATEGY that controls how it processes requests.
 //
 // NOTE: This file defines pipe-specific configuration types.
 // The main Config struct in config/ imports and uses these types.
@@ -25,15 +25,17 @@ import (
 // Strategy constants for pipe execution.
 const (
 	StrategyPassthrough      = "passthrough"       // Do nothing, pass through unchanged
-	StrategyAPI              = "api"               // Call Compresr API with hybrid search fallback
-	StrategyCompresr         = "compresr"          // Deprecated: alias for StrategyAPI (backward compat)
-	StrategySimple           = "simple"            // Simple compression (first N words)
 	StrategyExternalProvider = "external_provider" // Call external LLM provider (OpenAI/Anthropic) directly
 	StrategyRelevance        = "relevance"         // Local relevance-based tool filtering (no external API)
-	StrategyToolSearch       = "tool-search"       // Local regex-based tool search (no external API)
+	StrategyToolSearch       = "tool-search"       // Universal dispatcher: defers all tools, uses Compresr API for search
+
+	// Tool output specific strategies (not used for tool discovery)
+	StrategyAPI      = "api"      // Call Compresr API (tool output compression)
+	StrategyCompresr = "compresr" // Alias for StrategyAPI (backward compat)
+	StrategySimple   = "simple"   // Simple compression (first N words)
 )
 
-// IsAPIStrategy returns true if the strategy is API-based (includes backward compat "compresr").
+// IsAPIStrategy returns true if the strategy is API-based (tool output only).
 func IsAPIStrategy(strategy string) bool {
 	return strategy == StrategyAPI || strategy == StrategyCompresr
 }
@@ -138,6 +140,10 @@ type ToolOutputConfig struct {
 	EnableExpandContext bool `yaml:"enable_expand_context"` // Inject expand_context tool
 	IncludeExpandHint   bool `yaml:"include_expand_hint"`   // Add hint to compressed content
 
+	// BypassCostCheck disables the automatic cost-based skip (useful for testing/benchmarking).
+	// When false (default), cheap models (e.g. gpt-4o-mini) are skipped automatically.
+	BypassCostCheck bool `yaml:"bypass_cost_check"`
+
 	// Skip compression for specific tools (e.g., Read, Edit — needed for exact matching)
 	SkipTools []string `yaml:"skip_tools,omitempty"`
 }
@@ -153,10 +159,10 @@ func (t *ToolOutputConfig) Validate() error {
 	if t.Strategy == StrategySimple {
 		return nil
 	}
-	if t.Strategy == StrategyCompresr {
+	if IsAPIStrategy(t.Strategy) {
 		// Provider or Compresr.Endpoint required
 		if t.Provider == "" && t.Compresr.Endpoint == "" {
-			return fmt.Errorf("tool_output: provider or compresr.endpoint required when strategy=compresr")
+			return fmt.Errorf("tool_output: provider or compresr.endpoint required when strategy=%s", t.Strategy)
 		}
 		return nil
 	}
@@ -177,24 +183,25 @@ func (t *ToolOutputConfig) Validate() error {
 // ToolDiscoveryConfig configures tool filtering.
 type ToolDiscoveryConfig struct {
 	Enabled          bool   `yaml:"enabled"`           // Enable this pipe
-	Strategy         string `yaml:"strategy"`          // passthrough | compresr | relevance
+	Strategy         string `yaml:"strategy"`          // passthrough | relevance | tool-search
 	FallbackStrategy string `yaml:"fallback_strategy"` // Fallback when primary fails
 
 	// Provider reference (preferred over inline Compresr config)
 	// References a provider defined in the top-level "providers" section.
 	Provider string `yaml:"provider,omitempty"`
 
-	// Compresr strategy config
+	// Compresr API config (used by tool-search strategy for API-backed search)
 	Compresr CompresrConfig `yaml:"compresr,omitempty"`
 
 	// Filtering settings
 	MinTools    int      `yaml:"min_tools"`    // Below this count, no filtering (default: 5)
 	MaxTools    int      `yaml:"max_tools"`    // Keep at most this many tools (default: 25)
 	TargetRatio float64  `yaml:"target_ratio"` // Keep this ratio of tools (e.g., 0.8 = 80%)
+	MinRemoval  int      `yaml:"min_removal"`  // Skip filtering if fewer than N tools removed (default: 3, 0 = always filter)
 	AlwaysKeep  []string `yaml:"always_keep"`  // Tool names to never filter out
 
-	// Hybrid search fallback (allows LLM to request filtered-out tools)
-	EnableSearchFallback bool   `yaml:"enable_search_fallback"` // Inject gateway_search_tools (default: true when filtering)
+	// Search fallback (allows LLM to request filtered-out tools via gateway_search_tools)
+	EnableSearchFallback bool   `yaml:"enable_search_fallback"` // Inject gateway_search_tools (default: true for tool-search)
 	SearchToolName       string `yaml:"search_tool_name"`       // Name of the search tool (default: "gateway_search_tools")
 	MaxSearchResults     int    `yaml:"max_search_results"`     // Max tools returned by search (default: 5)
 }
@@ -202,25 +209,20 @@ type ToolDiscoveryConfig struct {
 // Validate validates tool discovery pipe config.
 func (d *ToolDiscoveryConfig) Validate() error {
 	if !d.Enabled {
-		return nil // Disabled pipes don't need strategy
-	}
-	if d.Strategy == "" || d.Strategy == StrategyPassthrough {
 		return nil
 	}
-	if d.Strategy == StrategyRelevance {
-		return nil // No external dependencies needed
-	}
-	if d.Strategy == StrategyToolSearch {
-		return nil // Local regex-based search, no external dependencies
-	}
-	if d.Strategy == StrategyCompresr {
-		// Provider or Compresr.Endpoint required
-		if d.Provider == "" && d.Compresr.Endpoint == "" {
-			return fmt.Errorf("tool_discovery: provider or compresr.endpoint required when strategy=compresr")
-		}
+	switch d.Strategy {
+	case "", StrategyPassthrough:
 		return nil
+	case StrategyRelevance:
+		return nil // Local keyword-based filtering, no external dependencies
+	case StrategyCompresr:
+		return nil // Compresr API-backed filtering, falls back to local relevance if unavailable
+	case StrategyToolSearch:
+		return nil // Universal dispatcher: defers all tools, uses Compresr API for search
+	default:
+		return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', 'compresr', or 'tool-search'", d.Strategy)
 	}
-	return fmt.Errorf("tool_discovery: unknown strategy %q, must be 'passthrough', 'relevance', 'tool-search', or 'compresr'", d.Strategy)
 }
 
 // =============================================================================

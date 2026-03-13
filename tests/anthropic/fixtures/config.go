@@ -43,13 +43,13 @@ func TestConfig(strategy string, minBytes int, enableExpand bool) *config.Config
 	return &config.Config{
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            strategy,
-				FallbackStrategy:    config.StrategyPassthrough,
-				MinBytes:            minBytes,
+				Enabled:                true,
+				Strategy:               strategy,
+				FallbackStrategy:       config.StrategyPassthrough,
+				MinBytes:               minBytes,
 				TargetCompressionRatio: 0.5,
-				IncludeExpandHint:   enableExpand,
-				EnableExpandContext: enableExpand,
+				IncludeExpandHint:      enableExpand,
+				EnableExpandContext:    enableExpand,
 				Compresr: config.CompresrConfig{
 					Endpoint: "/api/compress",
 					Timeout:  5 * time.Second,
@@ -89,13 +89,13 @@ func TestConfigWithModelAndQuery(strategy string, model string, minBytes int, en
 	return &config.Config{
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            strategy,
-				FallbackStrategy:    config.StrategyPassthrough,
-				MinBytes:            minBytes,
+				Enabled:                true,
+				Strategy:               strategy,
+				FallbackStrategy:       config.StrategyPassthrough,
+				MinBytes:               minBytes,
 				TargetCompressionRatio: 0.5,
-				IncludeExpandHint:   enableExpand,
-				EnableExpandContext: enableExpand,
+				IncludeExpandHint:      enableExpand,
+				EnableExpandContext:    enableExpand,
 				Compresr: config.CompresrConfig{
 					Endpoint:      "/api/compress/tool-output",
 					Model:         model,

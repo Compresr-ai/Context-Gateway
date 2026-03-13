@@ -219,9 +219,16 @@ func TestExpandContext_SmallContent_NoCompression(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Content should NOT have shadow reference (not compressed)
-	assert.NotContains(t, string(capturedRequest), "<<<SHADOW:",
-		"Small content should NOT be compressed (no shadow reference)")
+	// Content should NOT have shadow reference in the messages (not compressed).
+	// Note: the expand_context tool description legitimately contains "<<<SHADOW:shadow_xxx>>>"
+	// so we scope this check to the messages content only.
+	var parsedReq map[string]json.RawMessage
+	if err := json.Unmarshal(capturedRequest, &parsedReq); err == nil {
+		if msgsJSON, ok := parsedReq["messages"]; ok {
+			assert.NotContains(t, string(msgsJSON), "<<<SHADOW:",
+				"Small content should NOT be compressed (no shadow reference in messages)")
+		}
+	}
 	// Content should have the actual data (JSON-escaped is fine)
 	assert.Contains(t, string(capturedRequest), "status",
 		"Small content should be passed through without compression")

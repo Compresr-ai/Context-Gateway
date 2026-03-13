@@ -160,6 +160,8 @@ type CompressionComparison struct {
 	MinThreshold     int     `json:"min_threshold,omitempty"`     // Min byte threshold used
 	MaxThreshold     int     `json:"max_threshold,omitempty"`     // Max byte threshold used
 	CompressionModel string  `json:"compression_model,omitempty"` // Compression model used (e.g., "toc_latte_v1", "tdc_coldbrew_v1")
+	Query            string  `json:"query,omitempty"`             // User query used for compression context
+	QueryAgnostic    bool    `json:"query_agnostic,omitempty"`    // Whether compression used empty query (no relevance scoring)
 	// Large/variable fields at end for readability
 	AllTools          []string `json:"all_tools,omitempty"`
 	SelectedTools     []string `json:"selected_tools,omitempty"`

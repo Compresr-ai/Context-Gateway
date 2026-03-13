@@ -1,4 +1,4 @@
-.PHONY: build run test clean docker dev dev-debug embed-prep
+.PHONY: build run test clean docker dev dev-debug embed-prep docker-test-build docker-test-up docker-test-down docker-test-go docker-test-agents docker-test-e2e
 
 # Build variables
 BINARY_NAME=context-gateway
@@ -113,21 +113,88 @@ build-all:
 	GOOS=darwin GOARCH=arm64 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 $(MAIN_PATH)
 	GOOS=windows GOARCH=amd64 $(GOBUILD) -ldflags="$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe $(MAIN_PATH)
 
+# =============================================================================
+# Docker E2E Test Infrastructure
+# =============================================================================
+
+DOCKER_COMPOSE_TEST=docker compose -f docker/docker-compose.test.yaml
+
+# Build all Docker test images
+docker-test-build:
+	@echo "Building Docker test images..."
+	$(DOCKER_COMPOSE_TEST) build
+
+# Start provider + gateway containers (no agents)
+docker-test-up:
+	@echo "Starting test infrastructure..."
+	$(DOCKER_COMPOSE_TEST) up -d ollama litellm gateway
+	@echo "Waiting for services to be healthy..."
+	@sleep 10
+	@echo "Services started. Run 'make docker-test-go' or 'make docker-test-agents'"
+
+# Stop and remove all test containers
+docker-test-down:
+	@echo "Stopping test infrastructure..."
+	$(DOCKER_COMPOSE_TEST) down -v --remove-orphans
+
+# Run ALL Go integration tests against Docker services
+# Cloud tests (Anthropic, OpenAI, Gemini) auto-skip without API keys
+docker-test-go:
+	@echo "Running ALL Go integration tests..."
+	OLLAMA_URL=http://localhost:11434 \
+	LITELLM_URL=http://localhost:4000 \
+	LITELLM_API_KEY=sk-test-litellm-key \
+	$(GOTEST) -v \
+		./tests/ollama/integration/... \
+		./tests/litellm/integration/... \
+		./tests/bedrock/integration/... \
+		./tests/agents/integration/... \
+		./tests/anthropic/integration/... \
+		./tests/openai/integration/... \
+		./tests/gemini/integration/...
+
+# Run agent simulator containers
+docker-test-agents:
+	@echo "Running agent simulators..."
+	$(DOCKER_COMPOSE_TEST) up --exit-code-from agent-ollama-direct agent-ollama-direct
+	$(DOCKER_COMPOSE_TEST) up --exit-code-from agent-litellm-proxy agent-litellm-proxy
+	$(DOCKER_COMPOSE_TEST) up --exit-code-from agent-bedrock agent-bedrock
+	$(DOCKER_COMPOSE_TEST) up --exit-code-from agent-cursor agent-cursor
+	$(DOCKER_COMPOSE_TEST) up --exit-code-from agent-opencode agent-opencode
+	@echo "All agent tests passed"
+
+# Full E2E pipeline: build -> up -> test -> agents -> down
+docker-test-e2e: docker-test-build docker-test-up
+	@echo "=== Running full E2E test pipeline ==="
+	@sleep 5
+	$(MAKE) docker-test-go || ($(MAKE) docker-test-down && exit 1)
+	$(MAKE) docker-test-agents || ($(MAKE) docker-test-down && exit 1)
+	$(MAKE) docker-test-down
+	@echo "=== E2E test pipeline complete ==="
+
 # Help
 help:
 	@echo "Available targets:"
-	@echo "  dev          - Build and run in foreground (default config)"
-	@echo "  dev-debug    - Build and run in foreground with debug logging"
-	@echo "  build        - Build the binary"
-	@echo "  run          - Run the application"
-	@echo "  run-config   - Run with config file"
-	@echo "  test         - Run tests"
-	@echo "  test-coverage- Run tests with coverage"
-	@echo "  clean        - Clean build artifacts"
-	@echo "  deps         - Download dependencies"
-	@echo "  docker       - Build Docker image"
-	@echo "  docker-up    - Start with Docker Compose"
-	@echo "  docker-down  - Stop Docker Compose"
-	@echo "  fmt          - Format code"
-	@echo "  lint         - Lint code"
-	@echo "  build-all    - Build for all platforms"
+	@echo "  dev              - Build and run in foreground (default config)"
+	@echo "  dev-debug        - Build and run in foreground with debug logging"
+	@echo "  build            - Build the binary"
+	@echo "  run              - Run the application"
+	@echo "  run-config       - Run with config file"
+	@echo "  test             - Run tests"
+	@echo "  test-coverage    - Run tests with coverage"
+	@echo "  clean            - Clean build artifacts"
+	@echo "  deps             - Download dependencies"
+	@echo "  docker           - Build Docker image"
+	@echo "  docker-up        - Start with Docker Compose"
+	@echo "  docker-down      - Stop Docker Compose"
+	@echo "  fmt              - Format code"
+	@echo "  lint             - Lint code"
+	@echo "  build-all        - Build for all platforms"
+	@echo ""
+	@echo "Docker E2E Testing:"
+	@echo "  docker-test-e2e    - Full E2E pipeline (build, up, test, down)"
+	@echo "  docker-test-build  - Build Docker test images"
+	@echo "  docker-test-up     - Start provider + gateway containers"
+	@echo "  docker-test-down   - Stop all test containers"
+	@echo "  docker-test-go     - Run Go integration tests"
+	@echo "  docker-test-agents - Run agent simulator containers"

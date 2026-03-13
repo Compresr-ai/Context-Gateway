@@ -35,7 +35,7 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 			name: "valid config",
 			config: preemptive.SummarizerConfig{
 				Model:           "claude-haiku-4-5",
-				ProviderKey:       "test-key",
+				ProviderKey:     "test-key",
 				MaxTokens:       4096,
 				Timeout:         60 * time.Second,
 				KeepRecentCount: 10,
@@ -45,10 +45,10 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 		{
 			name: "missing model",
 			config: preemptive.SummarizerConfig{
-				Model:     "",
+				Model:       "",
 				ProviderKey: "test-key",
-				MaxTokens: 4096,
-				Timeout:   60 * time.Second,
+				MaxTokens:   4096,
+				Timeout:     60 * time.Second,
 			},
 			expectError: true,
 			errorMsg:    "model",
@@ -56,20 +56,20 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 		{
 			name: "missing api key (optional - captured from requests)",
 			config: preemptive.SummarizerConfig{
-				Model:     "claude-haiku-4-5",
+				Model:       "claude-haiku-4-5",
 				ProviderKey: "",
-				MaxTokens: 4096,
-				Timeout:   60 * time.Second,
+				MaxTokens:   4096,
+				Timeout:     60 * time.Second,
 			},
 			expectError: false,
 		},
 		{
 			name: "invalid max tokens",
 			config: preemptive.SummarizerConfig{
-				Model:     "claude-haiku-4-5",
+				Model:       "claude-haiku-4-5",
 				ProviderKey: "test-key",
-				MaxTokens: 0,
-				Timeout:   60 * time.Second,
+				MaxTokens:   0,
+				Timeout:     60 * time.Second,
 			},
 			expectError: true,
 			errorMsg:    "max_tokens",
@@ -77,10 +77,10 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 		{
 			name: "zero timeout",
 			config: preemptive.SummarizerConfig{
-				Model:     "claude-haiku-4-5",
+				Model:       "claude-haiku-4-5",
 				ProviderKey: "test-key",
-				MaxTokens: 4096,
-				Timeout:   0,
+				MaxTokens:   4096,
+				Timeout:     0,
 			},
 			expectError: true,
 			errorMsg:    "timeout",
@@ -90,10 +90,10 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 			config: preemptive.SummarizerConfig{
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
-					Endpoint: "/api/compress/history/",
-					AuthParam:   "cmp_test-key",
-					Model:    "hcc_espresso_v1",
-					Timeout:  60 * time.Second,
+					Endpoint:  "/api/compress/history/",
+					AuthParam: "cmp_test-key",
+					Model:     "hcc_espresso_v1",
+					Timeout:   60 * time.Second,
 				},
 			},
 			expectError: false,
@@ -112,10 +112,10 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 			config: preemptive.SummarizerConfig{
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
-					Endpoint: "",
-					AuthParam:   "cmp_test-key",
-					Model:    "hcc_espresso_v1",
-					Timeout:  60 * time.Second,
+					Endpoint:  "",
+					AuthParam: "cmp_test-key",
+					Model:     "hcc_espresso_v1",
+					Timeout:   60 * time.Second,
 				},
 			},
 			expectError: true,
@@ -126,10 +126,10 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 			config: preemptive.SummarizerConfig{
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
-					Endpoint: "/api/compress/history/",
-					AuthParam:   "",
-					Model:    "hcc_espresso_v1",
-					Timeout:  60 * time.Second,
+					Endpoint:  "/api/compress/history/",
+					AuthParam: "",
+					Model:     "hcc_espresso_v1",
+					Timeout:   60 * time.Second,
 				},
 			},
 			expectError: true,
@@ -140,10 +140,10 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 			config: preemptive.SummarizerConfig{
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
-					Endpoint: "/api/compress/history/",
-					AuthParam:   "cmp_test-key",
-					Model:    "",
-					Timeout:  60 * time.Second,
+					Endpoint:  "/api/compress/history/",
+					AuthParam: "cmp_test-key",
+					Model:     "",
+					Timeout:   60 * time.Second,
 				},
 			},
 			expectError: true,
@@ -183,7 +183,7 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 func TestSummarizer_Creation(t *testing.T) {
 	cfg := preemptive.SummarizerConfig{
 		Model:           "claude-haiku-4-5",
-		ProviderKey:       "test-api-key",
+		ProviderKey:     "test-api-key",
 		Endpoint:        "https://api.anthropic.com/v1/messages",
 		MaxTokens:       4096,
 		Timeout:         60 * time.Second,
@@ -198,10 +198,10 @@ func TestSummarizer_CreationWithAPIStrategy(t *testing.T) {
 	cfg := preemptive.SummarizerConfig{
 		Strategy: preemptive.StrategyCompresr,
 		Compresr: &preemptive.CompresrConfig{
-			Endpoint: "/api/compress/history/",
-			AuthParam:   "cmp_test-key",
-			Model:    "hcc_espresso_v1",
-			Timeout:  60 * time.Second,
+			Endpoint:  "/api/compress/history/",
+			AuthParam: "cmp_test-key",
+			Model:     "hcc_espresso_v1",
+			Timeout:   60 * time.Second,
 		},
 	}
 
@@ -223,7 +223,7 @@ func TestSummarizer_CreationWithDefaults(t *testing.T) {
 func TestSummarizer_CustomSystemPrompt(t *testing.T) {
 	cfg := preemptive.SummarizerConfig{
 		Model:        "claude-haiku-4-5",
-		ProviderKey:    "test-api-key",
+		ProviderKey:  "test-api-key",
 		MaxTokens:    4096,
 		Timeout:      60 * time.Second,
 		SystemPrompt: "Custom summarization prompt for testing",
@@ -319,10 +319,10 @@ func TestSummarizer_ModelSelection(t *testing.T) {
 	for _, model := range models {
 		t.Run(model, func(t *testing.T) {
 			cfg := preemptive.SummarizerConfig{
-				Model:     model,
+				Model:       model,
 				ProviderKey: "test-api-key",
-				MaxTokens: 4096,
-				Timeout:   60 * time.Second,
+				MaxTokens:   4096,
+				Timeout:     60 * time.Second,
 			}
 
 			summarizer := preemptive.NewSummarizer(cfg)

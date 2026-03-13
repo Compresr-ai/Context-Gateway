@@ -57,14 +57,14 @@ func TestIntegration_CompressionPipeline_WithMockAPI(t *testing.T) {
 	cfg := &config.Config{
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            config.StrategyCompresr,
-				FallbackStrategy:    config.StrategyPassthrough,
-				MinBytes:            100,
-				MaxBytes:            1024 * 1024,
+				Enabled:                true,
+				Strategy:               config.StrategyCompresr,
+				FallbackStrategy:       config.StrategyPassthrough,
+				MinBytes:               100,
+				MaxBytes:               1024 * 1024,
 				TargetCompressionRatio: 0.5,
-				IncludeExpandHint:   true,
-				EnableExpandContext: true,
+				IncludeExpandHint:      true,
+				EnableExpandContext:    true,
 				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,
@@ -157,13 +157,13 @@ func TestIntegration_CompressionPipeline_MultipleToolOutputs(t *testing.T) {
 	cfg := &config.Config{
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            config.StrategyCompresr,
-				FallbackStrategy:    config.StrategyPassthrough,
-				MinBytes:            50,
-				MaxBytes:            1024 * 1024,
+				Enabled:                true,
+				Strategy:               config.StrategyCompresr,
+				FallbackStrategy:       config.StrategyPassthrough,
+				MinBytes:               50,
+				MaxBytes:               1024 * 1024,
 				TargetCompressionRatio: 0.5,
-				EnableExpandContext: true,
+				EnableExpandContext:    true,
 				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,

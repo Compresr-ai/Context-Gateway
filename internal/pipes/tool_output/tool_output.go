@@ -49,7 +49,8 @@ func (p *Pipe) Process(ctx *pipes.PipeContext) ([]byte, error) {
 
 	// Skip compression for cheap models (not economically viable)
 	// This check is automatic - no configuration required
-	if ShouldSkipCompressionForCost(ctx.TargetModel) {
+	// Can be bypassed with bypass_cost_check: true (useful for testing)
+	if !p.bypassCostCheck && ShouldSkipCompressionForCost(ctx.TargetModel) {
 		log.Info().
 			Str("target_model", ctx.TargetModel).
 			Str("cost_tier", GetModelCostTier(ctx.TargetModel)).
@@ -92,29 +93,46 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 		return ctx.OriginalRequest, nil
 	}
 
-	// Determine query based on config:
+	// Determine query for compression context:
 	// - Query-agnostic models (LLM/cmprsr): don't need user query, use empty string
-	// - Query-dependent models (reranker): need user query for relevance scoring
+	// - Query-dependent models (reranker): need query for relevance scoring
+	//
+	// Query extraction strategy (in priority order):
+	// 1. Assistant intent (best: captures WHY the LLM called the tool)
+	// 2. Last user text message (good: captures the user's original request)
+	// 3. Tool name + input summary (fallback: captures what was asked of the tool)
+	// 4. Empty string for query-agnostic models (acceptable: model doesn't use it)
 	var query string
 	if p.IsQueryAgnostic() {
-		// Query-agnostic models (cmprsr, LLM-based): no query needed
 		query = ""
 		log.Debug().
 			Str("model", p.compresrModel).
 			Bool("query_agnostic", true).
 			Msg("tool_output: query-agnostic model, using empty query")
 	} else {
-		// Query-dependent models (reranker): extract last user message
-		query = ctx.Adapter.ExtractUserQuery(ctx.OriginalRequest)
+		// Priority 1: Assistant's reasoning for calling the tool
+		query = ctx.Adapter.ExtractAssistantIntent(ctx.OriginalRequest)
 		if query == "" {
-			// Fallback if no user query found
-			query = "process this tool output"
+			// Priority 2: Last user text message (pre-computed, injected tags stripped)
+			query = ctx.UserQuery
+		}
+		if query == "" {
+			// Priority 3: Build query from tool names being compressed
+			var toolNames []string
+			for _, ext := range extracted {
+				if ext.ToolName != "" {
+					toolNames = append(toolNames, ext.ToolName)
+				}
+			}
+			if len(toolNames) > 0 {
+				query = "tool output from: " + strings.Join(toolNames, ", ")
+			}
 		}
 		log.Debug().
 			Str("model", p.compresrModel).
 			Bool("query_agnostic", false).
 			Int("query_len", len(query)).
-			Msg("tool_output: using user query for relevance scoring")
+			Msg("tool_output: using query for relevance scoring")
 	}
 
 	// Build compression tasks from extracted content
@@ -223,7 +241,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				if p.enableExpandContext {
 					// Full expand_context mode: prefix with shadow ID for retrieval
 					if p.includeExpandHint {
-						cachedFinalContent = fmt.Sprintf(PrefixFormatWithHint, shadowID, cachedCompressed, shadowID)
+						cachedFinalContent = fmt.Sprintf(PrefixFormatWithHint, shadowID, shadowID, cachedCompressed)
 					} else {
 						cachedFinalContent = fmt.Sprintf(PrefixFormat, shadowID, cachedCompressed)
 					}
@@ -251,9 +269,11 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 					Model:             p.getEffectiveModel(),
 				})
 				results = append(results, adapters.CompressedResult{
-					ID:         ext.ID,
-					Compressed: cachedFinalContent,
-					ShadowRef:  cachedShadowRef,
+					ID:           ext.ID,
+					Compressed:   cachedFinalContent,
+					ShadowRef:    cachedShadowRef,
+					MessageIndex: ext.MessageIndex,
+					BlockIndex:   ext.BlockIndex,
 				})
 				p.recordCacheHit()
 				ctx.OutputCompressed = true
@@ -264,40 +284,28 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 
 		p.recordCacheMiss()
 
-		// KV-cache protection: if this content was seen before (exists in original store),
-		// it was already sent to the LLM in a prior request — either uncompressed (because
-		// compression was rejected/failed) or in some other form. Mutating it now would
-		// invalidate the LLM's KV-cache prefix, forcing expensive re-caching.
-		// Only genuinely new content (not in the store) should be compressed.
+		// Store content baseline if not already present.
+		// If content was seen before but has no compressed cache entry, it means
+		// compression failed or was rejected on a prior attempt. Retry compression
+		// rather than permanently skipping — the failure may have been transient
+		// (rate limit, API error), and the token savings from successful compression
+		// outweigh the one-time KV-cache miss.
+		// Successfully compressed content is handled above via the compressed cache hit path.
 		if p.store != nil {
-			if _, seen := p.store.Get(shadowID); seen {
-				log.Debug().
-					Str("tool", ext.ToolName).
-					Str("shadow_id", shadowID[:min(16, len(shadowID))]).
-					Msg("tool_output: seen before (in store), preserving KV-cache prefix")
-				ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, pipes.ToolOutputCompression{
-					ToolName:        ext.ToolName,
-					ToolCallID:      ext.ID,
-					OriginalBytes:   contentSize,
-					CompressedBytes: contentSize,
-					MappingStatus:   "prior_turn_preserved",
-					MinThreshold:    p.minBytes,
-					MaxThreshold:    p.maxBytes,
-					Model:           p.getEffectiveModel(),
-				})
-				continue
+			if _, seen := p.store.Get(shadowID); !seen {
+				_ = p.store.Set(shadowID, ext.Content)
 			}
-			// First time seeing this content — store it as the baseline
-			_ = p.store.Set(shadowID, ext.Content)
 		}
 
 		// Queue for compression — this is genuinely new content
 		tasks = append(tasks, compressionTask{
-			index:    ext.MessageIndex,
-			msg:      message{Content: ext.Content, ToolCallID: ext.ID},
-			toolName: ext.ToolName,
-			shadowID: shadowID,
-			original: ext.Content,
+			index:        ext.MessageIndex,
+			msg:          message{Content: ext.Content, ToolCallID: ext.ID},
+			toolName:     ext.ToolName,
+			shadowID:     shadowID,
+			original:     ext.Content,
+			messageIndex: ext.MessageIndex,
+			blockIndex:   ext.BlockIndex,
 		})
 
 		log.Debug().
@@ -381,7 +389,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 			if p.enableExpandContext {
 				// Full expand_context mode: prefix with shadow ID for retrieval
 				if p.includeExpandHint {
-					finalContent = fmt.Sprintf(PrefixFormatWithHint, result.shadowID, result.compressedContent, result.shadowID)
+					finalContent = fmt.Sprintf(PrefixFormatWithHint, result.shadowID, result.shadowID, result.compressedContent)
 				} else {
 					finalContent = fmt.Sprintf(PrefixFormat, result.shadowID, result.compressedContent)
 				}
@@ -410,9 +418,11 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 			})
 
 			results = append(results, adapters.CompressedResult{
-				ID:         result.toolCallID,
-				Compressed: finalContent,
-				ShadowRef:  shadowRef,
+				ID:           result.toolCallID,
+				Compressed:   finalContent,
+				ShadowRef:    shadowRef,
+				MessageIndex: result.messageIndex,
+				BlockIndex:   result.blockIndex,
 			})
 
 			p.recordCompressionOK(int64(bytesSaved))
@@ -427,6 +437,13 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 				Str("tool", result.toolName).
 				Msg("tool_output: compressed successfully")
 		}
+	}
+
+	// Annotate all compression records with the query used
+	isQueryAgnostic := p.IsQueryAgnostic()
+	for i := range ctx.ToolOutputCompressions {
+		ctx.ToolOutputCompressions[i].Query = query
+		ctx.ToolOutputCompressions[i].QueryAgnostic = isQueryAgnostic
 	}
 
 	// Apply all compressed results back to the request body
@@ -463,6 +480,8 @@ func (p *Pipe) compressBatch(reqCtx context.Context, query, provider, capturedBe
 						originalContent: task.original,
 						success:         false,
 						err:             fmt.Errorf("rate limited"),
+						messageIndex:    task.messageIndex,
+						blockIndex:      task.blockIndex,
 					}
 					continue
 				}
@@ -510,7 +529,7 @@ func (p *Pipe) compressOne(reqCtx context.Context, query, provider, capturedBear
 		compressed = p.CompressSimpleContent(t.original)
 		err = nil
 	default:
-		return compressionResult{index: t.index, success: false, err: fmt.Errorf("unknown strategy: %s", p.strategy)}
+		return compressionResult{index: t.index, success: false, err: fmt.Errorf("unknown strategy: %s", p.strategy), messageIndex: t.messageIndex, blockIndex: t.blockIndex}
 	}
 
 	if err != nil {
@@ -532,13 +551,15 @@ func (p *Pipe) compressOne(reqCtx context.Context, query, provider, capturedBear
 				compressedContent: t.original,
 				success:           true,
 				usedFallback:      true,
+				messageIndex:      t.messageIndex,
+				blockIndex:        t.blockIndex,
 			}
 		}
 
 		if p.store != nil {
 			_ = p.store.Delete(t.shadowID)
 		}
-		return compressionResult{index: t.index, success: false, err: err}
+		return compressionResult{index: t.index, success: false, err: err, messageIndex: t.messageIndex, blockIndex: t.blockIndex}
 	}
 
 	// V2: Don't add expand hint here - prefix is added at send-time
@@ -550,21 +571,17 @@ func (p *Pipe) compressOne(reqCtx context.Context, query, provider, capturedBear
 		originalContent:   t.original,
 		compressedContent: compressed,
 		success:           true,
+		messageIndex:      t.messageIndex,
+		blockIndex:        t.blockIndex,
 	}
 }
 
 // contentHash generates a deterministic shadow ID from content.
 // V2: SHA256(normalize(original)) for consistency (E22)
 func (p *Pipe) contentHash(content string) string {
-	normalized := normalizeContent(content)
-	hash := sha256.Sum256([]byte(normalized))
+	hash := sha256.Sum256([]byte(content))
 	// Use first 16 bytes (32 hex chars) - still 128 bits of entropy
 	return ShadowIDPrefix + hex.EncodeToString(hash[:16])
-}
-
-// normalizeContent performs basic content normalization (V2: E22)
-func normalizeContent(content string) string {
-	return content
 }
 
 // touchOriginal extends the TTL of original content before LLM call (V2)
@@ -658,8 +675,30 @@ func (p *Pipe) compressViaCompresr(query, content, toolName, provider string) (s
 // Uses the api config (endpoint, api_key, model) from the config file.
 // Provider is auto-detected from endpoint URL or can be set explicitly.
 func (p *Pipe) compressViaExternalProvider(reqCtx context.Context, query, content, toolName, capturedBearerToken, capturedBetaHeader string) (string, error) {
+	// Structured data prefix: detect format and extract verbatim prefix.
+	// When content starts with JSON/YAML/XML, preserve the first minBytes verbatim
+	// so the downstream model can parse the structure. Only the tail goes to LLM.
+	// Note: content here is always > minBytes (smaller content is filtered earlier).
+	// ExtractVerbatimPrefix handles the case where content <= minBytes*2 (passthrough).
+	var verbatimPrefix, structuredFormat string
+	format, _ := DetectStructuredFormat(content)
+	if format != "" {
+		verbatim, rest := ExtractVerbatimPrefix(content, format, p.minBytes)
+		if rest == "" {
+			// Entire content fits in prefix — passthrough (triggers "ineffective" fallback)
+			return content, nil
+		}
+		verbatimPrefix = verbatim
+		structuredFormat = format
+		content = rest // only compress the tail
+	}
+
 	var systemPrompt, userPrompt string
-	if p.compresrQueryAgnostic || query == "" {
+	if verbatimPrefix != "" {
+		// Structured tail: specialized prompt
+		systemPrompt = external.SystemPromptStructuredTail
+		userPrompt = external.UserPromptStructuredTail(structuredFormat, toolName, content)
+	} else if p.compresrQueryAgnostic || query == "" {
 		systemPrompt = external.SystemPromptQueryAgnostic
 		userPrompt = external.UserPromptQueryAgnostic(toolName, content)
 	} else {
@@ -700,10 +739,22 @@ func (p *Pipe) compressViaExternalProvider(reqCtx context.Context, query, conten
 		return "", err
 	}
 
-	// Validate compression reduced size
-	if len(result.Content) >= len(content) {
+	compressed := result.Content
+
+	// Validate compression reduced size (compared to what was sent, not original)
+	if len(compressed) >= len(content) {
 		return "", fmt.Errorf("external_provider compression ineffective: output (%d bytes) >= input (%d bytes)",
-			len(result.Content), len(content))
+			len(compressed), len(content))
+	}
+
+	// Reassemble: verbatim prefix + separator + compressed tail
+	if verbatimPrefix != "" {
+		compressed = verbatimPrefix + "\n" + StructuredSeparator + "\n" + compressed
+		log.Debug().
+			Str("format", structuredFormat).
+			Int("prefix_size", len(verbatimPrefix)).
+			Int("tail_compressed_size", len(result.Content)).
+			Msg("tool_output: structured prefix preserved verbatim")
 	}
 
 	log.Debug().
@@ -711,9 +762,9 @@ func (p *Pipe) compressViaExternalProvider(reqCtx context.Context, query, conten
 		Str("model", p.compresrModel).
 		Bool("query_agnostic", p.compresrQueryAgnostic).
 		Int("original_size", len(content)).
-		Int("compressed_size", len(result.Content)).
-		Float64("ratio", float64(len(result.Content))/float64(len(content))).
+		Int("compressed_size", len(compressed)).
+		Float64("ratio", float64(len(compressed))/float64(len(content))).
 		Msg("tool_output: external_provider compression completed")
 
-	return result.Content, nil
+	return compressed, nil
 }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -150,6 +151,83 @@ func (t *TrajectoryTracker) RecordAgentResponse(response AgentResponseData) {
 		Str("model", response.Model).
 		Int("tool_calls", len(response.ToolCalls)).
 		Msg("trajectory: recorded agent response")
+}
+
+// AccumulateAgentResponse appends tool calls and metrics to the last agent step
+// instead of creating a new one. Used for tool-loop iterations where multiple
+// LLM API calls are part of the same logical agent turn.
+func (t *TrajectoryTracker) AccumulateAgentResponse(response AgentResponseData) {
+	if !t.config.Enabled || t.trajectory == nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed {
+		return
+	}
+
+	// Find the last agent step to accumulate into
+	for i := len(t.trajectory.Steps) - 1; i >= 0; i-- {
+		step := &t.trajectory.Steps[i]
+		if step.Source == StepSourceAgent {
+			// Append new tool calls (deduplicate by ID to avoid double-counting
+			// when the same tool call appears in both response body and request history)
+			if len(response.ToolCalls) > 0 {
+				existing := make(map[string]bool, len(step.ToolCalls))
+				for _, tc := range step.ToolCalls {
+					existing[tc.ToolCallID] = true
+				}
+				for _, tc := range response.ToolCalls {
+					if !existing[tc.ToolCallID] {
+						step.ToolCalls = append(step.ToolCalls, tc)
+					}
+				}
+			}
+
+			// Update message with the latest non-empty content.
+			// Tool-loop iterations often have empty content; keep the most
+			// recent meaningful message (the final response to the user).
+			if response.Message != "" && response.Message != "[streaming response]" {
+				step.Message = response.Message
+			}
+
+			// Accumulate token metrics
+			if response.PromptTokens > 0 || response.CompletionTokens > 0 {
+				if step.Metrics == nil {
+					step.Metrics = &Metrics{}
+				}
+				step.Metrics.PromptTokens += response.PromptTokens
+				step.Metrics.CompletionTokens += response.CompletionTokens
+			}
+
+			t.lastActive = time.Now()
+			t.flushLocked()
+
+			log.Debug().
+				Int("step_id", step.StepID).
+				Int("total_tool_calls", len(step.ToolCalls)).
+				Msg("trajectory: accumulated tool calls into existing step")
+			return
+		}
+	}
+
+	// No existing agent step found — create new one as fallback
+	step := NewAgentStep(response.Message, response.Model)
+	step.ReasoningContent = response.Reasoning
+	if len(response.ToolCalls) > 0 {
+		step.ToolCalls = response.ToolCalls
+	}
+	if response.PromptTokens > 0 || response.CompletionTokens > 0 {
+		step.Metrics = &Metrics{
+			PromptTokens:     response.PromptTokens,
+			CompletionTokens: response.CompletionTokens,
+		}
+	}
+	t.trajectory.AddStep(step)
+	t.lastActive = time.Now()
+	t.flushLocked()
 }
 
 // RecordToolResult records the result of a tool execution.
@@ -462,6 +540,34 @@ func ExtractUsageFromResponse(usage map[string]any) (prompt, completion, cached 
 	return prompt, completion, cached
 }
 
+// extractContentText returns the text from a message's "content" field,
+// handling both string content and Anthropic-style array-of-blocks content.
+func extractContentText(content any) string {
+	// Case 1: Simple string content (OpenAI / simple Anthropic)
+	if s, ok := content.(string); ok {
+		return s
+	}
+
+	// Case 2: Array of content blocks (Anthropic format)
+	blocks, ok := content.([]any)
+	if !ok {
+		return ""
+	}
+	var texts []string
+	for _, block := range blocks {
+		m, ok := block.(map[string]any)
+		if !ok {
+			continue
+		}
+		if m["type"] == "text" {
+			if t, ok := m["text"].(string); ok && t != "" {
+				texts = append(texts, t)
+			}
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
 // ExtractUserMessages extracts user message content from request messages.
 func ExtractUserMessages(messages []map[string]any) []string {
 	var userMessages []string
@@ -470,8 +576,8 @@ func ExtractUserMessages(messages []map[string]any) []string {
 		if !ok || role != "user" {
 			continue
 		}
-		if content, ok := msg["content"].(string); ok {
-			userMessages = append(userMessages, content)
+		if text := extractContentText(msg["content"]); text != "" {
+			userMessages = append(userMessages, text)
 		}
 	}
 	return userMessages
@@ -485,8 +591,8 @@ func ExtractLastUserMessage(messages []map[string]any) string {
 		if !ok || role != "user" {
 			continue
 		}
-		if content, ok := msg["content"].(string); ok {
-			return content
+		if text := extractContentText(msg["content"]); text != "" {
+			return text
 		}
 	}
 	return ""
@@ -510,26 +616,27 @@ func (t *TrajectoryTracker) TrackingStartTime() time.Time {
 // =============================================================================
 
 // ProxyInteractionData contains data for recording a proxy interaction.
+// Uses message counts instead of full arrays to avoid duplicating the system
+// prompt and growing conversation history in every trajectory step.
 type ProxyInteractionData struct {
 	// Pipeline info
 	PipeType     string // Which pipe was used: passthrough, tool_output, tool_discovery
 	PipeStrategy string // How it was processed: passthrough, api, llm
 
-	// Request messages
-	ClientMessages     []any // Original messages from client
-	CompressedMessages []any // Messages after compression (sent to LLM)
-
 	// Token counts
 	ClientTokens     int // Tokens in original request
 	CompressedTokens int // Tokens in compressed request
+
+	// Message counts (instead of full arrays to avoid system prompt duplication)
+	ClientMsgCount     int // Number of messages from client
+	CompressedMsgCount int // Number of messages after compression
 
 	// Compression details
 	CompressionEnabled bool
 	ToolCompressions   []ToolCompressionEntry // Individual tool compression details
 
 	// LLM response
-	ResponseMessages []any // Response from LLM
-	ResponseTokens   int   // Tokens in response
+	ResponseTokens int // Tokens in response
 }
 
 // RecordProxyInteraction records the full proxy flow for the last agent step.
@@ -556,18 +663,17 @@ func (t *TrajectoryTracker) RecordProxyInteraction(data ProxyInteractionData) {
 				PipeType:     data.PipeType,
 				PipeStrategy: data.PipeStrategy,
 				ClientToProxy: &ProxyMessage{
-					Timestamp:  now,
-					Messages:   data.ClientMessages,
-					TokenCount: data.ClientTokens,
+					Timestamp:    now,
+					TokenCount:   data.ClientTokens,
+					MessageCount: data.ClientMsgCount,
 				},
 				ProxyToLLM: &ProxyMessage{
-					Timestamp:  now,
-					Messages:   data.CompressedMessages,
-					TokenCount: data.CompressedTokens,
+					Timestamp:    now,
+					TokenCount:   data.CompressedTokens,
+					MessageCount: data.CompressedMsgCount,
 				},
 				LLMToProxy: &ProxyMessage{
 					Timestamp:  now,
-					Messages:   data.ResponseMessages,
 					TokenCount: data.ResponseTokens,
 				},
 			}
@@ -575,14 +681,14 @@ func (t *TrajectoryTracker) RecordProxyInteraction(data ProxyInteractionData) {
 
 			// Add compression info if compression was applied
 			if data.CompressionEnabled && data.ClientTokens > 0 {
-				tokensSaved := data.ClientTokens - data.CompressedTokens
+				// tokensSaved := data.ClientTokens - data.CompressedTokens
 				ratio := float64(data.CompressedTokens) / float64(data.ClientTokens)
 
 				step.ProxyInteraction.Compression = &ProxyCompressionInfo{
 					Enabled:          true,
 					OriginalTokens:   data.ClientTokens,
 					CompressedTokens: data.CompressedTokens,
-					TokensSaved:      tokensSaved,
+					// TokensSaved:      tokensSaved,
 					CompressionRatio: ratio,
 					ToolCompressions: data.ToolCompressions,
 				}
@@ -623,11 +729,12 @@ type TrajectoryManagerConfig struct {
 // TrajectoryManager manages multiple TrajectoryTrackers by session ID.
 // Each unique session ID gets its own trajectory file: trajectory_<sessionID>.json
 type TrajectoryManager struct {
-	config   TrajectoryManagerConfig
-	trackers map[string]*TrajectoryTracker
-	mu       sync.RWMutex
-	stopChan chan struct{}
-	wg       sync.WaitGroup
+	config       TrajectoryManagerConfig
+	trackers     map[string]*TrajectoryTracker
+	mainSessions map[string]bool // session IDs marked as main agent
+	mu           sync.RWMutex
+	stopChan     chan struct{}
+	wg           sync.WaitGroup
 }
 
 // NewTrajectoryManager creates a new trajectory manager.
@@ -640,9 +747,10 @@ func NewTrajectoryManager(cfg TrajectoryManagerConfig) *TrajectoryManager {
 	}
 
 	m := &TrajectoryManager{
-		config:   cfg,
-		trackers: make(map[string]*TrajectoryTracker),
-		stopChan: make(chan struct{}),
+		config:       cfg,
+		trackers:     make(map[string]*TrajectoryTracker),
+		mainSessions: make(map[string]bool),
+		stopChan:     make(chan struct{}),
 	}
 	if cfg.Enabled {
 		m.wg.Add(1)
@@ -680,13 +788,17 @@ func (m *TrajectoryManager) getOrCreateTracker(sessionID string) *TrajectoryTrac
 		return tracker
 	}
 
-	// Create new tracker with session-specific file path
-	logPath := filepath.Join(m.config.BaseDir, fmt.Sprintf("trajectory_%s.json", sessionID))
+	// Check if this session is marked as main agent — tag filename accordingly
+	suffix := sessionID
+	if m.mainSessions[sessionID] {
+		suffix = sessionID + "_MAIN"
+	}
+	logPath := filepath.Join(m.config.BaseDir, fmt.Sprintf("trajectory_%s.json", suffix))
 	tracker, err := NewTrajectoryTracker(TrajectoryConfig{
 		Enabled:   true,
 		LogPath:   logPath,
 		AgentName: m.config.AgentName,
-		SessionID: sessionID, // Use the preemptive session ID
+		SessionID: sessionID,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("session_id", sessionID).Msg("trajectory manager: failed to create tracker")
@@ -697,9 +809,47 @@ func (m *TrajectoryManager) getOrCreateTracker(sessionID string) *TrajectoryTrac
 	log.Info().
 		Str("session_id", sessionID).
 		Str("path", logPath).
+		Bool("main", m.mainSessions[sessionID]).
 		Msg("trajectory manager: created new tracker for session")
 
 	return tracker
+}
+
+// MarkMainSession marks a session ID as the main agent session.
+// Only the FIRST session to be marked wins — subsequent calls with different
+// session IDs are ignored. This prevents multiple trajectory files from being
+// tagged _MAIN when several conversations hit the same gateway instance.
+//
+// Must be called before the first recording for that session to take effect on the filename.
+// If the tracker already exists, renames the file on disk.
+func (m *TrajectoryManager) MarkMainSession(sessionID string) {
+	if !m.config.Enabled || sessionID == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Already marked — check if it's the same session (no-op) or different (reject)
+	if len(m.mainSessions) > 0 {
+		if m.mainSessions[sessionID] {
+			return // same session, already marked
+		}
+		return // different session — only one MAIN allowed
+	}
+	m.mainSessions[sessionID] = true
+
+	// If tracker already exists, rename its file to include _MAIN
+	if tracker, exists := m.trackers[sessionID]; exists {
+		oldPath := tracker.config.LogPath
+		newPath := filepath.Join(m.config.BaseDir, fmt.Sprintf("trajectory_%s_MAIN.json", sessionID))
+		if oldPath != newPath {
+			if err := os.Rename(oldPath, newPath); err == nil {
+				tracker.config.LogPath = newPath
+				log.Info().Str("old", oldPath).Str("new", newPath).Msg("trajectory: renamed to MAIN")
+			}
+		}
+	}
 }
 
 // RecordUserMessage records a user message for a specific session.
@@ -713,6 +863,13 @@ func (m *TrajectoryManager) RecordUserMessage(sessionID string, message string) 
 func (m *TrajectoryManager) RecordAgentResponse(sessionID string, response AgentResponseData) {
 	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
 		tracker.RecordAgentResponse(response)
+	}
+}
+
+// AccumulateAgentResponse accumulates tool calls into the last agent step for a session.
+func (m *TrajectoryManager) AccumulateAgentResponse(sessionID string, response AgentResponseData) {
+	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
+		tracker.AccumulateAgentResponse(response)
 	}
 }
 

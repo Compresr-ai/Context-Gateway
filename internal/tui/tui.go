@@ -59,9 +59,9 @@ func PrintSuccess(msg string) {
 	fmt.Printf("%s[OK]%s %s\n", ColorGreen, ColorReset, msg)
 }
 
-// PrintInfo prints an info message with blue [INFO] prefix.
+// PrintInfo prints an info message with a clean dim bullet prefix.
 func PrintInfo(msg string) {
-	fmt.Printf("%s[INFO]%s %s\n", ColorBlue, ColorReset, msg)
+	fmt.Printf("  %s·%s %s\n", ColorDim, ColorReset, msg)
 }
 
 // PrintWarn prints a warning message with yellow [WARN] prefix.

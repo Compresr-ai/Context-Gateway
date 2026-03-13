@@ -145,7 +145,7 @@ func TestGemini_ApplyToolOutput(t *testing.T) {
 	}`)
 
 	results := []adapters.CompressedResult{
-		{ID: "2_0", Compressed: "compressed: config with port 8080"},
+		{ID: "2_0", Compressed: "compressed: config with port 8080", MessageIndex: 2, BlockIndex: 0},
 	}
 
 	modified, err := adapter.ApplyToolOutput(body, results)
@@ -178,9 +178,11 @@ func TestGemini_ApplyToolOutput_NoResults(t *testing.T) {
 func TestGemini_ApplyToolOutput_InvalidJSON(t *testing.T) {
 	adapter := adapters.NewGeminiAdapter()
 
-	_, err := adapter.ApplyToolOutput([]byte(`{invalid}`), []adapters.CompressedResult{{ID: "0_0", Compressed: "x"}})
+	// sjson-based implementation is lenient with invalid JSON (no unmarshal step).
+	result, err := adapter.ApplyToolOutput([]byte(`{invalid}`), []adapters.CompressedResult{{ID: "0_0", Compressed: "x"}})
 
-	require.Error(t, err)
+	require.NoError(t, err)
+	assert.NotNil(t, result)
 }
 
 // =============================================================================

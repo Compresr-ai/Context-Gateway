@@ -94,6 +94,11 @@ func (a *OllamaAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, result
 	return a.OpenAIAdapter.ApplyToolDiscoveryToParsed(parsed, results)
 }
 
+// ExtractAssistantIntent delegates to OpenAI (resolves ambiguity from dual embedding).
+func (a *OllamaAdapter) ExtractAssistantIntent(body []byte) string {
+	return a.OpenAIAdapter.ExtractAssistantIntent(body)
+}
+
 // Ensure OllamaAdapter implements Adapter and ParsedRequestAdapter
 var _ Adapter = (*OllamaAdapter)(nil)
 var _ ParsedRequestAdapter = (*OllamaAdapter)(nil)

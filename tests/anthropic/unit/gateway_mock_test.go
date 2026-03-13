@@ -135,7 +135,7 @@ func TestGateway_SubscriptionFallback_RetriesWithAPIKey(t *testing.T) {
 	cfg.Providers = config.ProvidersConfig{
 		"anthropic": {
 			ProviderAuth: "sk-ant-api03-fallback-key",
-			Model:  "claude-3-5-sonnet-latest",
+			Model:        "claude-3-5-sonnet-latest",
 		},
 	}
 
@@ -191,7 +191,7 @@ func TestGateway_SubscriptionFallback_StickyPerSession(t *testing.T) {
 	cfg.Providers = config.ProvidersConfig{
 		"anthropic": {
 			ProviderAuth: "sk-ant-api03-fallback-key",
-			Model:  "claude-3-5-sonnet-latest",
+			Model:        "claude-3-5-sonnet-latest",
 		},
 	}
 
@@ -257,7 +257,7 @@ func TestGateway_AuthFallback_TelemetryAndInitLogs(t *testing.T) {
 	cfg.Providers = config.ProvidersConfig{
 		"anthropic": {
 			ProviderAuth: "sk-ant-api03-fallback-key",
-			Model:  "claude-3-5-sonnet-latest",
+			Model:        "claude-3-5-sonnet-latest",
 		},
 	}
 	cfg.AgentFlags = config.NewAgentFlags("claude_code", []string{"--dangerously-skip-permissions"})
@@ -588,14 +588,14 @@ func compressionConfig(compressionAPIURL string) *config.Config {
 		},
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            config.StrategyCompresr,
-				FallbackStrategy:    "passthrough",
-				MinBytes:            256,
-				MaxBytes:            65536,
+				Enabled:                true,
+				Strategy:               config.StrategyCompresr,
+				FallbackStrategy:       "passthrough",
+				MinBytes:               256,
+				MaxBytes:               65536,
 				TargetCompressionRatio: 0.5,
-				IncludeExpandHint:   false,
-				EnableExpandContext: false,
+				IncludeExpandHint:      false,
+				EnableExpandContext:    false,
 				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
 					Timeout:  5 * time.Second,

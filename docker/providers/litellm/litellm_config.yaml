@@ -1,0 +1,21 @@
+model_list:
+  # Local model via Ollama (always available in Docker test environment)
+  - model_name: local-model
+    litellm_params:
+      model: ollama/qwen2:0.5b
+      api_base: http://ollama:11434
+
+  # Bedrock-compatible model (routes to Ollama, simulates Bedrock backend)
+  - model_name: bedrock-model
+    litellm_params:
+      model: ollama/qwen2:0.5b
+      api_base: http://ollama:11434
+
+  # Cloud model via OpenAI (optional, requires OPENAI_API_KEY)
+  - model_name: cloud-gpt4
+    litellm_params:
+      model: gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+general_settings:
+  master_key: sk-test-litellm-key

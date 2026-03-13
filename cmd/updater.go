@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,14 +13,28 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/compresr/context-gateway/internal/config"
 )
 
-// Version is set at build time via -ldflags "-X main.Version=..."
-var Version = "v0.1.0"
+// Version is read from cmd/VERSION file (single source of truth).
+// Can be overridden at build time via -ldflags "-X main.Version=..."
+//
+//go:embed VERSION
+var embeddedVersion string
+
+// Version defaults to the embedded VERSION file content.
+// Override with ldflags for release builds.
+var Version = ""
+
+func init() {
+	if Version == "" {
+		Version = strings.TrimSpace(embeddedVersion)
+	}
+}
 
 const (
 	// GitHub repo for updates
@@ -29,7 +44,6 @@ const (
 	colorGreen  = "\033[38;2;23;128;68m"
 	colorYellow = "\033[1;33m"
 	colorCyan   = "\033[0;36m"
-	colorRed    = "\033[0;31m"
 	colorBold   = "\033[1m"
 	colorReset  = "\033[0m"
 )
@@ -123,11 +137,53 @@ func CheckForUpdates() {
 		return
 	}
 
-	if current == latest {
+	if !isNewerVersion(current, latest) {
 		return
 	}
 
 	printUpdateNotification(current, latest)
+}
+
+// isNewerVersion returns true if latest is newer than current.
+// Handles dev versions: v0.5.2-dev is considered newer than v0.5.1.
+func isNewerVersion(current, latest string) bool {
+	// Strip "v" prefix and "-dev"/"-private" suffixes for comparison
+	cleanVersion := func(v string) string {
+		v = strings.TrimPrefix(v, "v")
+		if idx := strings.IndexByte(v, '-'); idx >= 0 {
+			v = v[:idx]
+		}
+		return v
+	}
+	currentClean := cleanVersion(current)
+	latestClean := cleanVersion(latest)
+
+	// Parse major.minor.patch
+	parseParts := func(v string) (int, int, int) {
+		parts := strings.Split(v, ".")
+		major, minor, patch := 0, 0, 0
+		if len(parts) >= 1 {
+			major, _ = strconv.Atoi(parts[0])
+		}
+		if len(parts) >= 2 {
+			minor, _ = strconv.Atoi(parts[1])
+		}
+		if len(parts) >= 3 {
+			patch, _ = strconv.Atoi(parts[2])
+		}
+		return major, minor, patch
+	}
+
+	cMaj, cMin, cPatch := parseParts(currentClean)
+	lMaj, lMin, lPatch := parseParts(latestClean)
+
+	if lMaj != cMaj {
+		return lMaj > cMaj
+	}
+	if lMin != cMin {
+		return lMin > cMin
+	}
+	return lPatch > cPatch
 }
 
 // updateCheckResult holds the result of an async update check.
@@ -152,7 +208,7 @@ func CheckForUpdatesAsync() func() {
 	return func() {
 		select {
 		case r := <-ch:
-			if r.err != nil || r.current == r.latest {
+			if r.err != nil || !isNewerVersion(r.current, r.latest) {
 				return
 			}
 			printUpdateNotification(r.current, r.latest)

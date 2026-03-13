@@ -223,11 +223,12 @@ type ProxyInteraction struct {
 }
 
 // ProxyMessage represents a message at any point in the proxy flow.
+// Stores counts instead of full message arrays to avoid duplicating the
+// system prompt and growing conversation history in every trajectory step.
 type ProxyMessage struct {
-	Timestamp   string `json:"timestamp"`              // ISO 8601 timestamp
-	Messages    []any  `json:"messages,omitempty"`     // Chat messages array
-	TokenCount  int    `json:"token_count,omitempty"`  // Estimated token count
-	ContentHash string `json:"content_hash,omitempty"` // SHA256 of content (for comparison)
+	Timestamp    string `json:"timestamp"`               // ISO 8601 timestamp
+	TokenCount   int    `json:"token_count,omitempty"`   // Estimated token count
+	MessageCount int    `json:"message_count,omitempty"` // Number of messages
 }
 
 // ProxyCompressionInfo captures details about proxy compression.

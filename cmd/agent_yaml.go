@@ -62,7 +62,7 @@ func saveConfig(state *ConfigState) string {
 
 	fmt.Printf("\n%s✓%s Config saved: %s\n", tui.ColorGreen, tui.ColorReset, configPath)
 	if state.CostCap > 0 {
-		fmt.Printf("  %sCost dashboard will be available at http://localhost:<port>/costs/%s\n", tui.ColorCyan, tui.ColorReset)
+		fmt.Printf("  %sDashboard will be available at http://localhost:18080/dashboard/%s\n", tui.ColorCyan, tui.ColorReset)
 	}
 	return state.Name
 }
@@ -178,6 +178,8 @@ func generateCustomConfigYAML(
 		toolOutputSection = fmt.Sprintf(`  tool_output:
     enabled: %t
     strategy: "%s"
+    enable_expand_context: true
+    include_expand_hint: true
     compresr:
       endpoint: "%s"
       api_key: "%s"
@@ -214,12 +216,12 @@ metadata:
   strategy: "passthrough"
 
 server:
-  port: ${GATEWAY_PORT:-18080}
+  port: ${GATEWAY_PORT:-18081}
   read_timeout: 30s
   write_timeout: 1000s
 
 urls:
-  gateway: "http://localhost:${GATEWAY_PORT:-18080}"
+  gateway: "http://localhost:${GATEWAY_PORT:-18081}"
   compresr: "${COMPRESR_BASE_URL:-%s}"
 
 %s

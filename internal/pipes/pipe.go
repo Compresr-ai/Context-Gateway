@@ -50,6 +50,10 @@ type PipeContext struct {
 	// Provider of the incoming request (for provider-aware skip_tools)
 	Provider adapters.Provider
 
+	// UserQuery is the cleaned user prompt (injected tags stripped).
+	// Set once by gateway classification; used by pipes for compression context.
+	UserQuery string
+
 	// Flags set by pipes
 	OutputCompressed bool
 	ToolsFiltered    bool
@@ -84,6 +88,8 @@ type ToolOutputCompression struct {
 	MinThreshold      int    `json:"min_threshold"`  // Min byte threshold used
 	MaxThreshold      int    `json:"max_threshold"`  // Max byte threshold used
 	Model             string `json:"model"`          // Compression model used (e.g., "toc_latte_v1")
+	Query             string `json:"query"`          // User query used for compression context
+	QueryAgnostic     bool   `json:"query_agnostic"` // Whether compression used empty query
 	OriginalContent   string `json:"original_content"`
 	CompressedContent string `json:"compressed_content"`
 }

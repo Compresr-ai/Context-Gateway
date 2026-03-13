@@ -54,6 +54,33 @@ func NewManager(cfg Config) *Manager {
 	return m
 }
 
+// UpdateConfig swaps the manager's configuration (hot-reload).
+// Stops the current worker and restarts with new config if enabled.
+func (m *Manager) UpdateConfig(cfg Config) {
+	cfg = WithDefaults(cfg)
+
+	// Stop existing worker
+	if m.worker != nil {
+		m.worker.Stop()
+	}
+
+	m.config = cfg
+	m.enabled = cfg.Enabled
+
+	if !cfg.Enabled {
+		m.worker = nil
+		return
+	}
+
+	// Restart with new config
+	if m.sessions == nil {
+		m.sessions = NewSessionManager(cfg.Session)
+	}
+	m.summary = NewSummarizer(cfg.Summarizer)
+	m.worker = NewWorker(m.summary, m.sessions, cfg.Summarizer, cfg.TriggerThreshold)
+	m.worker.Start()
+}
+
 func (m *Manager) Stop() {
 	if m.worker != nil {
 		m.worker.Stop()

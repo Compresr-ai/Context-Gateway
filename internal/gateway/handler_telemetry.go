@@ -9,8 +9,11 @@ import (
 
 	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/costcontrol"
+	"github.com/compresr/context-gateway/internal/dashboard"
 	"github.com/compresr/context-gateway/internal/monitoring"
 	"github.com/compresr/context-gateway/internal/preemptive"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // telemetryParams holds all parameters needed for telemetry recording.
@@ -75,21 +78,21 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 
 	// Build the RequestEvent with base fields
 	event := &monitoring.RequestEvent{
-		RequestID:                params.requestID,
-		Timestamp:                params.startTime,
-		Method:                   params.method,
-		Path:                     params.path,
-		ClientIP:                 params.clientIP,
-		Provider:                 params.provider,
-		Model:                    model,
-		RequestBodySize:          params.requestBodySize,
-		ResponseBodySize:         params.responseBodySize,
-		StatusCode:               params.statusCode,
-		PipeType:                 monitoring.PipeType(params.pipeType),
-		PipeStrategy:             params.pipeStrategy,
-		OriginalTokens:           m.originalTokens,
-		CompressedTokens:         m.compressedTokens,
-		TokensSaved:              m.tokensSaved,
+		RequestID:        params.requestID,
+		Timestamp:        params.startTime,
+		Method:           params.method,
+		Path:             params.path,
+		ClientIP:         params.clientIP,
+		Provider:         params.provider,
+		Model:            model,
+		RequestBodySize:  params.requestBodySize,
+		ResponseBodySize: params.responseBodySize,
+		StatusCode:       params.statusCode,
+		PipeType:         monitoring.PipeType(params.pipeType),
+		PipeStrategy:     params.pipeStrategy,
+		OriginalTokens:   m.originalTokens,
+		CompressedTokens: m.compressedTokens,
+		// TokensSaved:              m.tokensSaved,
 		CompressionRatio:         m.compressionRatio,
 		CompressionUsed:          params.compressionUsed,
 		ShadowRefsCreated:        len(params.pipeCtx.ShadowRefs),
@@ -129,7 +132,7 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 	}
 
 	// Add verbose payloads if enabled
-	if g.config.Monitoring.VerbosePayloads {
+	if g.cfg().Monitoring.VerbosePayloads {
 		// Sanitize and copy request headers
 		if params.requestHeaders != nil {
 			reqHeadersMap := make(map[string]string)
@@ -197,11 +200,43 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 			usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 	}
 
+	// Update session monitor with post-response data (tokens, cost, status)
+	if g.monitorStore != nil && params.pipeCtx != nil && params.pipeCtx.MonitorSessionID != "" {
+		// Only include cost for successful requests — match costTracker behavior.
+		// Anthropic doesn't bill for failed requests, so including them inflates
+		// the monitor cost above the authoritative costTracker value.
+		costForMonitor := event.CostUSD
+		if params.statusCode >= 400 {
+			costForMonitor = 0
+		}
+		update := dashboard.SessionUpdate{
+			TokensIn:   usage.InputTokens,
+			TokensOut:  usage.OutputTokens,
+			CostUSD:    costForMonitor,
+			Compressed: params.compressionUsed,
+		}
+		// if m.tokensSaved > 0 {
+		// 	update.TokensSaved = m.tokensSaved
+		// }
+		// Detect if LLM is waiting for user (tool_use response = needs approval)
+		if dashboard.DetectWaitingForHuman(params.responseBody) {
+			update.Status = dashboard.StatusWaitingForHuman
+		}
+		g.monitorStore.Update(params.pipeCtx.MonitorSessionID, update)
+	}
+
 	// Record trajectory if enabled (ATIF format)
 	g.recordTrajectory(params, model, usage)
 }
 
 // recordTrajectory records user messages and agent responses in ATIF format.
+// Only the main agent is recorded — subagent requests are skipped to avoid
+// creating many small trajectory files per session.
+//
+// Within the main agent, tool-loop iterations (LLM responds with tool_use,
+// client sends back tool_result) are accumulated into the existing agent step
+// instead of creating new steps. This keeps the trajectory compact: one user
+// step + one agent step per user turn, regardless of how many tool calls occur.
 func (g *Gateway) recordTrajectory(params telemetryParams, model string, usage adapters.UsageInfo) {
 	if g.trajectory == nil || !g.trajectory.Enabled() {
 		return
@@ -212,102 +247,105 @@ func (g *Gateway) recordTrajectory(params telemetryParams, model string, usage a
 		return
 	}
 
-	// Compute session ID from request body using the same logic as preemptive layer
-	// This ensures trajectory files are grouped by the same session ID as compaction
-	sessionID := preemptive.ComputeSessionID(params.requestBody)
-	if sessionID == "" {
-		// Fallback: check preemptive headers (may have computed it already)
-		if params.pipeCtx != nil && params.pipeCtx.PreemptiveHeaders != nil {
-			sessionID = params.pipeCtx.PreemptiveHeaders["X-Session-ID"]
-		}
+	// Only record trajectories for the main agent.
+	// Use pre-computed classification from pipeline context.
+	if params.pipeCtx == nil || !params.pipeCtx.Classification.IsMainAgent {
+		return
+	}
+	mc := params.pipeCtx.Classification
+
+	// Use the same conversation session ID as prompt history and cost tracker.
+	sessionID := ""
+	if params.pipeCtx.CostSessionID != "" {
+		sessionID = params.pipeCtx.CostSessionID
 	}
 	if sessionID == "" {
-		// Final fallback: use "default" for requests without session ID
+		sessionID = preemptive.ComputeSessionIDFromClean(mc.FirstUserCleanContent)
+	}
+	if sessionID == "" {
 		sessionID = "default"
 	}
 
-	// Set model on first successful request
+	// Mark main session unconditionally — don't depend on mainConversationID
+	// which may never be set if prompt history init failed.
+	g.trajectory.MarkMainSession(sessionID)
+
 	if model != "" {
 		g.trajectory.SetAgentModel(sessionID, model)
 	}
 
-	// Extract user message from request
-	if params.adapter != nil && len(params.requestBody) > 0 {
-		userQuery := params.adapter.ExtractUserQuery(params.requestBody)
-		if userQuery != "" {
-			g.trajectory.RecordUserMessage(sessionID, userQuery)
+	// Use pre-computed classification for new user turn detection.
+	isNewUserTurn := mc.IsNewUserTurn
+	cleanedPrompt := mc.CleanUserPrompt
+	isStreaming := len(params.responseBody) == 0
+
+	// Extract the PREVIOUS assistant response from the request body's
+	// conversation history. This is critical for streaming: the response
+	// body is empty (streamed to client), but the next request always
+	// includes the previous response in its message array.
+	prevContent, prevToolCalls := extractLastAssistantContent(params.requestBody)
+
+	if isNewUserTurn {
+		// Before creating new steps, finalize the previous agent step.
+		// For streaming, this captures the assistant's final text/tool calls
+		// that weren't available from the empty response body.
+		if prevContent != "" || len(prevToolCalls) > 0 {
+			g.trajectory.AccumulateAgentResponse(sessionID, monitoring.AgentResponseData{
+				Message:   prevContent,
+				ToolCalls: prevToolCalls,
+			})
+		}
+
+		// Record new user turn
+		g.trajectory.RecordUserMessage(sessionID, cleanedPrompt)
+
+		// Create new agent step from current response
+		var content string
+		var toolCalls []monitoring.ToolCall
+		if !isStreaming {
+			content, toolCalls = extractAgentResponse(params.responseBody)
+		}
+		g.trajectory.RecordAgentResponse(sessionID, monitoring.AgentResponseData{
+			Message:          content,
+			Model:            model,
+			ToolCalls:        toolCalls,
+			PromptTokens:     usage.InputTokens,
+			CompletionTokens: usage.OutputTokens,
+		})
+		g.recordProxyInteraction(params, sessionID, usage)
+	} else {
+		// Tool-loop iteration: accumulate into the existing agent step.
+		if isStreaming {
+			// Streaming: extract tool calls/text from request body history
+			// (the previous LLM response that was streamed to client).
+			g.trajectory.AccumulateAgentResponse(sessionID, monitoring.AgentResponseData{
+				Message:          prevContent,
+				Model:            model,
+				ToolCalls:        prevToolCalls,
+				PromptTokens:     usage.InputTokens,
+				CompletionTokens: usage.OutputTokens,
+			})
+		} else {
+			// Non-streaming: extract from response body (current response)
+			content, toolCalls := extractAgentResponse(params.responseBody)
+			g.trajectory.AccumulateAgentResponse(sessionID, monitoring.AgentResponseData{
+				Message:          content,
+				Model:            model,
+				ToolCalls:        toolCalls,
+				PromptTokens:     usage.InputTokens,
+				CompletionTokens: usage.OutputTokens,
+			})
 		}
 	}
-
-	// Extract agent response from response body (if available)
-	var content string
-	var toolCalls []monitoring.ToolCall
-	if len(params.responseBody) > 0 {
-		content, toolCalls = extractAgentResponse(params.responseBody)
-	}
-
-	// Always record agent step with proxy interaction for every LLM request
-	// Even for streaming or when content extraction fails, we want to show proxy flow
-	isStreaming := len(params.responseBody) == 0
-	if isStreaming {
-		content = "[streaming response]"
-	}
-
-	g.trajectory.RecordAgentResponse(sessionID, monitoring.AgentResponseData{
-		Message:          content,
-		Model:            model,
-		ToolCalls:        toolCalls,
-		PromptTokens:     usage.InputTokens,
-		CompletionTokens: usage.OutputTokens,
-	})
-
-	// Record proxy interaction (client->proxy->LLM->proxy->client flow)
-	g.recordProxyInteraction(params, sessionID, usage)
 }
 
-// recordProxyInteraction records the full proxy flow for trajectory.
+// recordProxyInteraction records compression metadata for the trajectory.
+// Does NOT store full message arrays — those duplicate the system prompt and
+// entire conversation history in every step, causing massive bloat.
+// The actual messages are already captured by the step's Message/ToolCalls fields.
 func (g *Gateway) recordProxyInteraction(params telemetryParams, sessionID string, usage adapters.UsageInfo) {
 	if g.trajectory == nil || !g.trajectory.Enabled() {
 		return
-	}
-
-	// Extract messages from original request (client -> proxy)
-	var clientMessages []any
-	if len(params.requestBody) > 0 {
-		var req map[string]any
-		if err := json.Unmarshal(params.requestBody, &req); err == nil {
-			if msgs, ok := req["messages"].([]any); ok {
-				clientMessages = msgs
-			}
-		}
-	}
-
-	// Extract messages from forward body (proxy -> LLM)
-	var compressedMessages []any
-	if len(params.forwardBody) > 0 {
-		var req map[string]any
-		if err := json.Unmarshal(params.forwardBody, &req); err == nil {
-			if msgs, ok := req["messages"].([]any); ok {
-				compressedMessages = msgs
-			}
-		}
-	}
-
-	// Extract messages from response (LLM -> proxy)
-	var responseMessages []any
-	if len(params.responseBody) > 0 {
-		var resp map[string]any
-		if err := json.Unmarshal(params.responseBody, &resp); err == nil {
-			if choices, ok := resp["choices"].([]any); ok {
-				for _, c := range choices {
-					if choice, ok := c.(map[string]any); ok {
-						if msg, ok := choice["message"].(map[string]any); ok {
-							responseMessages = append(responseMessages, msg)
-						}
-					}
-				}
-			}
-		}
 	}
 
 	// Get compression info from pipeline context - convert to trajectory format
@@ -348,16 +386,19 @@ func (g *Gateway) recordProxyInteraction(params telemetryParams, sessionID strin
 		clientTokens = params.originalBodySize / 4
 	}
 
+	// Count messages instead of storing them (avoids system prompt duplication)
+	clientMsgCount := countMessages(params.requestBody)
+	compressedMsgCount := countMessages(params.forwardBody)
+
 	g.trajectory.RecordProxyInteraction(sessionID, monitoring.ProxyInteractionData{
 		PipeType:           string(params.pipeType),
 		PipeStrategy:       params.pipeStrategy,
-		ClientMessages:     clientMessages,
-		CompressedMessages: compressedMessages,
 		ClientTokens:       clientTokens,
 		CompressedTokens:   compressedTokens,
+		ClientMsgCount:     clientMsgCount,
+		CompressedMsgCount: compressedMsgCount,
 		CompressionEnabled: params.compressionUsed,
 		ToolCompressions:   toolCompressions,
-		ResponseMessages:   responseMessages,
 		ResponseTokens:     usage.OutputTokens,
 	})
 }
@@ -458,10 +499,98 @@ func extractAgentResponse(responseBody []byte) (string, []monitoring.ToolCall) {
 	return "", nil
 }
 
+// extractLastAssistantContent extracts content and tool calls from the last
+// assistant message in the request body's conversation history. This recovers
+// agent response data from streaming responses where the response body is empty —
+// the client always includes the previous response in the next request's messages.
+//
+// Handles both Anthropic format (content blocks with tool_use) and OpenAI format
+// (content string + tool_calls array).
+func extractLastAssistantContent(body []byte) (string, []monitoring.ToolCall) {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return "", nil
+	}
+
+	arr := messages.Array()
+	if len(arr) < 2 {
+		return "", nil
+	}
+
+	// Find the last assistant message (iterating backwards)
+	for i := len(arr) - 1; i >= 0; i-- {
+		if arr[i].Get("role").String() != "assistant" {
+			continue
+		}
+
+		msg := arr[i]
+		content := msg.Get("content")
+
+		// OpenAI format: content is a string, tool_calls is a separate array
+		if content.Type == gjson.String {
+			text := content.String()
+			var toolCalls []monitoring.ToolCall
+
+			tc := msg.Get("tool_calls")
+			if tc.IsArray() {
+				for _, call := range tc.Array() {
+					toolCall := monitoring.ToolCall{
+						ToolCallID:   call.Get("id").String(),
+						FunctionName: call.Get("function.name").String(),
+					}
+					if args := call.Get("function.arguments").String(); args != "" {
+						var argsMap map[string]any
+						if err := json.Unmarshal([]byte(args), &argsMap); err == nil {
+							toolCall.Arguments = argsMap
+						}
+					}
+					if toolCall.ToolCallID != "" && toolCall.FunctionName != "" {
+						toolCalls = append(toolCalls, toolCall)
+					}
+				}
+			}
+			return text, toolCalls
+		}
+
+		// Anthropic format: content is an array of blocks
+		if content.IsArray() {
+			var text string
+			var toolCalls []monitoring.ToolCall
+
+			for _, block := range content.Array() {
+				blockType := block.Get("type").String()
+				switch blockType {
+				case "text":
+					text += block.Get("text").String()
+				case "tool_use":
+					toolCall := monitoring.ToolCall{
+						ToolCallID:   block.Get("id").String(),
+						FunctionName: block.Get("name").String(),
+					}
+					if input := block.Get("input"); input.Exists() {
+						var argsMap map[string]any
+						if err := json.Unmarshal([]byte(input.Raw), &argsMap); err == nil {
+							toolCall.Arguments = argsMap
+						}
+					}
+					if toolCall.ToolCallID != "" && toolCall.FunctionName != "" {
+						toolCalls = append(toolCalls, toolCall)
+					}
+				}
+			}
+			return text, toolCalls
+		}
+
+		break // Only process the last assistant message
+	}
+
+	return "", nil
+}
+
 // requestMetrics holds calculated metrics for a request.
 type requestMetrics struct {
-	originalTokens, compressedTokens, tokensSaved int
-	compressionRatio                              float64
+	originalTokens, compressedTokens int // tokensSaved commented out
+	compressionRatio                 float64
 }
 
 // calculateMetrics computes compression metrics by comparing original vs forwarded body sizes.
@@ -476,7 +605,7 @@ func (g *Gateway) calculateMetrics(originalBodySize, forwardBodySize int) reques
 
 	if forwardBodySize > 0 && forwardBodySize < originalBodySize {
 		m.compressedTokens = forwardBodySize / 4
-		m.tokensSaved = m.originalTokens - m.compressedTokens
+		// m.tokensSaved = m.originalTokens - m.compressedTokens
 		m.compressionRatio = float64(forwardBodySize) / float64(originalBodySize)
 	}
 
@@ -576,6 +705,8 @@ func (g *Gateway) logCompressionDetails(pipeCtx *PipelineContext, requestID, pip
 			MinThreshold:      tc.MinThreshold,
 			MaxThreshold:      tc.MaxThreshold,
 			CompressionModel:  tc.Model,
+			Query:             tc.Query,
+			QueryAgnostic:     tc.QueryAgnostic,
 		}
 
 		// Log to file if enabled
@@ -640,22 +771,14 @@ func extractToolNamesFromRequest(body []byte) []string {
 }
 
 // mergeCompactedWithOriginal merges compacted messages with original request fields.
+// Uses sjson for byte-level replacement to preserve JSON field ordering and KV-cache prefix.
 // Preserves model, system, tools, and other fields from original.
 func mergeCompactedWithOriginal(compactedMessages []byte, originalBody []byte) ([]byte, error) {
-	var original map[string]interface{}
-	if err := json.Unmarshal(originalBody, &original); err != nil {
-		return nil, err
+	rawMessages := gjson.GetBytes(compactedMessages, "messages").Raw
+	if rawMessages == "" {
+		return originalBody, nil
 	}
-
-	var compacted map[string]interface{}
-	if err := json.Unmarshal(compactedMessages, &compacted); err != nil {
-		return nil, err
-	}
-
-	// Replace messages with compacted version
-	original["messages"] = compacted["messages"]
-
-	return json.Marshal(original)
+	return sjson.SetRawBytes(originalBody, "messages", []byte(rawMessages))
 }
 
 // addPreemptiveHeaders adds preemptive summarization headers to the response.
@@ -666,4 +789,16 @@ func addPreemptiveHeaders(w http.ResponseWriter, headers map[string]string) {
 	for k, v := range headers {
 		w.Header().Set(k, v)
 	}
+}
+
+// countMessages counts the number of messages in a request body.
+func countMessages(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	result := gjson.GetBytes(body, "messages.#")
+	if n := int(result.Int()); n > 0 {
+		return n
+	}
+	return int(gjson.GetBytes(body, "input.#").Int())
 }

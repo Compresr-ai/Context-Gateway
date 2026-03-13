@@ -1,6 +1,10 @@
 import { useState, useEffect, Component, type ReactNode } from 'react'
-import { Zap, DollarSign, Layers } from 'lucide-react'
-import type { DashboardData, Savings } from './types'
+import type { DashboardData } from './types'
+import TabBar from './components/TabBar'
+import SavingsTab from './components/SavingsTab'
+import PromptHistoryTab from './components/PromptHistoryTab'
+import MonitorTab from './components/MonitorTab'
+import SettingsTab from './components/SettingsTab'
 
 // Error boundary to catch render errors
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
@@ -23,69 +27,23 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: string |
   }
 }
 
-function formatCost(v: number): string {
-  return v >= 1 ? v.toFixed(2) : v.toFixed(4)
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
-}
-
-function CostRow({ savings, totalCost }: { savings?: Savings; totalCost: number }) {
-  const totalSpend = (savings?.billed_spend_usd != null && savings.billed_spend_usd > 0) ? savings.billed_spend_usd : totalCost
-  const tokensSaved = savings?.tokens_saved ?? 0
-  const compressedReqs = savings?.compressed_requests ?? 0
-  const totalReqs = savings?.total_requests ?? 0
-
-  const cards = [
-    { label: 'Total Spending', value: `$${formatCost(totalSpend)}`, icon: <DollarSign size={18} />, color: '#22c55e', borderColor: 'rgba(22,163,74,0.3)', accent: true, subtext: 'actual API cost' },
-    { label: 'Tokens Compressed', value: formatTokens(tokensSaved), icon: <Layers size={18} />, color: '#a78bfa', borderColor: 'rgba(167,139,250,0.3)', accent: false, subtext: tokensSaved > 0 ? `${savings?.token_saved_pct?.toFixed(0) ?? 0}% of input removed` : 'tokens removed by compression' },
-  ]
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-      {cards.map((c) => (
-        <div key={c.label} style={{
-          background: 'rgba(26,26,26,0.8)',
-          backdropFilter: 'blur(12px)',
-          border: `1px solid ${c.borderColor}`,
-          borderRadius: 16,
-          padding: 24,
-          position: 'relative',
-          overflow: 'hidden',
-        }}>
-          {c.accent && <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: 'linear-gradient(90deg, #16a34a, #22c55e)' }} />}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{c.label}</span>
-            <div style={{ width: 36, height: 36, borderRadius: 10, background: `${c.color}1f`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: c.color }}>
-              {c.icon}
-            </div>
-          </div>
-          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700, lineHeight: 1, color: c.accent ? '#22c55e' : '#ffffff' }}>
-            {c.value}
-          </div>
-          <div style={{ fontSize: 11, color: '#4b5563', marginTop: 8 }}>{c.subtext}</div>
-        </div>
-      ))}
-      {totalReqs > 0 && (
-        <div style={{ gridColumn: '1 / -1', textAlign: 'center', fontSize: 12, color: '#4b5563', paddingTop: 4 }}>
-          {compressedReqs} compressed / {totalReqs} total requests
-        </div>
-      )}
-    </div>
-  )
-}
-
 function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<'savings' | 'history' | 'monitor' | 'settings'>(() => {
+    // Check URL hash for direct navigation (e.g., #/settings, #/monitor)
+    if (window.location.hash === '#/settings') return 'settings'
+    if (window.location.hash === '#/history') return 'history'
+    if (window.location.hash === '#/savings') return 'savings'
+    return 'monitor'
+  })
+  const [selectedSession, setSelectedSession] = useState('all')
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const dashRes = await fetch('/api/dashboard')
+        const params = selectedSession && selectedSession !== 'all' ? `?session=${encodeURIComponent(selectedSession)}` : ''
+        const dashRes = await fetch(`/api/dashboard${params}`)
         if (!dashRes.ok) { setError(`API returned ${dashRes.status}`); return }
         const dashJson = await dashRes.json()
         setData(dashJson)
@@ -97,7 +55,7 @@ function Dashboard() {
     fetchData()
     const interval = setInterval(fetchData, 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [selectedSession])
 
   return (
     <div style={{
@@ -105,58 +63,153 @@ function Dashboard() {
       background: '#0a0a0a',
       backgroundImage: 'linear-gradient(to right, rgba(128,128,128,0.03) 1px, transparent 1px), linear-gradient(to bottom, rgba(128,128,128,0.03) 1px, transparent 1px)',
       backgroundSize: '32px 32px',
-      color: '#ffffff',
+      color: '#f3f4f6',
       fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
       display: 'flex',
       flexDirection: 'column',
       justifyContent: 'center',
     }}>
-      <div style={{ maxWidth: 1000, margin: '0 auto', padding: '48px 32px' }}>
+      {/* Pulse animation for the live indicator */}
+      <style>{`
+        @keyframes livePulse {
+          0% {
+            box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+          }
+          70% {
+            box-shadow: 0 0 0 6px rgba(34, 197, 94, 0);
+          }
+          100% {
+            box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+          }
+        }
+      `}</style>
+
+      <div style={{ maxWidth: 1100, width: '100%', margin: '0 auto', padding: '48px 32px', flex: 1 }}>
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 40 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 18, marginBottom: 0, paddingBottom: 32 }}>
           <div style={{
-            width: 44, height: 44, borderRadius: 14,
+            width: 44, height: 44, borderRadius: 12,
             background: 'linear-gradient(135deg, #16a34a, #22c55e)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 0 60px rgba(22,163,74,0.12)',
+            boxShadow: '0 0 32px rgba(34,197,94,0.15)',
+            flexShrink: 0,
           }}>
-            <Zap size={22} color="#fff" />
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 6h16M4 12h10M4 18h6" stroke="white" strokeWidth="2.2" strokeLinecap="round" />
+            </svg>
           </div>
           <div>
-            <h1 style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.02em', color: '#ffffff' }}>
+            <h1 style={{
+              fontSize: 24,
+              fontWeight: 800,
+              letterSpacing: '-0.03em',
+              color: '#f3f4f6',
+              margin: 0,
+              lineHeight: 1.2,
+            }}>
               Context Gateway
             </h1>
-            <p style={{ fontSize: 13, color: '#6b7280', marginTop: 2 }}>Compression Savings</p>
+            <p style={{
+              fontSize: 13,
+              color: '#6b7280',
+              marginTop: 4,
+              margin: 0,
+              marginBlockStart: 4,
+              letterSpacing: '0.02em',
+            }}>
+              Dashboard
+            </p>
           </div>
           <div style={{
-            marginLeft: 'auto', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#6b7280',
-            background: '#1a1a1a', border: '1px solid rgba(255,255,255,0.1)', padding: '6px 14px', borderRadius: 20,
-            display: 'flex', alignItems: 'center', gap: 8,
+            marginLeft: 'auto',
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 11,
+            color: '#9ca3af',
+            background: 'rgba(255,255,255,0.03)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            padding: '7px 16px',
+            borderRadius: 20,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            letterSpacing: '0.04em',
+            textTransform: 'uppercase' as const,
           }}>
-            <span style={{ width: 7, height: 7, background: '#22c55e', borderRadius: '50%' }} />
+            <span
+              className="live-dot"
+              style={{
+                width: 7,
+                height: 7,
+                background: '#22c55e',
+                borderRadius: '50%',
+                display: 'inline-block',
+                animation: 'livePulse 2s ease-in-out infinite',
+              }}
+            />
             Live
           </div>
         </div>
 
-        {error && (
-          <div style={{ color: '#ef4444', padding: 16, background: '#1a1a1a', borderRadius: 12, marginBottom: 16, fontFamily: 'monospace', fontSize: 13 }}>
-            Error: {error}
-          </div>
-        )}
+        {/* Header divider */}
+        <div style={{
+          height: 1,
+          background: 'linear-gradient(to right, transparent, rgba(255,255,255,0.06), transparent)',
+          marginBottom: 32,
+        }} />
 
-        {!data && !error && (
-          <div style={{ color: '#9ca3af', textAlign: 'center', padding: 48, fontSize: 14 }}>
-            Loading...
-          </div>
-        )}
+        {/* Tab bar */}
+        <div style={{ marginBottom: 24 }}>
+          <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
+        </div>
 
-        {data && (
-          <CostRow savings={data.savings} totalCost={data.total_cost} />
+        {/* Tab content */}
+        {activeTab === 'savings' && (
+          <SavingsTab
+            data={data}
+            error={error}
+            selectedSession={selectedSession}
+            onSessionChange={setSelectedSession}
+          />
+        )}
+        {activeTab === 'history' && (
+          <PromptHistoryTab sessionNames={
+            (data?.sessions ?? []).reduce<Record<string, string>>((acc, s) => {
+              if (s.agent_name && s.id) acc[s.id] = s.agent_name
+              return acc
+            }, {})
+          } />
+        )}
+        {activeTab === 'monitor' && (
+          <MonitorTab />
+        )}
+        {activeTab === 'settings' && (
+          <SettingsTab />
         )}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, paddingBottom: 32, fontSize: 12, color: '#6b7280' }}>
-        Auto-refreshes every 5s
+      {/* Footer */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        paddingBottom: 32,
+        paddingTop: 16,
+        fontSize: 11,
+        color: '#6b7280',
+        fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
+        letterSpacing: '0.02em',
+      }}>
+        <span style={{
+          width: 5,
+          height: 5,
+          background: '#22c55e',
+          borderRadius: '50%',
+          display: 'inline-block',
+          opacity: 0.7,
+        }} />
+        <span style={{ color: '#4b5563' }}>powered by</span>
+        <span style={{ color: '#6b7280', fontWeight: 600 }}>compresr</span>
       </div>
     </div>
   )

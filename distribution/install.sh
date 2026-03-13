@@ -36,7 +36,7 @@ EOF
     printf "${NC}\n\n"
 }
 
-info() { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
+info() { printf "  ${GREEN}·${NC} %s\n" "$1"; }
 warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
 error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; exit 1; }
 success() { printf "${GREEN}${BOLD}[✓]${NC} %s\n" "$1"; }

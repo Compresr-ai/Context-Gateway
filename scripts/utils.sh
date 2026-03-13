@@ -25,7 +25,7 @@ print_success() {
 }
 
 print_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    echo -e "  ${DIM}·${NC} $1"
 }
 
 print_warn() {
@@ -46,7 +46,7 @@ print_step() {
 
 # Check if gateway is running on a port
 check_gateway_running() {
-    local port="${1:-18080}"
+    local port="${1:-18081}"
     local response
     response=$(curl -s --max-time 2 "http://localhost:$port/health" 2>/dev/null || echo "")
     if [ -n "$response" ]; then
@@ -57,7 +57,7 @@ check_gateway_running() {
 
 # Kill a gateway process by port
 kill_gateway_on_port() {
-    local port="${1:-18080}"
+    local port="${1:-18081}"
     local pid
     pid=$(lsof -ti tcp:"$port" 2>/dev/null || echo "")
     if [ -n "$pid" ]; then
@@ -85,7 +85,7 @@ kill_all_gateways() {
 # Stop gateway using PID file or port
 stop_gateway() {
     local pid_file="${1:-}"
-    local port="${2:-18080}"
+    local port="${2:-18081}"
 
     # Try PID file first
     if [ -n "$pid_file" ] && [ -f "$pid_file" ]; then

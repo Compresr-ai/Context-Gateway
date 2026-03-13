@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/rs/zerolog/log"
+	"github.com/tidwall/sjson"
 )
 
 // GeminiAdapter handles Google Gemini API format requests.
@@ -96,62 +99,29 @@ func (a *GeminiAdapter) ExtractToolOutput(body []byte) ([]ExtractedContent, erro
 }
 
 // ApplyToolOutput applies compressed tool results back to the Gemini format request.
+// Uses sjson for byte-level replacement to preserve JSON field ordering and KV-cache prefix.
 func (a *GeminiAdapter) ApplyToolOutput(body []byte, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 {
 		return body, nil
 	}
 
-	resultMap := make(map[string]string)
-	for _, r := range results {
-		resultMap[r.ID] = r.Compressed
-	}
-
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("failed to parse request: %w", err)
-	}
-
-	contents, ok := req["contents"].([]any)
-	if !ok {
-		return body, nil
-	}
-
-	for msgIdx, contentAny := range contents {
-		content, ok := contentAny.(map[string]any)
-		if !ok {
+	modified := body
+	// Process in reverse order to maintain correct byte offsets
+	for i := len(results) - 1; i >= 0; i-- {
+		r := results[i]
+		// Gemini: contents[N].parts[M].functionResponse.response
+		// Replace the entire response object with {"result": compressed}
+		path := fmt.Sprintf("contents.%d.parts.%d.functionResponse.response", r.MessageIndex, r.BlockIndex)
+		responseObj := map[string]any{"result": r.Compressed}
+		var err error
+		modified, err = sjson.SetBytes(modified, path, responseObj)
+		if err != nil {
+			log.Warn().Err(err).Str("path", path).Str("id", r.ID).
+				Msg("sjson set failed for tool output, skipping")
 			continue
 		}
-
-		parts, ok := content["parts"].([]any)
-		if !ok {
-			continue
-		}
-
-		for partIdx, partAny := range parts {
-			part, ok := partAny.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			fnResp, ok := part["functionResponse"].(map[string]any)
-			if !ok {
-				continue
-			}
-
-			id := fmt.Sprintf("%d_%d", msgIdx, partIdx)
-			if compressed, found := resultMap[id]; found {
-				fnResp["response"] = map[string]any{"result": compressed}
-				part["functionResponse"] = fnResp
-				parts[partIdx] = part
-			}
-		}
-
-		content["parts"] = parts
-		contents[msgIdx] = content
 	}
-
-	req["contents"] = contents
-	return json.Marshal(req)
+	return modified, nil
 }
 
 // =============================================================================
@@ -169,11 +139,65 @@ func (a *GeminiAdapter) ApplyToolDiscovery(body []byte, results []CompressedResu
 }
 
 // =============================================================================
+// LAST USER CONTENT - Structural extraction for classification
+// =============================================================================
+
+// ExtractLastUserContent extracts text blocks from the last user message.
+// Gemini uses functionResponse parts for tool results (analogous to tool_result).
+func (a *GeminiAdapter) ExtractLastUserContent(body []byte) ([]string, bool) {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, false
+	}
+
+	contents, ok := req["contents"].([]any)
+	if !ok {
+		return nil, false
+	}
+
+	for i := len(contents) - 1; i >= 0; i-- {
+		content, ok := contents[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if getString(content, "role") != "user" {
+			continue
+		}
+
+		parts, ok := content["parts"].([]any)
+		if !ok {
+			continue
+		}
+
+		var textBlocks []string
+		hasFunctionResponse := false
+		for _, partAny := range parts {
+			part, ok := partAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text := getString(part, "text"); text != "" {
+				textBlocks = append(textBlocks, text)
+			}
+			if _, ok := part["functionResponse"]; ok {
+				hasFunctionResponse = true
+			}
+		}
+		if len(textBlocks) > 0 || hasFunctionResponse {
+			return textBlocks, hasFunctionResponse
+		}
+	}
+
+	return nil, false
+}
+
+// =============================================================================
 // QUERY EXTRACTION
 // =============================================================================
 
 // ExtractUserQuery extracts the last user message content from Gemini format.
 // Looks for contents[] with role:"user" and text parts.
+// Deprecated: Use ExtractLastUserContent + gateway classification instead.
 func (a *GeminiAdapter) ExtractUserQuery(body []byte) string {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {

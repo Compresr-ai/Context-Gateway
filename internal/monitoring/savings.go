@@ -285,6 +285,43 @@ func (t *SavingsTracker) GetCompressionStats() (int, int, int, int, int) {
 	return r.CompressedRequests, r.TotalRequests, r.ToolDiscoveryRequests, r.OriginalToolCount, r.FilteredToolCount
 }
 
+// SessionIDs returns all session IDs that have recorded data.
+func (t *SavingsTracker) SessionIDs() []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	ids := make([]string, 0, len(t.sessions))
+	for id := range t.sessions {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// RecordRequestWithSession records a request event for both global and session tracking.
+// This is an alias for RecordRequest(event, sessionID).
+func (t *SavingsTracker) RecordRequestWithSession(event *RequestEvent, sessionID string) {
+	t.RecordRequest(event, sessionID)
+}
+
+// GetDetailedSummary returns the full savings report (alias for GetReport).
+func (t *SavingsTracker) GetDetailedSummary() SavingsReport {
+	return t.GetReport()
+}
+
+// FormatReport returns a formatted savings report string.
+func (t *SavingsTracker) FormatReport() string {
+	return FormatUnifiedReportFromReport(t.GetReport(), UnifiedReportData{})
+}
+
+// FormatUnifiedReport returns a formatted savings report string with extra data.
+func (t *SavingsTracker) FormatUnifiedReport(extra UnifiedReportData) string {
+	return FormatUnifiedReportFromReport(t.GetReport(), extra)
+}
+
+// FormatUnifiedReportForSession returns a formatted savings report for a specific session.
+func (t *SavingsTracker) FormatUnifiedReportForSession(sessionID string, extra UnifiedReportData) string {
+	return FormatUnifiedReportFromReport(t.GetReportForSession(sessionID), extra)
+}
+
 // --- Internal helpers ---
 
 func (t *SavingsTracker) getOrCreate(sessionID string) *savingsData {
@@ -321,6 +358,8 @@ func recordRequestInto(sd *savingsData, event *RequestEvent, model string) {
 	sd.TotalRequests++
 	if event.CompressionUsed {
 		sd.CompressedRequests++
+		sd.OriginalTokens += event.OriginalTokens
+		sd.CompressedTokens += event.CompressedTokens
 	}
 	stats := sd.ModelUsage[model]
 	stats.InputTokens += event.InputTokens
@@ -554,10 +593,10 @@ func FormatUnifiedReportFromReport(r SavingsReport, extra UnifiedReportData) str
 	sb.WriteString("─────────────────────────────────────────────────\n")
 
 	// Savings summary
-	if r.TotalTokensSaved > 0 {
-		fmt.Fprintf(&sb, "  Saved           %d tokens (%.1f%%)  ·  $%.4f (%.1f%%)\n",
-			r.TotalTokensSaved, r.TotalSavedPct, r.CostSavedUSD, r.CostSavedPct)
-	}
+	// if r.TotalTokensSaved > 0 {
+	// 	fmt.Fprintf(&sb, "  Saved           %d tokens (%.1f%%)  ·  $%.4f (%.1f%%)\n",
+	// 		r.TotalTokensSaved, r.TotalSavedPct, r.CostSavedUSD, r.CostSavedPct)
+	// }
 
 	// Expand penalty
 	if r.ExpandPenaltyTokens > 0 {

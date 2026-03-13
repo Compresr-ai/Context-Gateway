@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Ensure Go downloads the required toolchain if local version is older
+export GOTOOLCHAIN=auto
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'

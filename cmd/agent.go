@@ -15,8 +15,10 @@ import (
 
 	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
+	"github.com/compresr/context-gateway/internal/dashboard"
 	"github.com/compresr/context-gateway/internal/gateway"
 	"github.com/compresr/context-gateway/internal/plugins"
+	"github.com/compresr/context-gateway/internal/postsession"
 	"github.com/compresr/context-gateway/internal/preemptive"
 	"github.com/compresr/context-gateway/internal/tui"
 	"github.com/compresr/context-gateway/internal/utils"
@@ -44,6 +46,7 @@ func runAgentCommand(args []string) {
 		daemonFlag      bool
 		stopFlag        bool
 		sessionDirFlag  string
+		sessionNameFlag string
 	)
 
 	portFlag = "" // Empty = auto-find available port
@@ -71,6 +74,14 @@ parseLoop:
 				i += 2
 			} else {
 				i++
+			}
+		case "-n", "--name":
+			if i+1 < len(args) {
+				sessionNameFlag = args[i+1]
+				i += 2
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --name requires a value")
+				os.Exit(1)
 			}
 		case "-c", "--config":
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
@@ -116,7 +127,7 @@ parseLoop:
 			break parseLoop
 		default:
 			if strings.HasPrefix(args[i], "-") {
-				fmt.Fprintf(os.Stderr, "Error: unknown option: %q\n", args[i])
+				_, _ = os.Stderr.WriteString("Error: unknown option: " + strconv.Quote(args[i]) + "\n")
 				os.Exit(1)
 			}
 			agentArg = args[i]
@@ -214,9 +225,9 @@ parseLoop:
 	}
 
 	// Find available port early so ${GATEWAY_PORT} expands correctly in agent configs
-	// Port range: 18080-18089 (max 10 concurrent terminals)
-	basePort := 18080
-	maxPorts := 10
+	// Port range: 18081-18090 (max 10 concurrent terminals; 18080 reserved for UI)
+	basePort := config.DefaultGatewayBasePort
+	maxPorts := config.MaxGatewayPorts
 
 	var gatewayPort int
 
@@ -225,7 +236,7 @@ parseLoop:
 		var err error
 		gatewayPort, err = strconv.Atoi(portFlag)
 		if err != nil || gatewayPort <= 0 || gatewayPort > 65535 {
-			fmt.Fprintf(os.Stderr, "Error: invalid port %q\n", portFlag)
+			_, _ = os.Stderr.WriteString("Error: invalid port " + strconv.Quote(portFlag) + "\n")
 			os.Exit(1)
 		}
 	} else {
@@ -262,11 +273,13 @@ parseLoop:
 	}
 
 	// Check if this is first run (no Compresr API key set)
+	var firstRun bool
 	if !isCompresrAPIKeySet() {
 		if !runCompresrOnboarding() {
 			// User cancelled onboarding
 			os.Exit(0)
 		}
+		firstRun = true
 	}
 
 	var ac *AgentConfig
@@ -344,6 +357,27 @@ mainSelectionLoop:
 			printWarn(fmt.Sprintf("Failed to install plugin: %v", pluginErr))
 		} else if installed {
 			printSuccess(fmt.Sprintf("Installed %s plugin", ac.Agent.Name))
+		}
+
+		// First-run experience: offer to configure or use defaults
+		if firstRun && configFlag == "" && proxyMode != "skip" {
+			firstRunItems := []tui.MenuItem{
+				{Label: "Configure settings", Description: "customize compression, cost limits, and more", Value: "configure"},
+				{Label: "Use defaults and start", Description: "recommended for most users", Value: "defaults"},
+			}
+			idx, selectErr := tui.SelectMenu("Getting Started", firstRunItems)
+			if selectErr != nil {
+				os.Exit(0)
+			}
+			if firstRunItems[idx].Value == "configure" {
+				configFlag = runConfigCreationWizard(agentArg, ac)
+				if configFlag != "" && configFlag != "__back__" {
+					createdNewConfig = true
+				} else {
+					configFlag = ""
+				}
+			}
+			firstRun = false
 		}
 
 		if proxyMode != "skip" && showConfigMenu && configFlag == "" {
@@ -467,14 +501,14 @@ mainSelectionLoop:
 		// gatewayPort was already found early (before agent config loading)
 		// Verify it's still available (unlikely to change but be safe)
 		if isPortInUse(gatewayPort) {
-			fmt.Fprintf(os.Stderr, "Error: port %d is no longer available\n", gatewayPort) // #nosec G705 -- gatewayPort is a validated int, no XSS risk
+			_, _ = os.Stderr.WriteString("Error: port " + strconv.Itoa(gatewayPort) + " is no longer available\n")
 			os.Exit(1)
 		}
 
 		// Parse config early to check telemetry_enabled before setting env vars
 		earlyConfig, earlyErr := config.LoadFromBytes(configData)
 		if earlyErr != nil {
-			fmt.Fprintf(os.Stderr, "Error loading config '%s': %v\n", configSource, earlyErr)
+			_, _ = os.Stderr.WriteString("Error loading config '" + configSource + "': " + earlyErr.Error() + "\n")
 			os.Exit(1)
 		}
 
@@ -492,6 +526,17 @@ mainSelectionLoop:
 
 		telemetryEnabled := earlyConfig.Monitoring.TelemetryEnabled
 
+		// Prompt for session name if not provided via flag or daemon mode
+		if sessionNameFlag == "" && sessionDirFlag == "" {
+			fmt.Printf("\r%sSession name%s (enter to skip): ", tui.ColorCyan, tui.ColorReset)
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				if name := strings.TrimSpace(scanner.Text()); name != "" {
+					sessionNameFlag = name
+				}
+			}
+		}
+
 		// Prepare session path for lazy creation (directory created on first request)
 		// This prevents empty session folders when gateway starts but receives no traffic
 		if sessionDirFlag != "" {
@@ -502,7 +547,7 @@ mainSelectionLoop:
 			if logsBase == "" {
 				logsBase = "logs"
 			}
-			sessionDir = prepareSessionPath(logsBase)
+			sessionDir = prepareSessionPath(logsBase, sessionNameFlag)
 		}
 
 		// Export session log paths for this agent (paths may not exist yet - lazy creation)
@@ -520,7 +565,7 @@ mainSelectionLoop:
 		// Re-apply session env overrides to the early config now that env vars are set
 		earlyConfig.ApplySessionEnvOverrides()
 
-		printSuccess(fmt.Sprintf("Port: %d", gatewayPort))
+		// Port displayed in status bar startup block below
 
 		// Store config data for lazy session creation (config.yaml written when first request arrives)
 		// Session directory is created now for gateway.log, but config.yaml is written lazily
@@ -576,7 +621,10 @@ mainSelectionLoop:
 		cfg.Monitoring.LogOutput = gatewayLogOutput
 		cfg.Monitoring.LogToStdout = false
 
-		gw = gateway.New(cfg)
+		// Check if the dashboard is already open before we start (to avoid re-opening the browser)
+		dashboardAlreadyOpen := isDashboardRunning(config.DefaultDashboardPort)
+
+		gw = gateway.New(cfg, configSource)
 
 		// Configure lazy session creation (directory created on first LLM request)
 		if sessionDir != "" {
@@ -602,7 +650,7 @@ mainSelectionLoop:
 		if !waitForGateway(gatewayPort, 30*time.Second) {
 			fmt.Fprintln(os.Stderr, "Error: gateway failed to start within 30s")
 			if sessionDir != "" {
-				fmt.Fprintf(os.Stderr, "Check logs: %s\n", sessionDir)
+				_, _ = os.Stderr.WriteString("Check logs: " + sessionDir + "\n")
 			}
 
 			fmt.Print("Continue anyway? [y/N] ")
@@ -620,6 +668,20 @@ mainSelectionLoop:
 		if gw != nil && statusBar != nil {
 			statusBar.SetSessionName(filepath.Base(sessionDir))
 			statusBar.SetSavingsSource(gw.SavingsTracker())
+		}
+
+		// Register this instance in the shared dashboard registry.
+		// Use the user-provided session name for the card title; fall back to agent type.
+		registryName := filepath.Base(sessionDir)
+		if registryName == "" || registryName == "." {
+			registryName = ac.Agent.Name
+		}
+		dashboard.Register(gatewayPort, registryName, sessionDir)
+		defer dashboard.Deregister(gatewayPort)
+
+		// Open dashboard in browser only if it wasn't already open
+		if !dashboardAlreadyOpen {
+			openBrowser(fmt.Sprintf("http://localhost:%d/dashboard/#/monitor", config.DefaultDashboardPort))
 		}
 
 		// Log the config used for this session (use resolved config to get inherited model)
@@ -755,11 +817,8 @@ mainSelectionLoop:
 			}
 
 			// Save port file for plugins to discover (only after gateway is healthy)
-			portFile := filepath.Clean(filepath.Join(os.TempDir(), "context-gateway.port"))
-			if !strings.HasPrefix(portFile, filepath.Clean(os.TempDir())) {
-				printWarn("Invalid port file path, skipping")
-			} else {
-				_ = os.WriteFile(portFile, []byte(strconv.Itoa(gatewayPort)), 0600)
+			if err := writePortFile(gatewayPort); err != nil {
+				printWarn("Could not write port file: " + err.Error())
 			}
 
 			fmt.Println("  \033[2mGateway running in background (PID: " + strconv.Itoa(daemonCmd.Process.Pid) + ")\033[0m\n")
@@ -781,6 +840,11 @@ mainSelectionLoop:
 		// Wait for plugins to detect port file removal and restore configs.
 		// Plugin health check runs every 1s, so 2s is enough for detection + restore.
 		time.Sleep(2 * time.Second)
+
+		// Post-session: update CLAUDE.md before shutdown (daemon mode)
+		if gw != nil {
+			runPostSessionUpdate(gw)
+		}
 
 		// Now safe to shutdown gateway
 		if gw != nil {
@@ -838,6 +902,11 @@ mainSelectionLoop:
 
 	signal.Stop(sigCh)
 	signal.Reset(getShutdownSignals()...)
+
+	// Post-session: update CLAUDE.md with session insights (before shutdown)
+	if gw != nil {
+		runPostSessionUpdate(gw)
+	}
 
 	if gw != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -903,4 +972,52 @@ func showGatewayStatusBar(port int, session string, costSource tui.CostSource) *
 	// Set terminal title with persistent status info
 	tui.SetTerminalTitle(statusBar.FormatTitleStatus(port, session))
 	return statusBar
+}
+
+// writePortFile writes the gateway port to a well-known temp file for plugin discovery.
+// The path is fully controlled (no user input) to prevent path traversal.
+func writePortFile(port int) error {
+	const portFileName = "context-gateway.port"
+	dir := os.TempDir()
+	p := filepath.Join(dir, portFileName)
+	clean := filepath.Clean(p)
+	if !strings.HasPrefix(clean, filepath.Clean(dir)) {
+		return fmt.Errorf("path escaped temp dir")
+	}
+	return os.WriteFile(clean, []byte(strconv.Itoa(port)), 0600) //#nosec G703 -- path is filepath.Clean'd and prefix-checked against TempDir above
+}
+
+// runPostSessionUpdate performs post-session CLAUDE.md update using the gateway's session collector.
+func runPostSessionUpdate(gw *gateway.Gateway) {
+	cfg := gw.PostSessionConfig()
+	if !cfg.Enabled {
+		return
+	}
+
+	collector := gw.SessionCollector()
+	if collector == nil || !collector.HasEvents() {
+		return
+	}
+
+	fmt.Println()
+	printStep("Analyzing session for CLAUDE.md updates...")
+
+	updater := postsession.NewUpdater(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancel()
+
+	// Use auth captured from the session's requests
+	authToken, authIsXAPIKey, authEndpoint := collector.GetAuth()
+	result, err := updater.Update(ctx, collector, authToken, authIsXAPIKey, authEndpoint)
+	if err != nil {
+		printWarn(fmt.Sprintf("Post-session update failed: %v", err))
+		return
+	}
+
+	if result.Updated {
+		printSuccess(fmt.Sprintf("CLAUDE.md updated: %s", result.Path))
+	} else {
+		printInfo(fmt.Sprintf("CLAUDE.md: %s", result.Description))
+	}
 }

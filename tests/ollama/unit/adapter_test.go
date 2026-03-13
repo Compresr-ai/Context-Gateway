@@ -71,7 +71,7 @@ func TestOllama_ApplyToolOutput(t *testing.T) {
 	}`)
 
 	results := []adapters.CompressedResult{
-		{ID: "call_001", Compressed: "compressed: server config with port 8080"},
+		{ID: "call_001", Compressed: "compressed: server config with port 8080", MessageIndex: 2},
 	}
 
 	modified, err := adapter.ApplyToolOutput(body, results)
@@ -289,4 +289,130 @@ func TestOllama_ImplementsAdapter(t *testing.T) {
 func TestOllama_ProviderFromString(t *testing.T) {
 	assert.Equal(t, adapters.ProviderOllama, adapters.ProviderFromString("ollama"))
 	assert.Equal(t, adapters.ProviderUnknown, adapters.ProviderFromString("invalid"))
+}
+
+// =============================================================================
+// TOOL DISCOVERY - Extract/Apply
+// =============================================================================
+
+func TestOllama_ExtractToolDiscovery(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	body := []byte(`{
+		"model": "llama3.1",
+		"messages": [{"role": "user", "content": "hello"}],
+		"tools": [
+			{"type": "function", "function": {"name": "read_file", "description": "Read a file from disk"}},
+			{"type": "function", "function": {"name": "write_file", "description": "Write content to a file"}}
+		]
+	}`)
+
+	extracted, err := adapter.ExtractToolDiscovery(body, nil)
+
+	require.NoError(t, err)
+	require.Len(t, extracted, 2)
+	assert.Equal(t, "read_file", extracted[0].ToolName)
+	assert.Equal(t, "write_file", extracted[1].ToolName)
+}
+
+func TestOllama_ApplyToolDiscovery(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	body := []byte(`{
+		"model": "llama3.1",
+		"messages": [{"role": "user", "content": "hello"}],
+		"tools": [
+			{"type": "function", "function": {"name": "read_file", "description": "Read a file"}},
+			{"type": "function", "function": {"name": "write_file", "description": "Write a file"}},
+			{"type": "function", "function": {"name": "delete_file", "description": "Delete a file"}}
+		]
+	}`)
+
+	results := []adapters.CompressedResult{
+		{ID: "read_file", Keep: true},
+		{ID: "write_file", Keep: false},
+		{ID: "delete_file", Keep: true},
+	}
+
+	modified, err := adapter.ApplyToolDiscovery(body, results)
+
+	require.NoError(t, err)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(modified, &req))
+
+	tools := req["tools"].([]any)
+	assert.Len(t, tools, 2, "Should have filtered out write_file")
+}
+
+func TestOllama_ExtractToolDiscovery_Empty(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	body := []byte(`{
+		"model": "llama3.1",
+		"messages": [{"role": "user", "content": "hello"}]
+	}`)
+
+	extracted, err := adapter.ExtractToolDiscovery(body, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, extracted)
+}
+
+// =============================================================================
+// EDGE CASES
+// =============================================================================
+
+func TestOllama_ApplyToolOutput_NoMatchingResults(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	body := []byte(`{
+		"model": "llama3.1",
+		"messages": [
+			{"role": "user", "content": "Read the config file"},
+			{"role": "assistant", "content": "", "tool_calls": [
+				{"id": "call_001", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+			]},
+			{"role": "tool", "tool_call_id": "call_001", "content": "original content"}
+		]
+	}`)
+
+	// Non-matching ID — body should remain unchanged
+	results := []adapters.CompressedResult{
+		{ID: "call_999", Compressed: "this should not appear"},
+	}
+
+	modified, err := adapter.ApplyToolOutput(body, results)
+
+	require.NoError(t, err)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(modified, &req))
+
+	messages := req["messages"].([]any)
+	toolMsg := messages[2].(map[string]any)
+	assert.Equal(t, "original content", toolMsg["content"])
+}
+
+func TestOllama_ExtractUsage_BothFormats(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	// Response with both Ollama-native and OpenAI fields — native should win
+	responseBody := []byte(`{
+		"model": "llama3.1",
+		"prompt_eval_count": 50,
+		"eval_count": 25,
+		"usage": {
+			"prompt_tokens": 200,
+			"completion_tokens": 80,
+			"total_tokens": 280
+		}
+	}`)
+
+	usage := adapter.ExtractUsage(responseBody)
+
+	// Ollama native format should take priority
+	assert.Equal(t, 50, usage.InputTokens)
+	assert.Equal(t, 25, usage.OutputTokens)
+	assert.Equal(t, 75, usage.TotalTokens)
 }

@@ -1,0 +1,197 @@
+networks:
+  test-net:
+    driver: bridge
+
+services:
+  # =========================================================================
+  # PROVIDERS (official images + mounted configs/scripts)
+  # =========================================================================
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./providers/ollama/pull-model.sh:/pull-model.sh:ro
+    entrypoint: ["/bin/bash", "-c", "chmod +x /pull-model.sh && /pull-model.sh & /bin/ollama serve"]
+    networks:
+      - test-net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 10
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./providers/litellm/litellm_config.yaml:/app/litellm_config.yaml:ro
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    command: ["--config", "/app/litellm_config.yaml", "--host", "0.0.0.0", "--port", "4000", "--num_workers", "1"]
+    networks:
+      - test-net
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4000/health/liveliness"]
+      interval: 5s
+      timeout: 3s
+      start_period: 15s
+      retries: 10
+
+  # =========================================================================
+  # GATEWAY
+  # =========================================================================
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "18081:18081"
+    environment:
+      - GATEWAY_ALLOW_LOCAL=true
+      - GATEWAY_ALLOWED_HOSTS=ollama:11434,litellm:4000
+      - COMPRESR_API_KEY=${COMPRESR_API_KEY:-}
+      - COMPRESR_API_URL=${COMPRESR_API_URL:-}
+    networks:
+      - test-net
+    depends_on:
+      ollama:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18081/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+
+  # =========================================================================
+  # AGENT SIMULATORS (single Dockerfile.agents, per-agent scripts)
+  # =========================================================================
+
+  agent-claude-code:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    environment:
+      - AGENT_NAME=claude-code
+      - GATEWAY_URL=http://gateway:18081
+      - TARGET_URL=http://ollama:11434
+      - API_KEY=${ANTHROPIC_API_KEY:-sk-test}
+    networks:
+      - test-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  agent-cursor:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    environment:
+      - AGENT_NAME=cursor
+      - GATEWAY_URL=http://gateway:18081
+      - TARGET_URL=http://ollama:11434
+      - API_KEY=${OPENAI_API_KEY:-sk-test}
+    networks:
+      - test-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  agent-codex:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    environment:
+      - AGENT_NAME=codex
+      - GATEWAY_URL=http://gateway:18081
+      - TARGET_URL=http://ollama:11434
+      - API_KEY=${OPENAI_API_KEY:-sk-test}
+    networks:
+      - test-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  agent-openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    environment:
+      - AGENT_NAME=openclaw
+      - GATEWAY_URL=http://gateway:18081
+      - TARGET_URL=http://ollama:11434
+      - API_KEY=${ANTHROPIC_API_KEY:-sk-test}
+    networks:
+      - test-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  agent-opencode:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    environment:
+      - AGENT_NAME=opencode
+      - GATEWAY_URL=http://gateway:18081
+      - TARGET_URL=http://ollama:11434
+      - API_KEY=${OPENAI_API_KEY:-sk-test}
+    networks:
+      - test-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  agent-ollama-direct:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    environment:
+      - AGENT_NAME=ollama-direct
+      - GATEWAY_URL=http://gateway:18081
+      - TARGET_URL=http://ollama:11434
+    networks:
+      - test-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  agent-litellm-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    environment:
+      - AGENT_NAME=litellm-proxy
+      - GATEWAY_URL=http://gateway:18081
+      - TARGET_URL=http://litellm:4000
+      - LITELLM_API_KEY=sk-test-litellm-key
+    networks:
+      - test-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  agent-bedrock:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    environment:
+      - AGENT_NAME=bedrock
+      - GATEWAY_URL=http://gateway:18081
+      - TARGET_URL=http://litellm:4000
+      - LITELLM_API_KEY=sk-test-litellm-key
+    networks:
+      - test-net
+    depends_on:
+      gateway:
+        condition: service_healthy

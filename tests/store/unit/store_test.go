@@ -191,3 +191,124 @@ func TestMemoryStore_GetNonexistentKey(t *testing.T) {
 	_, ok = s.GetExpansion("nonexistent")
 	assert.False(t, ok)
 }
+
+func TestMemoryStore_CloseWaitsForCleanup(t *testing.T) {
+	// Verify Close() doesn't panic and properly waits for cleanup goroutine.
+	s := store.NewMemoryStoreWithDualTTL(10*time.Millisecond, 10*time.Millisecond)
+
+	// Add some data
+	for i := 0; i < 100; i++ {
+		_ = s.Set(fmt.Sprintf("k%d", i), "v")
+		_ = s.SetCompressed(fmt.Sprintf("k%d", i), "c")
+	}
+
+	// Close should not panic
+	require.NoError(t, s.Close())
+}
+
+func TestMemoryStore_DeleteAfterClose(t *testing.T) {
+	s := store.NewMemoryStore(1 * time.Hour)
+	_ = s.Set("key", "value")
+	_ = s.SetCompressed("key", "compressed")
+	require.NoError(t, s.Close())
+
+	// Delete operations after close should not panic
+	assert.NoError(t, s.Delete("key"))
+	assert.NoError(t, s.DeleteCompressed("key"))
+	assert.NoError(t, s.DeleteExpansion("key"))
+}
+
+func TestMemoryStore_ConcurrentCloseAndOperations(t *testing.T) {
+	s := store.NewMemoryStore(1 * time.Hour)
+
+	// Pre-populate
+	for i := 0; i < 50; i++ {
+		_ = s.Set(fmt.Sprintf("k%d", i), "v")
+		_ = s.SetCompressed(fmt.Sprintf("k%d", i), "c")
+	}
+
+	var wg sync.WaitGroup
+
+	// Concurrent operations
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := fmt.Sprintf("k%d", i)
+			s.Get(key)
+			s.GetCompressed(key)
+			_ = s.Delete(key)
+		}(i)
+	}
+
+	// Close concurrently
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = s.Close()
+	}()
+
+	wg.Wait()
+	// No panics = success
+}
+
+func TestMemoryStore_CompressedEviction(t *testing.T) {
+	s := store.NewMemoryStoreWithDualTTL(1*time.Hour, 1*time.Hour)
+	defer s.Close()
+
+	// Fill beyond MaxCompressedEntries
+	for i := 0; i < store.MaxCompressedEntries+100; i++ {
+		_ = s.SetCompressed(fmt.Sprintf("key_%d", i), fmt.Sprintf("value_%d", i))
+	}
+
+	// Should be at or below max
+	assert.LessOrEqual(t, s.CompressedSize(), store.MaxCompressedEntries)
+
+	// Evictions should have occurred
+	assert.Greater(t, s.Metrics.CompressedEvictions.Load(), int64(0))
+}
+
+func TestMemoryStore_CompressedMetrics(t *testing.T) {
+	s := store.NewMemoryStoreWithDualTTL(1*time.Hour, 1*time.Hour)
+	defer s.Close()
+
+	// Miss on nonexistent key
+	_, ok := s.GetCompressed("nonexistent")
+	assert.False(t, ok)
+	assert.Equal(t, int64(1), s.Metrics.CompressedMisses.Load())
+	assert.Equal(t, int64(0), s.Metrics.CompressedHits.Load())
+
+	// Set and hit
+	_ = s.SetCompressed("key1", "compressed1")
+	val, ok := s.GetCompressed("key1")
+	assert.True(t, ok)
+	assert.Equal(t, "compressed1", val)
+	assert.Equal(t, int64(1), s.Metrics.CompressedHits.Load())
+	assert.Equal(t, int64(1), s.Metrics.CompressedMisses.Load())
+
+	// Expired key counts as miss
+	s2 := store.NewMemoryStoreWithDualTTL(1*time.Hour, 10*time.Millisecond)
+	defer s2.Close()
+	_ = s2.SetCompressed("expiring", "val")
+	time.Sleep(20 * time.Millisecond)
+	_, ok = s2.GetCompressed("expiring")
+	assert.False(t, ok)
+	assert.Equal(t, int64(1), s2.Metrics.CompressedMisses.Load())
+}
+
+func TestMemoryStore_OverwriteDoesNotEvict(t *testing.T) {
+	s := store.NewMemoryStoreWithDualTTL(1*time.Hour, 1*time.Hour)
+	defer s.Close()
+
+	// Fill to capacity
+	for i := 0; i < store.MaxCompressedEntries; i++ {
+		_ = s.SetCompressed(fmt.Sprintf("key_%d", i), "value")
+	}
+	assert.Equal(t, store.MaxCompressedEntries, s.CompressedSize())
+
+	// Overwriting existing key should NOT trigger eviction
+	evictionsBefore := s.Metrics.CompressedEvictions.Load()
+	_ = s.SetCompressed("key_0", "updated_value")
+	assert.Equal(t, evictionsBefore, s.Metrics.CompressedEvictions.Load())
+	assert.Equal(t, store.MaxCompressedEntries, s.CompressedSize())
+}

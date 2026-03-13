@@ -905,19 +905,19 @@ func configWithExpandEnabledOpenAI(mockAPIURL string) *config.Config {
 		},
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            config.StrategyCompresr,
-				FallbackStrategy:    "passthrough",
-				MinBytes:            300,
-				MaxBytes:            65536,
+				Enabled:                true,
+				Strategy:               config.StrategyCompresr,
+				FallbackStrategy:       "passthrough",
+				MinBytes:               300,
+				MaxBytes:               65536,
 				TargetCompressionRatio: 0.2,
-				IncludeExpandHint:   true,
-				EnableExpandContext: true, // ENABLED
+				IncludeExpandHint:      true,
+				EnableExpandContext:    true, // ENABLED
 				Compresr: config.CompresrConfig{
-					Endpoint: apiEndpoint,
-					AuthParam:   os.Getenv("COMPRESR_API_KEY"),
-					Model:    "toc_espresso_v1",
-					Timeout:  30 * time.Second,
+					Endpoint:  apiEndpoint,
+					AuthParam: os.Getenv("COMPRESR_API_KEY"),
+					Model:     "toc_espresso_v1",
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
@@ -945,19 +945,19 @@ func configWithExpandDisabledOpenAI() *config.Config {
 		},
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            "passthrough", // Use passthrough since no valid API endpoint
-				FallbackStrategy:    "passthrough",
-				MinBytes:            300,
-				MaxBytes:            65536,
+				Enabled:                true,
+				Strategy:               "passthrough", // Use passthrough since no valid API endpoint
+				FallbackStrategy:       "passthrough",
+				MinBytes:               300,
+				MaxBytes:               65536,
 				TargetCompressionRatio: 0.2,
-				IncludeExpandHint:   false, // No hint
-				EnableExpandContext: false, // DISABLED
+				IncludeExpandHint:      false, // No hint
+				EnableExpandContext:    false, // DISABLED
 				Compresr: config.CompresrConfig{
-					Endpoint: "",
-					AuthParam:   "",
-					Model:    "",
-					Timeout:  30 * time.Second,
+					Endpoint:  "",
+					AuthParam: "",
+					Model:     "",
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{

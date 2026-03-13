@@ -6,6 +6,9 @@ export interface Session {
   model: string
   created_at: string
   last_updated: string
+  gateway_port?: number
+  active?: boolean
+  agent_name?: string
 }
 
 export interface Savings {
@@ -79,6 +82,7 @@ export interface DashboardData {
   expand?: ExpandContext
   search?: SearchContext
   gateway?: GatewayStats
+  active_ports?: number[]
 }
 
 export interface AccountData {
@@ -90,4 +94,105 @@ export interface AccountData {
   usage_percent: number
   is_admin: boolean
   error?: string
+}
+
+export interface PromptEntry {
+  id: number
+  text: string
+  timestamp: string
+  session_id: string
+  model: string
+  provider: string
+  request_id: string
+}
+
+export interface FilterOptions {
+  sessions: string[]
+  models: string[]
+  providers: string[]
+}
+
+export interface PromptsResponse {
+  prompts: PromptEntry[]
+  total: number
+  page: number
+  limit: number
+  total_pages: number
+  filters: FilterOptions
+}
+
+// Monitor API types
+export interface MonitorInstance {
+  name: string
+  port: number
+  provider: string
+  model: string
+  status: string
+  started_at: string
+  last_activity_at: string
+  request_count: number
+  tokens_in: number
+  tokens_out: number
+  tokens_saved: number
+  cost_usd: number
+  compression_count: number
+  last_user_query: string
+  last_tool_used: string
+  working_dir: string
+}
+
+export interface MonitorData {
+  instances: MonitorInstance[]
+  timestamp: string
+}
+
+// Config API types
+export interface GatewayConfig {
+  preemptive: {
+    enabled: boolean
+    trigger_threshold: number
+    strategy: string
+  }
+  pipes: {
+    tool_output: {
+      enabled: boolean
+      strategy: string
+      min_bytes: number
+      target_compression_ratio: number
+    }
+    tool_discovery: {
+      enabled: boolean
+      strategy: string
+      min_tools: number
+      max_tools: number
+      target_ratio: number
+      search_fallback: boolean
+    }
+  }
+  cost_control: {
+    enabled: boolean
+    session_cap: number
+    global_cap: number
+  }
+  notifications: {
+    slack: {
+      enabled: boolean
+      configured: boolean
+      webhook_url: string
+    }
+  }
+  monitoring: {
+    telemetry_enabled: boolean
+  }
+}
+
+export interface ConfigPatch {
+  preemptive?: Partial<GatewayConfig['preemptive']>
+  pipes?: {
+    tool_output?: Partial<GatewayConfig['pipes']['tool_output']>
+    tool_discovery?: Partial<GatewayConfig['pipes']['tool_discovery']>
+  }
+  cost_control?: Partial<GatewayConfig['cost_control']>
+  notifications?: { slack?: Partial<GatewayConfig['notifications']['slack']> }
+  monitoring?: Partial<GatewayConfig['monitoring']>
 }

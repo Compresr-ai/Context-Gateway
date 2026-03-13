@@ -11,6 +11,7 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -28,6 +29,7 @@ type ExpandContextHandler struct {
 	expandLog   *monitoring.ExpandLog
 	requestID   string
 	sessionID   string
+	mu          sync.Mutex      // Protects expandedIDs from concurrent access
 	expandedIDs map[string]bool // Track expanded IDs to prevent circular expansion
 }
 
@@ -50,7 +52,9 @@ func (h *ExpandContextHandler) WithExpandLog(el *monitoring.ExpandLog, requestID
 // ResetExpandedIDs resets the tracking of expanded IDs.
 // Call this at the start of each request.
 func (h *ExpandContextHandler) ResetExpandedIDs() {
+	h.mu.Lock()
 	h.expandedIDs = make(map[string]bool)
+	h.mu.Unlock()
 }
 
 // Name returns the phantom tool name.
@@ -61,6 +65,8 @@ func (h *ExpandContextHandler) Name() string {
 // HandleCalls processes expand_context calls and returns results.
 func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic bool) *PhantomToolResult {
 	result := &PhantomToolResult{}
+
+	h.mu.Lock()
 
 	// Filter already-expanded IDs
 	filteredCalls := make([]PhantomToolCall, 0, len(calls))
@@ -76,18 +82,23 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 	}
 
 	if len(filteredCalls) == 0 {
+		h.mu.Unlock()
 		result.StopLoop = true
 		return result
 	}
+
+	// Mark all filtered calls as expanded before releasing lock
+	for _, call := range filteredCalls {
+		shadowID, _ := call.Input["id"].(string)
+		h.expandedIDs[shadowID] = true
+	}
+	h.mu.Unlock()
 
 	// Anthropic: group all tool_results in one user message
 	if isAnthropic {
 		var contentBlocks []any
 		for _, call := range filteredCalls {
 			shadowID, _ := call.Input["id"].(string)
-
-			// Mark as expanded
-			h.expandedIDs[shadowID] = true
 
 			// Retrieve from store
 			content, found := h.store.Get(shadowID)
@@ -99,7 +110,7 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 					Int("content_len", len(content)).
 					Msg("expand_context: retrieved content")
 			} else {
-				resultText = fmt.Sprintf("Error: shadow reference '%s' not found or expired", shadowID)
+				resultText = fmt.Sprintf("[The full content for shadow reference '%s' is no longer available (gateway was restarted between sessions). The compressed summary is already present in your context — please continue working with that.]", shadowID)
 				log.Error().
 					Str("shadow_id", shadowID).
 					Str("request_id", h.requestID).
@@ -124,9 +135,6 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 		for _, call := range filteredCalls {
 			shadowID, _ := call.Input["id"].(string)
 
-			// Mark as expanded
-			h.expandedIDs[shadowID] = true
-
 			// Retrieve from store
 			content, found := h.store.Get(shadowID)
 			var resultText string
@@ -137,7 +145,7 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 					Int("content_len", len(content)).
 					Msg("expand_context: retrieved content")
 			} else {
-				resultText = fmt.Sprintf("Error: shadow reference '%s' not found or expired", shadowID)
+				resultText = fmt.Sprintf("[The full content for shadow reference '%s' is no longer available (gateway was restarted between sessions). The compressed summary is already present in your context — please continue working with that.]", shadowID)
 				log.Error().
 					Str("shadow_id", shadowID).
 					Str("request_id", h.requestID).

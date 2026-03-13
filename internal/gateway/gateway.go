@@ -31,9 +31,12 @@ import (
 	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/costcontrol"
+	"github.com/compresr/context-gateway/internal/dashboard"
 	"github.com/compresr/context-gateway/internal/monitoring"
 	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
+	"github.com/compresr/context-gateway/internal/postsession"
 	"github.com/compresr/context-gateway/internal/preemptive"
+	"github.com/compresr/context-gateway/internal/prompthistory"
 	"github.com/compresr/context-gateway/internal/store"
 )
 
@@ -143,17 +146,23 @@ func registerBedrockHosts() {
 
 // Gateway is the main context compression gateway.
 type Gateway struct {
-	config      *config.Config
-	registry    *adapters.Registry
-	router      *Router
-	store       store.Store
-	tracker     *monitoring.Tracker
-	savings     *monitoring.SavingsTracker // Legacy: Real-time compression savings
-	aggregator  *monitoring.LogAggregator  // New: Background log aggregator (single source of truth)
-	trajectory  *monitoring.TrajectoryManager
-	httpClient  *http.Client
-	server      *http.Server
-	rateLimiter *rateLimiter
+	config           *config.Config
+	registry         *adapters.Registry
+	router           *Router
+	store            store.Store
+	tracker          *monitoring.Tracker
+	savings          *monitoring.SavingsTracker // Legacy: Real-time compression savings
+	aggregator       *monitoring.LogAggregator  // New: Background log aggregator (single source of truth)
+	trajectory       *monitoring.TrajectoryManager
+	httpClient       *http.Client
+	server           *http.Server
+	dashboardServer  *http.Server // Centralized dashboard on fixed port 18080
+	dashboardStarted bool         // Whether this instance owns the dashboard server
+	rateLimiter      *rateLimiter
+
+	// Config hot-reload
+	configReloader *config.Reloader
+	watchCancel    context.CancelFunc // cancels the file-watcher goroutine
 
 	// Cost control
 	costTracker *costcontrol.Tracker
@@ -180,6 +189,14 @@ type Gateway struct {
 	// Search tool log (in-memory ring buffer for dashboard)
 	searchLog *monitoring.SearchLog
 
+	// Persistent prompt history (SQLite)
+	promptHistory prompthistory.Store
+
+	// Main conversation session ID — only record prompts for this conversation.
+	// Set once from the first valid request; subagent requests have different IDs and are excluded.
+	mainConversationID string
+	mainConvOnce       sync.Once
+
 	// Current session ID (for filtering dashboard/savings to current session)
 	currentSessionID   string
 	currentSessionIDMu sync.RWMutex
@@ -198,6 +215,13 @@ type Gateway struct {
 
 	// Compresr API client for account status (optional)
 	compresrClient *compresr.Client
+
+	// Post-session CLAUDE.md updater
+	sessionCollector *postsession.SessionCollector
+
+	// Session monitoring dashboard
+	monitorHub   *dashboard.Hub
+	monitorStore *dashboard.SessionStore
 
 	// Lazy session initialization
 	// Session directory is created on first LLM request, not at gateway startup
@@ -228,7 +252,8 @@ type StatusReporter interface {
 }
 
 // New creates a new gateway.
-func New(cfg *config.Config) *Gateway {
+// configFilePath is optional — if provided, enables hot-reload via the config API.
+func New(cfg *config.Config, configFilePath ...string) *Gateway {
 	st := store.NewMemoryStoreWithDualTTL(store.DefaultOriginalTTL, store.DefaultCompressedTTL)
 	registry := adapters.NewRegistry()
 	r := NewRouter(cfg, st)
@@ -342,6 +367,16 @@ func New(cfg *config.Config) *Gateway {
 	}
 	aggregator.Start()
 
+	// Initialize session monitoring dashboard
+	monitorHub := dashboard.NewHub()
+	monitorStore := dashboard.NewSessionStore(monitorHub)
+
+	// Initialize prompt history store (SQLite)
+	promptHistoryStore, phErr := prompthistory.NewDefault()
+	if phErr != nil {
+		log.Warn().Err(phErr).Msg("failed to initialize prompt history (prompts will not be recorded)")
+	}
+
 	g := &Gateway{
 		config:           cfg,
 		registry:         registry,
@@ -362,15 +397,47 @@ func New(cfg *config.Config) *Gateway {
 		bedrockSigner:    bedrockSigner,
 		expandLog:        monitoring.NewExpandLog(),
 		searchLog:        monitoring.NewSearchLog(),
+		promptHistory:    promptHistoryStore,
 		currentSessionID: currentSessionID,
 		logger:           logger,
 		requestLogger:    requestLogger,
 		metrics:          metrics,
 		alerts:           alerts,
 		compresrClient:   compresr.NewClient("", ""), // Uses env vars COMPRESR_BASE_URL, COMPRESR_API_KEY
+		sessionCollector: postsession.NewSessionCollector(),
+		monitorHub:       monitorHub,
+		monitorStore:     monitorStore,
 	}
 
-	// Start background refresh for instant /savings and /costs responses
+	// Initialize config reloader (hot-reload support)
+	var cfgPath string
+	if len(configFilePath) > 0 {
+		cfgPath = configFilePath[0]
+	}
+	g.configReloader = config.NewReloader(cfg, cfgPath)
+
+	// Start file watcher so changes to the YAML config file are picked up live.
+	// The watcher goroutine is stopped in Shutdown() via watchCancel.
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	g.watchCancel = watchCancel
+	if cfgPath != "" {
+		go g.configReloader.WatchFile(watchCtx, 3*time.Second)
+	}
+
+	// Subscribe subsystems to config changes
+	g.configReloader.Subscribe(func(newCfg *config.Config) {
+		if g.costTracker != nil {
+			g.costTracker.UpdateConfig(newCfg.CostControl)
+		}
+		if g.router != nil {
+			g.router.UpdateConfig(newCfg)
+		}
+		if g.preemptive != nil {
+			g.preemptive.UpdateConfig(newCfg.ResolvePreemptiveProviderWithLogging(newCfg.Monitoring.TelemetryEnabled))
+		}
+	})
+
+	// Start background refresh for instant /savings and /dashboard responses
 	// Refreshes every 5s to match dashboard auto-refresh rate
 	g.compresrClient.StartBackgroundRefresh(5 * time.Second)
 
@@ -395,7 +462,22 @@ func New(cfg *config.Config) *Gateway {
 		MaxHeaderBytes: 1 << 20,
 	}
 
+	// Try to start centralized dashboard server on fixed port 18080.
+	// Only the first gateway instance wins; others skip gracefully.
+	g.tryStartDashboardServer()
+
 	return g
+}
+
+// cfg returns the current live configuration (thread-safe).
+// Always use cfg() in handlers instead of g.config so hot-reload changes take effect.
+func (g *Gateway) cfg() *config.Config {
+	return g.configReloader.Current()
+}
+
+// ConfigReloader returns the gateway's config reloader (for hot-reload support).
+func (g *Gateway) ConfigReloader() *config.Reloader {
+	return g.configReloader
 }
 
 // CostTracker returns the gateway's cost tracker (for CLI status display).
@@ -408,9 +490,24 @@ func (g *Gateway) SavingsTracker() *monitoring.SavingsTracker {
 	return g.savings
 }
 
+// DashboardStarted reports whether this instance owns the centralized dashboard server.
+func (g *Gateway) DashboardStarted() bool {
+	return g.dashboardStarted
+}
+
 // SetStatusReporter attaches a status reporter for CLI usage display.
 func (g *Gateway) SetStatusReporter(sr StatusReporter) {
 	g.statusReporter = sr
+}
+
+// SessionCollector returns the gateway's session event collector for post-session updates.
+func (g *Gateway) SessionCollector() *postsession.SessionCollector {
+	return g.sessionCollector
+}
+
+// PostSessionConfig returns the post-session configuration.
+func (g *Gateway) PostSessionConfig() postsession.Config {
+	return g.config.PostSession
 }
 
 // SetDashboardFS sets the embedded filesystem for the React cost dashboard SPA.
@@ -522,19 +619,48 @@ func (g *Gateway) resetForNewSession() {
 	log.Debug().Msg("all session variables reset to 0")
 }
 
-// setupRoutes configures the HTTP routes for the gateway.
+// setupRoutes configures the HTTP routes for the gateway proxy server.
+// Dashboard routes are NOT registered here — they run on the dedicated dashboard port (18080).
 func (g *Gateway) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", g.handleHealth)
 	mux.HandleFunc("/expand", g.handleExpand)
+	// API endpoints still available on proxy port for internal use (e.g., /savings slash command)
 	mux.HandleFunc("/api/dashboard", g.handleDashboardAPI)
 	mux.HandleFunc("/api/savings", g.handleSavingsAPI)
 	mux.HandleFunc("/api/account", g.handleAccountAPI)
-	mux.HandleFunc("/api/compress/", g.handleCompressAPINotFound) // Reject Compresr API calls to gateway
-	mux.HandleFunc("/costs", g.handleCostDashboard)               // exact match, redirects to /costs/
-	mux.HandleFunc("/costs/", g.handleCostDashboard)              // prefix match for SPA + assets
+	mux.HandleFunc("/api/config", g.handleConfigAPI)
+	mux.HandleFunc("/api/prompts", g.handlePromptsAPI)
+	mux.HandleFunc("/api/prompts/erase", g.handleErasePrompts)
+	mux.HandleFunc("/api/compress/", g.handleCompressAPINotFound)
 	mux.HandleFunc("/stats", g.handleStats)
 	mux.HandleFunc("/v1/models", g.handleModels)
+
+	// Session monitoring dashboard
+	monitorHandlers := dashboard.NewHandlers(g.monitorStore, g.monitorHub)
+	monitorHandlers.SetPort(g.config.Server.Port)
+	monitorHandlers.RegisterRoutes(mux)
+
 	mux.HandleFunc("/", g.handleProxy)
+}
+
+// setupDashboardRoutes configures routes for the centralized dashboard server on port 18080.
+func (g *Gateway) setupDashboardRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/health", g.handleHealth)
+	mux.HandleFunc("/api/dashboard", g.handleAggregatedDashboardAPI)
+	mux.HandleFunc("/api/savings", g.handleSavingsAPI)
+	mux.HandleFunc("/api/account", g.handleAccountAPI)
+	mux.HandleFunc("/api/config", g.handleConfigAPI)
+	mux.HandleFunc("/api/prompts", g.handlePromptsAPI)
+	mux.HandleFunc("/api/prompts/erase", g.handleErasePrompts)
+	mux.HandleFunc("/api/monitor", g.handleAggregatedMonitorAPI)
+	mux.HandleFunc("/api/monitor/rename", g.handleRenameInstance)
+	mux.HandleFunc("/api/instance/config", g.handleInstanceConfigProxy)
+	mux.HandleFunc("/api/focus", g.handleFocusTerminal)
+	mux.HandleFunc("/dashboard", g.handleDashboard)
+	mux.HandleFunc("/dashboard/", g.handleDashboard)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+	})
 }
 
 // handleCompressAPINotFound returns a helpful error when Compresr API calls hit the gateway.
@@ -557,8 +683,13 @@ func (g *Gateway) handleCompressAPINotFound(w http.ResponseWriter, r *http.Reque
 
 // Start starts the gateway.
 func (g *Gateway) Start() error {
-	log.Info().Int("port", g.config.Server.Port).Msg("gateway starting")
-	log.Info().Str("url", fmt.Sprintf("http://localhost:%d/costs/", g.config.Server.Port)).Msg("cost dashboard")
+	log.Info().Int("port", g.config.Server.Port).Msg("Context Gateway starting")
+	if g.dashboardStarted {
+		log.Info().
+			Int("port", config.DefaultDashboardPort).
+			Str("dashboard", fmt.Sprintf("http://localhost:%d/dashboard/", config.DefaultDashboardPort)).
+			Msg("dashboard available")
+	}
 	return g.server.ListenAndServe()
 }
 
@@ -567,9 +698,19 @@ func (g *Gateway) Handler() http.Handler {
 	return g.server.Handler
 }
 
+// IsAllowedHostForTest exposes isAllowedHost for unit testing SSRF protection.
+func (g *Gateway) IsAllowedHostForTest(host string) bool {
+	return g.isAllowedHost(host)
+}
+
 // Shutdown gracefully shuts down the gateway.
 func (g *Gateway) Shutdown(ctx context.Context) error {
 	log.Info().Msg("gateway shutting down")
+
+	// Stop file-watcher goroutine
+	if g.watchCancel != nil {
+		g.watchCancel()
+	}
 
 	// Stop cleanup goroutines
 	if g.rateLimiter != nil {
@@ -602,6 +743,11 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		g.aggregator.Stop()
 	}
 
+	// Stop session monitor
+	if g.monitorStore != nil {
+		g.monitorStore.Stop()
+	}
+
 	// Stop Compresr client background refresh
 	if g.compresrClient != nil {
 		g.compresrClient.StopBackgroundRefresh()
@@ -617,6 +763,20 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	// Close telemetry tracker
 	if g.tracker != nil {
 		_ = g.tracker.Close()
+	}
+
+	// Close prompt history store
+	if g.promptHistory != nil {
+		if err := g.promptHistory.Close(); err != nil {
+			log.Error().Err(err).Msg("failed to close prompt history store")
+		}
+	}
+
+	// Shutdown dashboard server if this instance owns it
+	if g.dashboardServer != nil {
+		if err := g.dashboardServer.Shutdown(ctx); err != nil {
+			log.Error().Err(err).Msg("dashboard server shutdown error")
+		}
 	}
 
 	_ = g.store.Close()

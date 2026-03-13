@@ -39,7 +39,7 @@ const banner = `
 `
 
 func printBanner() {
-	fmt.Print(compresrGreen + bold + banner + reset + "\n")
+	fmt.Print(compresrGreen + bold + banner + reset + "\r\n")
 }
 
 // loadEnvFiles loads .env from standard locations
@@ -69,6 +69,10 @@ func main() {
 		case "serve", "start":
 			// Start the gateway server only (no agent)
 			runGatewayServer(os.Args[2:])
+			return
+		case "config", "configure":
+			printBanner()
+			runConfigCommand(os.Args[2:])
 			return
 		case "update":
 			printBanner()
@@ -174,6 +178,7 @@ func runGatewayServer(args []string) {
 	log.Info().
 		Str("version", Version).
 		Str("config", configSource).
+		Str("dashboard", fmt.Sprintf("http://localhost:%d/dashboard/", config.DefaultDashboardPort)).
 		Msg("Context Gateway starting")
 
 	// Load configuration from bytes
@@ -188,8 +193,8 @@ func runGatewayServer(args []string) {
 		Bool("tool_discovery_pipe", cfg.Pipes.ToolDiscovery.Enabled).
 		Msg("configuration loaded")
 
-	// Create gateway
-	gw := gateway.New(cfg)
+	// Create gateway (pass config source for hot-reload support)
+	gw := gateway.New(cfg, configSource)
 
 	// Attach embedded React dashboard SPA
 	if dashFS, err := getDashboardFS(); err == nil {
@@ -263,6 +268,7 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  (none)       Launch Claude Code with gateway proxy (default)")
+	fmt.Println("  config       Configure gateway (TUI or browser)")
 	fmt.Println("  serve        Start the gateway proxy server only")
 	fmt.Println("  update       Update to the latest version")
 	fmt.Println("  uninstall    Remove context-gateway")
@@ -271,7 +277,8 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("Options:")
 	fmt.Println("  -c, --config FILE    Gateway config (shows menu if not specified)")
-	fmt.Println("  -p, --port PORT      Gateway port (default: 18080)")
+	fmt.Println("  -p, --port PORT      Gateway port (default: 18081)")
+	fmt.Println("  -n, --name NAME      Session name (default: auto-generated)")
 	fmt.Println("  -d, --debug          Enable debug logging")
 	fmt.Println("  --proxy MODE         auto (default), start, skip")
 	fmt.Println("  --reset-api-key      Reset Compresr API key and re-run setup")

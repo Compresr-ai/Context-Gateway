@@ -22,15 +22,18 @@ import (
 // Config is the root configuration for the Context Gateway.
 // All fields are required - no defaults are applied.
 type Config struct {
-	Server      ServerConfig      `yaml:"server"`       // HTTP server settings
-	URLs        URLsConfig        `yaml:"urls"`         // Upstream URLs
-	Providers   ProvidersConfig   `yaml:"providers"`    // LLM provider configurations
-	Pipes       PipesConfig       `yaml:"pipes"`        // Compression pipelines
-	Store       StoreConfig       `yaml:"store"`        // Shadow context store
-	Monitoring  MonitoringConfig  `yaml:"monitoring"`   // Telemetry and logging
-	Preemptive  PreemptiveConfig  `yaml:"preemptive"`   // Preemptive summarization settings
-	Bedrock     BedrockConfig     `yaml:"bedrock"`      // AWS Bedrock support (opt-in)
-	CostControl CostControlConfig `yaml:"cost_control"` // Cost control (session/global budget enforcement)
+	Server        ServerConfig        `yaml:"server"`        // HTTP server settings
+	URLs          URLsConfig          `yaml:"urls"`          // Upstream URLs
+	Providers     ProvidersConfig     `yaml:"providers"`     // LLM provider configurations
+	Pipes         PipesConfig         `yaml:"pipes"`         // Compression pipelines
+	Store         StoreConfig         `yaml:"store"`         // Shadow context store
+	Monitoring    MonitoringConfig    `yaml:"monitoring"`    // Telemetry and logging
+	Preemptive    PreemptiveConfig    `yaml:"preemptive"`    // Preemptive summarization settings
+	Bedrock       BedrockConfig       `yaml:"bedrock"`       // AWS Bedrock support (opt-in)
+	CostControl   CostControlConfig   `yaml:"cost_control"`  // Cost control (session/global budget enforcement)
+	Notifications NotificationsConfig `yaml:"notifications"` // Notification integrations (Slack, etc.)
+	PostSession   PostSessionConfig   `yaml:"post_session"`  // Post-session CLAUDE.md updates
+	Dashboard     DashboardConfig     `yaml:"dashboard"`     // Dashboard UI settings
 
 	// Runtime-only fields (not loaded from YAML)
 	AgentFlags *AgentFlags `yaml:"-"` // Agent CLI flags, set at runtime by cmd/agent.go
@@ -121,6 +124,22 @@ type ServerConfig struct {
 type URLsConfig struct {
 	Gateway  string `yaml:"gateway"`  // Gateway's own URL (for external access)
 	Compresr string `yaml:"compresr"` // Compresr platform URL - not used in current release
+}
+
+// NotificationsConfig controls notification integrations.
+type NotificationsConfig struct {
+	Slack SlackConfig `yaml:"slack"` // Slack notification settings
+}
+
+// SlackConfig controls Slack notifications via Claude Code hooks.
+type SlackConfig struct {
+	Enabled    bool   `yaml:"enabled"`               // Whether Slack notifications are enabled
+	WebhookURL string `yaml:"webhook_url,omitempty"` // Slack incoming webhook URL
+}
+
+// DashboardConfig controls the embedded dashboard UI.
+type DashboardConfig struct {
+	HiddenTabs []string `yaml:"hidden_tabs"` // Tabs to hide from the dashboard UI (e.g., ["savings"])
 }
 
 // StoreConfig contains shadow context store settings.

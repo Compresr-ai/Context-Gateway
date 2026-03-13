@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/compresr/context-gateway/internal/tokenizer"
 )
 
 // =============================================================================
@@ -63,6 +65,19 @@ func ComputeSessionID(body []byte) string {
 
 	// No user message found (likely a subagent)
 	return ""
+}
+
+// ComputeSessionIDFromClean computes a stable session ID from pre-cleaned user content.
+// Unlike ComputeSessionID which hashes the entire first user message (including injected
+// XML tags), this hashes only the cleaned text content. This makes the session ID stable
+// even when injected content (skills, deferred tools) changes mid-conversation.
+func ComputeSessionIDFromClean(cleanContent string) string {
+	if cleanContent == "" {
+		return ""
+	}
+	h := sha256.New()
+	h.Write([]byte(cleanContent))
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // =============================================================================
@@ -275,7 +290,7 @@ func BuildAnthropicResponse(summary string, messages []json.RawMessage, lastInde
 		"stop_reason":   "end_turn",
 		"stop_sequence": nil,
 		"content":       []map[string]interface{}{{"type": "text", "text": content}},
-		"usage":         map[string]interface{}{"input_tokens": 0, "output_tokens": len(content) / 4},
+		"usage":         map[string]interface{}{"input_tokens": 0, "output_tokens": tokenizer.CountTokens(content)},
 	}
 	data, _ := json.Marshal(resp)
 	return data

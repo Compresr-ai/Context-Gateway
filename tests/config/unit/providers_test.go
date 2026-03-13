@@ -107,7 +107,7 @@ func TestProvidersConfig_Validate(t *testing.T) {
 			cfg: config.ProvidersConfig{
 				"anthropic": {
 					ProviderAuth: "sk-ant-xxx",
-					Model:  "claude-haiku-4-5",
+					Model:        "claude-haiku-4-5",
 				},
 			},
 			wantErr: false,
@@ -157,7 +157,7 @@ func TestConfig_ValidateUsedProviders(t *testing.T) {
 			Providers: config.ProvidersConfig{
 				"gemini": {
 					ProviderAuth: "test-key",
-					Model:  "gemini-2.0-flash",
+					Model:        "gemini-2.0-flash",
 				},
 			},
 			Pipes: pipes.Config{
@@ -253,12 +253,12 @@ func TestConfig_ResolveProvider(t *testing.T) {
 		Providers: config.ProvidersConfig{
 			"gemini": {
 				ProviderAuth: "test-gemini-key",
-				Model:  "gemini-2.0-flash",
+				Model:        "gemini-2.0-flash",
 			},
 			"anthropic": {
-				ProviderAuth:   "test-anthropic-key",
-				Model:    "claude-haiku-4-5",
-				Endpoint: "https://custom-proxy.example.com/v1/messages",
+				ProviderAuth: "test-anthropic-key",
+				Model:        "claude-haiku-4-5",
+				Endpoint:     "https://custom-proxy.example.com/v1/messages",
 			},
 		},
 	}

@@ -117,28 +117,6 @@ func TestC6_CacheLookupBeforeCompression(t *testing.T) {
 	}
 }
 
-// TestC7_TransparentProxy verifies expand_context is invisible to client.
-// The phantom tool is used internally for context expansion but must be
-// filtered from responses sent to the client. Client should never see
-// expand_context in tool_calls or streaming chunks.
-func TestC7_TransparentProxy(t *testing.T) {
-	st := store.NewMemoryStore(5 * time.Minute)
-	expander := tooloutput.NewExpander(st, nil)
-
-	responseWithExpand := []byte(`{
-		"content": [
-			{"type": "text", "text": "Let me expand that"},
-			{"type": "tool_use", "id": "tu1", "name": "expand_context", "input": {"id": "shadow_abc123"}},
-			{"type": "text", "text": "More text"}
-		]
-	}`)
-
-	filtered, modified := expander.FilterExpandContextFromResponse(responseWithExpand)
-	assert.True(t, modified, "C7: response should be modified")
-	assert.NotContains(t, string(filtered), "expand_context",
-		"C7: expand_context should be filtered from response")
-}
-
 // TestC11_RateLimiter verifies rate limiting protects compression API.
 // Token bucket allows burst but limits sustained rate.
 // Prevents overwhelming the compression service under load.

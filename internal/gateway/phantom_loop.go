@@ -17,13 +17,17 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 )
 
 // MaxPhantomLoops prevents infinite recursion.
@@ -38,9 +42,10 @@ type PhantomToolCall struct {
 
 // PhantomToolResult contains the outcome of handling phantom tool calls.
 type PhantomToolResult struct {
-	ToolResults   []map[string]any             // Tool result messages to append
-	ModifyRequest func([]byte) ([]byte, error) // Optional: modify request before re-forwarding
-	StopLoop      bool                         // If true, don't re-forward (return current response)
+	ToolResults     []map[string]any             // Tool result messages to append
+	ModifyRequest   func([]byte) ([]byte, error) // Optional: modify request before re-forwarding
+	StopLoop        bool                         // If true, don't re-forward (return current response)
+	RewriteResponse func([]byte) ([]byte, error) // Optional: transform response before returning to client
 }
 
 // PhantomToolHandler handles a specific phantom tool.
@@ -86,7 +91,7 @@ func (p *PhantomLoop) Run(
 		HandledCalls: make(map[string]int),
 	}
 	currentBody := body
-	isAnthropic := provider == adapters.ProviderAnthropic
+	isAnthropic := provider == adapters.ProviderAnthropic || provider == adapters.ProviderBedrock
 
 	for {
 		// Forward to LLM
@@ -162,7 +167,16 @@ func (p *PhantomLoop) Run(
 			result.HandledCalls[handler.Name()] += len(calls)
 
 			if handleResult.StopLoop {
-				// Filter and return
+				// Apply response rewrite if provided (call mode: gateway_search_tool -> real tool)
+				if handleResult.RewriteResponse != nil {
+					rewritten, rwErr := handleResult.RewriteResponse(result.ResponseBody)
+					if rwErr != nil {
+						log.Warn().Err(rwErr).Msg("phantom_loop: response rewrite failed, returning original")
+					} else {
+						result.ResponseBody = rewritten
+					}
+				}
+				// Filter remaining phantom tools from response
 				for _, h := range p.handlers {
 					if filtered, ok := h.FilterFromResponse(result.ResponseBody); ok {
 						result.ResponseBody = filtered
@@ -231,7 +245,7 @@ func (p *PhantomLoop) parsePhantomCalls(responseBody []byte, provider adapters.P
 	var calls []PhantomToolCall
 
 	switch provider {
-	case adapters.ProviderAnthropic:
+	case adapters.ProviderAnthropic, adapters.ProviderBedrock:
 		content, ok := response["content"].([]any)
 		if !ok {
 			return nil
@@ -262,7 +276,43 @@ func (p *PhantomLoop) parsePhantomCalls(responseBody []byte, provider adapters.P
 			})
 		}
 
-	case adapters.ProviderOpenAI:
+	case adapters.ProviderOpenAI, adapters.ProviderOllama, adapters.ProviderLiteLLM:
+		// OpenAI Responses API format: output[] with type:"function_call"
+		// Check this BEFORE Chat Completions since both use the OpenAI adapter.
+		if output, ok := response["output"].([]any); ok {
+			for _, item := range output {
+				itemMap, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+
+				if itemMap["type"] != "function_call" {
+					continue
+				}
+
+				name, _ := itemMap["name"].(string)
+				if !handlerNames[name] {
+					continue
+				}
+
+				callID, _ := itemMap["call_id"].(string)
+				argsStr, _ := itemMap["arguments"].(string)
+
+				var input map[string]any
+				if err := json.Unmarshal([]byte(argsStr), &input); err != nil {
+					input = make(map[string]any)
+				}
+
+				calls = append(calls, PhantomToolCall{
+					ToolUseID: callID,
+					ToolName:  name,
+					Input:     input,
+				})
+			}
+			if len(calls) > 0 {
+				break
+			}
+		}
 		choices, ok := response["choices"].([]any)
 		if !ok || len(choices) == 0 {
 			return nil
@@ -315,6 +365,18 @@ func (p *PhantomLoop) parsePhantomCalls(responseBody []byte, provider adapters.P
 		}
 	}
 
+	// Also scan text content for <<<EXPAND:shadow_xxx>>> patterns (text-based expand_context)
+	if handlerNames[ExpandContextToolName] {
+		shadowIDs := tooloutput.ParseExpandPatternsFromText(responseBody)
+		for i, shadowID := range shadowIDs {
+			calls = append(calls, PhantomToolCall{
+				ToolUseID: fmt.Sprintf("text_expand_%d", i),
+				ToolName:  ExpandContextToolName,
+				Input:     map[string]any{"id": shadowID},
+			})
+		}
+	}
+
 	return calls
 }
 
@@ -331,6 +393,13 @@ func (p *PhantomLoop) filterCallsByName(calls []PhantomToolCall, name string) []
 
 // appendMessagesToRequest adds assistant response and tool results to the request.
 func appendMessagesToRequest(body []byte, assistantResponse []byte, toolResults []map[string]any, isAnthropic bool) ([]byte, error) {
+	// Detect Responses API format: has input[] but no messages[]
+	isResponses := gjson.GetBytes(body, "input").Exists() && !gjson.GetBytes(body, "messages").Exists()
+
+	if isResponses {
+		return appendMessagesToRequestResponses(body, assistantResponse, toolResults)
+	}
+
 	var request map[string]any
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, err
@@ -371,4 +440,72 @@ func appendMessagesToRequest(body []byte, assistantResponse []byte, toolResults 
 
 	request["messages"] = messages
 	return json.Marshal(request)
+}
+
+// appendMessagesToRequestResponses handles the OpenAI Responses API format.
+// Instead of messages[], it appends to input[] using function_call and function_call_output items.
+func appendMessagesToRequestResponses(body []byte, assistantResponse []byte, toolResults []map[string]any) ([]byte, error) {
+	var response map[string]any
+	if err := json.Unmarshal(assistantResponse, &response); err != nil {
+		return nil, err
+	}
+
+	result := body
+
+	// Extract function_call items from output[] and append them to input[]
+	if output, ok := response["output"].([]any); ok {
+		for _, item := range output {
+			itemMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if itemMap["type"] != "function_call" {
+				continue
+			}
+			// Append the function_call item to input[]
+			itemJSON, err := json.Marshal(itemMap)
+			if err != nil {
+				continue
+			}
+			result, err = sjson.SetRawBytes(result, "input.-1", itemJSON)
+			if err != nil {
+				return nil, fmt.Errorf("failed to append function_call to input: %w", err)
+			}
+		}
+	}
+
+	// Append tool results as function_call_output items to input[]
+	for _, tr := range toolResults {
+		// Convert tool result to function_call_output format
+		toolUseID, _ := tr["tool_call_id"].(string)
+		if toolUseID == "" {
+			// Anthropic format uses "tool_use_id"
+			toolUseID, _ = tr["tool_use_id"].(string)
+		}
+		content, _ := tr["content"].(string)
+		if content == "" {
+			// Try nested content for Anthropic format
+			if contentArr, ok := tr["content"].([]any); ok && len(contentArr) > 0 {
+				if block, ok := contentArr[0].(map[string]any); ok {
+					content, _ = block["text"].(string)
+				}
+			}
+		}
+
+		outputItem := map[string]any{
+			"type":    "function_call_output",
+			"call_id": toolUseID,
+			"output":  content,
+		}
+		itemJSON, err := json.Marshal(outputItem)
+		if err != nil {
+			continue
+		}
+		result, err = sjson.SetRawBytes(result, "input.-1", itemJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to append function_call_output to input: %w", err)
+		}
+	}
+
+	return result, nil
 }

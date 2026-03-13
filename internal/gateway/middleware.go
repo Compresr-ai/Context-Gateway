@@ -8,6 +8,8 @@
 package gateway
 
 import (
+	"bufio"
+	"fmt"
 	"net"
 	"net/http"
 	"runtime/debug"
@@ -39,6 +41,15 @@ func (w *responseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+// Hijack implements http.Hijacker to support WebSocket upgrades.
+// Delegates to the underlying ResponseWriter if it supports hijacking.
+func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
 }
 
 // rateLimiter implements a token bucket rate limiter per IP address.
@@ -188,10 +199,9 @@ func (g *Gateway) loggingMiddleware(next http.Handler) http.Handler {
 		// Check for high latency
 		g.alerts.FlagHighLatency(requestID, latency, "", r.URL.Path)
 
-		// Update CLI status (if configured)
+		// Track request count for status refresh
 		if g.statusReporter != nil {
 			g.statusReporter.IncrementRequests()
-			g.statusReporter.MaybeRefreshCompact()
 		}
 
 		// Legacy log for compatibility
@@ -246,9 +256,14 @@ func (g *Gateway) security(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 
 		// Dashboard routes need scripts, styles, fonts, and API access
-		if strings.HasPrefix(r.URL.Path, "/costs") || strings.HasPrefix(r.URL.Path, "/api/dashboard") {
+		if strings.HasPrefix(r.URL.Path, "/dashboard") || strings.HasPrefix(r.URL.Path, "/api/dashboard") || strings.HasPrefix(r.URL.Path, "/api/prompts") {
 			w.Header().Set("Content-Security-Policy",
 				"default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'")
+		} else if strings.HasPrefix(r.URL.Path, "/monitor") {
+			// Monitor dashboard uses inline HTML+JS+CSS served by the gateway itself (localhost-only).
+			// Allow inline scripts/styles and WebSocket connections to self.
+			w.Header().Set("Content-Security-Policy",
+				"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' ws: wss:")
 		} else {
 			w.Header().Set("Content-Security-Policy", "default-src 'none'")
 		}
@@ -309,23 +324,40 @@ func (g *Gateway) isAllowedHost(host string) bool {
 	}
 	host = strings.ToLower(host)
 
+	// Block cloud metadata endpoints (SSRF target)
+	if isBlockedIP(host) {
+		return false
+	}
+
 	// Check static allowlist first
 	if allowedHosts[host] {
 		return true
 	}
 
-	// Check suffix patterns for cloud providers with regional subdomains
+	// Check suffix patterns for cloud providers with regional subdomains.
 	// Vertex AI: us-central1-aiplatform.googleapis.com, europe-west1-aiplatform.googleapis.com
-	// AWS Bedrock: bedrock-runtime.us-east-1.amazonaws.com
-	cloudPatterns := []string{
-		"-aiplatform.googleapis.com",
-		".amazonaws.com",
-	}
-	for _, pattern := range cloudPatterns {
-		if strings.HasSuffix(host, pattern) {
-			return true
-		}
+	// AWS Bedrock: specific hosts registered via registerBedrockHosts()
+	if strings.HasSuffix(host, "-aiplatform.googleapis.com") {
+		return true
 	}
 
+	return false
+}
+
+// isBlockedIP returns true for IPs that should never be targeted (metadata endpoints, link-local).
+func isBlockedIP(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Not an IP literal — check common metadata hostnames
+		return host == "metadata.google.internal"
+	}
+	// Block link-local range (169.254.0.0/16) — includes AWS/GCP metadata at 169.254.169.254
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 169 && ip4[1] == 254 {
+		return true
+	}
+	// Block loopback (127.0.0.0/8) unless explicitly allowed
+	if ip.IsLoopback() {
+		return !allowedHosts["127.0.0.1"] && !allowedHosts["localhost"]
+	}
 	return false
 }

@@ -7,6 +7,9 @@ import (
 	"strings"
 
 	"github.com/compresr/context-gateway/internal/utils"
+	"github.com/rs/zerolog/log"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // OpenAIAdapter handles OpenAI API format requests.
@@ -170,62 +173,37 @@ func (a *OpenAIAdapter) extractChatCompletions(req map[string]any) ([]ExtractedC
 }
 
 // ApplyToolOutput applies compressed tool results back to the request.
+// Uses sjson for byte-level replacement to preserve JSON field ordering and KV-cache prefix.
 // Supports both Responses API and Chat Completions API formats.
 func (a *OpenAIAdapter) ApplyToolOutput(body []byte, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 {
 		return body, nil
 	}
 
-	resultMap := make(map[string]string)
-	for _, r := range results {
-		resultMap[r.ID] = r.Compressed
-	}
+	// Detect format: Responses API has "input", Chat Completions has "messages"
+	isResponsesAPI := gjson.GetBytes(body, "input").Exists()
 
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("failed to parse request: %w", err)
-	}
-
-	// Try Responses API format first (input[])
-	if items, ok := req["input"].([]any); ok {
-		for i, itemAny := range items {
-			m, ok := itemAny.(map[string]any)
-			if !ok {
-				continue
-			}
-			if typ := getString(m, "type"); typ == "function_call_output" {
-				callID := getString(m, "call_id")
-				if compressed, found := resultMap[callID]; found {
-					m["output"] = compressed
-					items[i] = m
-				}
-			}
+	modified := body
+	// Process in reverse order to maintain correct byte offsets
+	for i := len(results) - 1; i >= 0; i-- {
+		r := results[i]
+		var path string
+		if isResponsesAPI {
+			// Responses API: input[N].output
+			path = fmt.Sprintf("input.%d.output", r.MessageIndex)
+		} else {
+			// Chat Completions: messages[N].content
+			path = fmt.Sprintf("messages.%d.content", r.MessageIndex)
 		}
-		req["input"] = items
-		return json.Marshal(req)
-	}
-
-	// Try Chat Completions format (messages[])
-	if messages, ok := req["messages"].([]any); ok {
-		for i, msgAny := range messages {
-			msg, ok := msgAny.(map[string]any)
-			if !ok {
-				continue
-			}
-			if getString(msg, "role") != "tool" {
-				continue
-			}
-			callID := getString(msg, "tool_call_id")
-			if compressed, found := resultMap[callID]; found {
-				msg["content"] = compressed
-				messages[i] = msg
-			}
+		var err error
+		modified, err = sjson.SetBytes(modified, path, r.Compressed)
+		if err != nil {
+			log.Warn().Err(err).Str("path", path).Str("id", r.ID).
+				Msg("sjson set failed for tool output, skipping")
+			continue
 		}
-		req["messages"] = messages
-		return json.Marshal(req)
 	}
-
-	return body, nil
+	return modified, nil
 }
 
 func getString(m map[string]any, key string) string {
@@ -300,6 +278,13 @@ func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOpt
 			// Responses API: flat format {"type": "function", "name": "...", "description": "..."}
 			name = getString(tool, "name")
 			description = getString(tool, "description")
+			// Fallback: some Codex versions send nested Chat Completions format even with input[]
+			if name == "" {
+				if fn, ok := tool["function"].(map[string]any); ok {
+					name = getString(fn, "name")
+					description = getString(fn, "description")
+				}
+			}
 		} else {
 			// Chat Completions: nested format {"type": "function", "function": {"name": "..."}}
 			fn, ok := tool["function"].(map[string]any)
@@ -333,6 +318,7 @@ func (a *OpenAIAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOpt
 }
 
 // ApplyToolDiscovery filters tools based on Keep flag in results.
+// Uses gjson/sjson to preserve original JSON byte representation and KV-cache prefix.
 // Supports both Responses API (flat) and Chat Completions (nested) formats.
 func (a *OpenAIAdapter) ApplyToolDiscovery(body []byte, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 {
@@ -346,47 +332,36 @@ func (a *OpenAIAdapter) ApplyToolDiscovery(body []byte, results []CompressedResu
 		}
 	}
 
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("failed to parse request: %w", err)
-	}
-
-	tools, ok := req["tools"].([]any)
-	if !ok {
+	toolsResult := gjson.GetBytes(body, "tools")
+	if !toolsResult.Exists() {
 		return body, nil
 	}
 
 	// Detect format: Responses API has "input" key
-	_, hasInput := req["input"]
-	isResponsesAPI := hasInput
+	isResponsesAPI := gjson.GetBytes(body, "input").Exists()
 
-	filtered := make([]any, 0, len(keepSet))
-	for _, toolAny := range tools {
-		tool, ok := toolAny.(map[string]any)
-		if !ok {
-			continue
-		}
-
+	var keptRaw []byte
+	keptRaw = append(keptRaw, '[')
+	first := true
+	toolsResult.ForEach(func(_, value gjson.Result) bool {
 		var name string
 		if isResponsesAPI {
-			// Responses API: flat format
-			name = getString(tool, "name")
+			name = value.Get("name").String()
 		} else {
-			// Chat Completions: nested format
-			fn, ok := tool["function"].(map[string]any)
-			if !ok {
-				continue
-			}
-			name = getString(fn, "name")
+			name = value.Get("function.name").String()
 		}
-
 		if keepSet[name] {
-			filtered = append(filtered, toolAny)
+			if !first {
+				keptRaw = append(keptRaw, ',')
+			}
+			keptRaw = append(keptRaw, value.Raw...)
+			first = false
 		}
-	}
+		return true
+	})
+	keptRaw = append(keptRaw, ']')
 
-	req["tools"] = filtered
-	return utils.MarshalNoEscape(req)
+	return sjson.SetRawBytes(body, "tools", keptRaw)
 }
 
 // =============================================================================
@@ -449,6 +424,13 @@ func (a *OpenAIAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, op
 			// Responses API: flat format {"type": "function", "name": "...", "description": "..."}
 			name = getString(tool, "name")
 			description = getString(tool, "description")
+			// Fallback: some Codex versions send nested Chat Completions format even with input[]
+			if name == "" {
+				if fn, ok := tool["function"].(map[string]any); ok {
+					name = getString(fn, "name")
+					description = getString(fn, "description")
+				}
+			}
 		} else {
 			// Chat Completions: nested format {"type": "function", "function": {"name": "..."}}
 			fn, ok := tool["function"].(map[string]any)
@@ -705,6 +687,61 @@ func (a *OpenAIAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, result
 var _ ParsedRequestAdapter = (*OpenAIAdapter)(nil)
 
 // =============================================================================
+// LAST USER CONTENT - Structural extraction for classification
+// =============================================================================
+
+// ExtractLastUserContent extracts text blocks from the last user message.
+// OpenAI uses separate role="tool" messages for tool results, so hasToolResults is always false.
+// Supports both Responses API (input[]) and Chat Completions (messages[]).
+func (a *OpenAIAdapter) ExtractLastUserContent(body []byte) ([]string, bool) {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, false
+	}
+
+	// Try Responses API format first (input can be string or array)
+	if input, ok := req["input"]; ok && input != nil {
+		// String input: "input": "Say hello briefly."
+		if s, ok := input.(string); ok && s != "" {
+			return []string{s}, false
+		}
+		// Array input: "input": [{type: "message", role: "user", content: "..."}]
+		if items, ok := input.([]any); ok {
+			for i := len(items) - 1; i >= 0; i-- {
+				m, ok := items[i].(map[string]any)
+				if !ok {
+					continue
+				}
+				if getString(m, "type") == "message" && getString(m, "role") == "user" {
+					content := extractStringContent(m["content"])
+					if content != "" {
+						return []string{content}, false
+					}
+				}
+			}
+		}
+	}
+
+	// Chat Completions format (messages[])
+	if messages, ok := req["messages"].([]any); ok {
+		for i := len(messages) - 1; i >= 0; i-- {
+			msg, ok := messages[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			if getString(msg, "role") == "user" {
+				content := extractStringContent(msg["content"])
+				if content != "" {
+					return []string{content}, false
+				}
+			}
+		}
+	}
+
+	return nil, false
+}
+
+// =============================================================================
 // QUERY EXTRACTION
 // =============================================================================
 
@@ -720,7 +757,7 @@ func (a *OpenAIAdapter) ExtractUserQuery(body []byte) string {
 	if input, ok := req["input"]; ok && input != nil {
 		items, ok := input.([]any)
 		if ok {
-			// Iterate backwards to find the last user message
+			// Iterate backwards to find the last real user message
 			for i := len(items) - 1; i >= 0; i-- {
 				m, ok := items[i].(map[string]any)
 				if !ok {
@@ -729,7 +766,7 @@ func (a *OpenAIAdapter) ExtractUserQuery(body []byte) string {
 				typ := getString(m, "type")
 				role := getString(m, "role")
 				if typ == "message" && role == "user" {
-					content := extractStringContent(m["content"])
+					content := extractUserText(m["content"])
 					if content != "" {
 						return content
 					}
@@ -740,14 +777,20 @@ func (a *OpenAIAdapter) ExtractUserQuery(body []byte) string {
 
 	// Try Chat Completions format (messages[])
 	if messages, ok := req["messages"].([]any); ok {
-		// Iterate backwards to find the last user message
+		// Iterate backwards to find the last real user message
+		// Skip tool-role messages and system-reminder injections
 		for i := len(messages) - 1; i >= 0; i-- {
 			msg, ok := messages[i].(map[string]any)
 			if !ok {
 				continue
 			}
-			if getString(msg, "role") == "user" {
-				content := extractStringContent(msg["content"])
+			role := getString(msg, "role")
+			// Skip tool results (role=tool in OpenAI format)
+			if role == "tool" {
+				continue
+			}
+			if role == "user" {
+				content := extractUserText(msg["content"])
 				if content != "" {
 					return content
 				}
@@ -758,44 +801,114 @@ func (a *OpenAIAdapter) ExtractUserQuery(body []byte) string {
 	return ""
 }
 
+// extractUserText extracts genuine user text, filtering out system reminders.
+func extractUserText(content any) string {
+	text := extractStringContent(content)
+	if text != "" && !strings.HasPrefix(strings.TrimSpace(text), "<system-reminder>") {
+		return text
+	}
+	return ""
+}
+
+// ExtractAssistantIntent extracts the LLM's reasoning from the last assistant
+// message that contains tool_calls. In OpenAI Chat Completions format, the
+// assistant's reasoning is in the content field of the message with tool_calls.
+func (a *OpenAIAdapter) ExtractAssistantIntent(body []byte) string {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+
+	// Try Responses API format (input[]) — look for reasoning before function_call
+	if input, ok := req["input"].([]any); ok {
+		for i := len(input) - 1; i >= 0; i-- {
+			item, ok := input[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			typ := getString(item, "type")
+			// function_call items don't have reasoning text — look for preceding message
+			if typ == "message" && getString(item, "role") == "assistant" {
+				content := extractStringContent(item["content"])
+				if content != "" && !strings.HasPrefix(strings.TrimSpace(content), "<system-reminder>") {
+					return content
+				}
+			}
+		}
+	}
+
+	// Chat Completions format (messages[])
+	if messages, ok := req["messages"].([]any); ok {
+		for i := len(messages) - 1; i >= 0; i-- {
+			msg, ok := messages[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			if getString(msg, "role") != "assistant" {
+				continue
+			}
+			if _, hasTools := msg["tool_calls"]; !hasTools {
+				continue
+			}
+			content := extractStringContent(msg["content"])
+			if content != "" && !strings.HasPrefix(strings.TrimSpace(content), "<system-reminder>") {
+				return content
+			}
+		}
+	}
+	return ""
+}
+
 // =============================================================================
 // USAGE EXTRACTION - Extract token usage from API response
 // =============================================================================
 
 // ExtractUsage extracts token usage from OpenAI API response.
-// OpenAI format: {"usage": {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N,
+// Supports both Chat Completions and Responses API field names:
+//   - Chat Completions: prompt_tokens, completion_tokens, prompt_tokens_details.cached_tokens
+//   - Responses API:    input_tokens, output_tokens, input_tokens_details.cached_tokens
 //
-//	"prompt_tokens_details": {"cached_tokens": N}}}
-//
-// Note: OpenAI's prompt_tokens INCLUDES cached tokens, so we normalize by subtracting
-// cached_tokens from InputTokens to match the convention that InputTokens = non-cached only.
+// Note: OpenAI's prompt_tokens/input_tokens INCLUDES cached tokens, so we normalize by
+// subtracting cached_tokens from InputTokens to match the convention that InputTokens = non-cached only.
 func (a *OpenAIAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 	if len(responseBody) == 0 {
 		return UsageInfo{}
 	}
 
-	var resp struct {
-		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			TotalTokens         int `json:"total_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(responseBody, &resp); err != nil {
+	usage := gjson.GetBytes(responseBody, "usage")
+	if !usage.Exists() {
 		return UsageInfo{}
 	}
 
-	cachedTokens := resp.Usage.PromptTokensDetails.CachedTokens
-	nonCachedInput := resp.Usage.PromptTokens - cachedTokens
+	// Try Chat Completions fields first, then Responses API fields
+	promptTokens := usage.Get("prompt_tokens").Int()
+	if promptTokens == 0 {
+		promptTokens = usage.Get("input_tokens").Int()
+	}
+
+	completionTokens := usage.Get("completion_tokens").Int()
+	if completionTokens == 0 {
+		completionTokens = usage.Get("output_tokens").Int()
+	}
+
+	totalTokens := usage.Get("total_tokens").Int()
+
+	// Try Chat Completions cached path first, then Responses API cached path
+	cachedTokens := usage.Get("prompt_tokens_details.cached_tokens").Int()
+	if cachedTokens == 0 {
+		cachedTokens = usage.Get("input_tokens_details.cached_tokens").Int()
+	}
+
+	nonCachedInput := int(promptTokens) - int(cachedTokens)
+	if nonCachedInput < 0 {
+		nonCachedInput = 0
+	}
 
 	return UsageInfo{
 		InputTokens:          nonCachedInput,
-		OutputTokens:         resp.Usage.CompletionTokens,
-		TotalTokens:          resp.Usage.TotalTokens,
-		CacheReadInputTokens: cachedTokens,
+		OutputTokens:         int(completionTokens),
+		TotalTokens:          int(totalTokens),
+		CacheReadInputTokens: int(cachedTokens),
 	}
 }
 

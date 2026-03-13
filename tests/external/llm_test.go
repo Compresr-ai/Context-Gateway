@@ -106,7 +106,7 @@ func TestCallLLM_Anthropic(t *testing.T) {
 	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
 		Endpoint:     server.URL,
 		Provider:     "anthropic",
-		ProviderKey:    "test-key",
+		ProviderKey:  "test-key",
 		Model:        "claude-haiku-4-5",
 		SystemPrompt: "compress this",
 		UserPrompt:   "content to compress",
@@ -146,7 +146,7 @@ func TestCallLLM_OpenAI(t *testing.T) {
 	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
 		Endpoint:     server.URL,
 		Provider:     "openai",
-		ProviderKey:    "test-key",
+		ProviderKey:  "test-key",
 		Model:        "gpt-4o-mini",
 		SystemPrompt: "compress this",
 		UserPrompt:   "content to compress",
@@ -189,7 +189,7 @@ func TestCallLLM_Gemini(t *testing.T) {
 	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
 		Endpoint:     server.URL,
 		Provider:     "gemini",
-		ProviderKey:    "test-key",
+		ProviderKey:  "test-key",
 		Model:        "gemini-2.0-flash",
 		SystemPrompt: "compress this",
 		UserPrompt:   "content to compress",
@@ -226,7 +226,7 @@ func TestCallLLM_ExplicitProvider(t *testing.T) {
 	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
 		Endpoint:     server.URL + "/anthropic/v1",
 		Provider:     "openai",
-		ProviderKey:    "test-key",
+		ProviderKey:  "test-key",
 		Model:        "gpt-4o",
 		SystemPrompt: "test",
 		UserPrompt:   "test",
@@ -443,7 +443,7 @@ func TestCallLLM_APIKey_Takes_Priority(t *testing.T) {
 	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
 		Endpoint:     server.URL,
 		Provider:     "anthropic",
-		ProviderKey:    "my-api-key",
+		ProviderKey:  "my-api-key",
 		BearerAuth:   "my-bearer-token",
 		Model:        "model",
 		MaxTokens:    100,
@@ -500,7 +500,7 @@ func TestCallLLM_ExtraHeaders_Nil(t *testing.T) {
 	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
 		Endpoint:     server.URL,
 		Provider:     "anthropic",
-		ProviderKey:    "key",
+		ProviderKey:  "key",
 		Model:        "model",
 		MaxTokens:    100,
 		SystemPrompt: "s",

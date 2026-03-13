@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -21,6 +22,10 @@ import (
 type contextKey string
 
 const RequestIDKey contextKey = "request_id"
+
+// globalLoggerOnce ensures the global logger is only set once.
+// This prevents data races when multiple gateways are created in parallel tests.
+var globalLoggerOnce sync.Once
 
 // Logger wraps zerolog.Logger.
 type Logger struct {
@@ -66,9 +71,14 @@ func New(cfg LoggerConfig) *Logger {
 }
 
 // Global sets the global zerolog logger.
+// Uses sync.Once to ensure it's only set once per process, preventing data races
+// when multiple gateways are created in parallel tests (dashboard goroutines
+// read from log.Logger while Global() would write to it).
 func Global(cfg LoggerConfig) {
-	logger := New(cfg)
-	log.Logger = logger.zl
+	globalLoggerOnce.Do(func() {
+		logger := New(cfg)
+		log.Logger = logger.zl
+	})
 }
 
 // Debug returns a debug event.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/monitoring"
-	"github.com/compresr/context-gateway/internal/pipes"
 )
 
 // handleNonStreaming handles non-streaming requests with phantom tool loop support.
@@ -36,41 +36,38 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	}
 
 	// Build request-scoped phantom handlers to avoid cross-request state leakage.
-	// searchFallback is enabled for:
-	// - tool-search strategy: uses gateway_search_tools with local regex search
-	searchFallbackEnabled := g.config.Pipes.ToolDiscovery.Enabled &&
-		g.config.Pipes.ToolDiscovery.Strategy == config.StrategyToolSearch
+	// searchFallback is enabled for tool-search strategy (universal dispatcher)
+	searchFallbackEnabled := g.cfg().Pipes.ToolDiscovery.Enabled &&
+		(g.cfg().Pipes.ToolDiscovery.Strategy == config.StrategyToolSearch || g.cfg().Pipes.ToolDiscovery.EnableSearchFallback)
 	var requestPhantomLoop *PhantomLoop
 	var searchHandler *SearchToolHandler
 	if expandEnabled || searchFallbackEnabled {
 		var handlers []PhantomToolHandler
 
 		if searchFallbackEnabled {
-			searchToolName := g.config.Pipes.ToolDiscovery.SearchToolName
+			searchToolName := g.cfg().Pipes.ToolDiscovery.SearchToolName
 			if searchToolName == "" {
 				searchToolName = "gateway_search_tools"
 			}
-			maxSearchResults := g.config.Pipes.ToolDiscovery.MaxSearchResults
+			maxSearchResults := g.cfg().Pipes.ToolDiscovery.MaxSearchResults
 			if maxSearchResults <= 0 {
 				maxSearchResults = 5
 			}
 
-			// Configure SearchToolHandler based on strategy
+			// Configure SearchToolHandler with Compresr API endpoint for search
 			opts := SearchToolHandlerOptions{
-				Strategy:   g.config.Pipes.ToolDiscovery.Strategy,
-				AlwaysKeep: g.config.Pipes.ToolDiscovery.AlwaysKeep,
+				Strategy:   g.cfg().Pipes.ToolDiscovery.Strategy,
+				AlwaysKeep: g.cfg().Pipes.ToolDiscovery.AlwaysKeep,
 			}
 
-			// API strategy: configure Compresr API endpoint for search
-			if pipes.IsAPIStrategy(g.config.Pipes.ToolDiscovery.Strategy) {
-				apiEndpoint := g.config.Pipes.ToolDiscovery.Compresr.Endpoint
-				if apiEndpoint == "" && g.config.URLs.Compresr != "" {
-					apiEndpoint = strings.TrimRight(g.config.URLs.Compresr, "/") + "/api/compress/tool-discovery/"
-				}
-				opts.APIEndpoint = apiEndpoint
-				opts.ProviderAuth = g.config.Pipes.ToolDiscovery.Compresr.AuthParam
-				opts.APITimeout = g.config.Pipes.ToolDiscovery.Compresr.Timeout
+			// Configure Compresr API endpoint for API-backed search
+			apiEndpoint := g.cfg().Pipes.ToolDiscovery.Compresr.Endpoint
+			if apiEndpoint == "" && g.cfg().URLs.Compresr != "" {
+				apiEndpoint = strings.TrimRight(g.cfg().URLs.Compresr, "/") + "/api/compress/tool-discovery/"
 			}
+			opts.APIEndpoint = apiEndpoint
+			opts.ProviderAuth = g.cfg().Pipes.ToolDiscovery.Compresr.AuthParam
+			opts.APITimeout = g.cfg().Pipes.ToolDiscovery.Compresr.Timeout
 
 			searchHandler = NewSearchToolHandler(searchToolName, maxSearchResults, g.toolSessions, opts)
 			if g.searchLog != nil {
@@ -186,11 +183,18 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 		g.logCompressionDetails(pipeCtx, requestID, string(PipeToolDiscovery), originalBody, forwardBody)
 	}
 
-	// Write response
+	// Write response — explicitly set Content-Type to prevent browser MIME sniffing (XSS mitigation).
 	copyHeaders(w, result.Response.Header)
 	addPreemptiveHeaders(w, pipeCtx.PreemptiveHeaders)
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Always set Content-Length from actual body (phantom loop may rewrite the body,
+	// making the upstream Content-Length header stale).
+	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 	w.WriteHeader(result.Response.StatusCode)
-	_, _ = w.Write(responseBody)
+	_, _ = w.Write(responseBody) //nolint:gosec // G705: Content-Type and X-Content-Type-Options: nosniff set above
 }
 
 func (g *Gateway) logToolDiscoveryAPIFallbacks(requestID string, searchHandler *SearchToolHandler, providerModel, toolDiscoveryModel string) {

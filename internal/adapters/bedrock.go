@@ -69,6 +69,16 @@ func (a *BedrockAdapter) ExtractUserQuery(body []byte) string {
 	return a.anthropic.ExtractUserQuery(body)
 }
 
+// ExtractAssistantIntent extracts the LLM's reasoning from the last assistant message.
+func (a *BedrockAdapter) ExtractAssistantIntent(body []byte) string {
+	return a.anthropic.ExtractAssistantIntent(body)
+}
+
+// ExtractLastUserContent extracts text blocks and tool_result flag from the last user message.
+func (a *BedrockAdapter) ExtractLastUserContent(body []byte) ([]string, bool) {
+	return a.anthropic.ExtractLastUserContent(body)
+}
+
 // =============================================================================
 // USAGE EXTRACTION
 // =============================================================================

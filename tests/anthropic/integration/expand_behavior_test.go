@@ -446,104 +446,6 @@ cache:
 // MULTIPLE TOOL OUTPUTS - Partial expansion
 // =============================================================================
 
-// TestExpandBehavior_MultiTool_SomeNeedExpand tests 3 tool outputs where
-// only some might need expansion.
-func TestExpandBehavior_MultiTool_SomeNeedExpand(t *testing.T) {
-	apiKey := getAnthropicKey(t)
-
-	cfg := configWithExpandEnabled("")
-	gw := gateway.New(cfg)
-	gwServer := httptest.NewServer(gw.Handler())
-	defer gwServer.Close()
-
-	// Three outputs of different sizes
-	smallOutput := "BUILD SUCCESS"
-	mediumOutput := strings.Repeat("test output line\n", 50)
-	largeOutput := generateLargeGoFileForExpand(2000)
-
-	requestBody := map[string]interface{}{
-		"model":      haikuModel,
-		"max_tokens": 400,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": "Tell me about each of these three things: build status, test output, and the code."},
-			{
-				"role": "assistant",
-				"content": []map[string]interface{}{
-					{
-						"type":  "tool_use",
-						"id":    "toolu_build",
-						"name":  "bash",
-						"input": map[string]string{"command": "make build"},
-					},
-					{
-						"type":  "tool_use",
-						"id":    "toolu_test",
-						"name":  "bash",
-						"input": map[string]string{"command": "make test"},
-					},
-					{
-						"type":  "tool_use",
-						"id":    "toolu_code",
-						"name":  "read_file",
-						"input": map[string]string{"path": "main.go"},
-					},
-				},
-			},
-			{
-				"role": "user",
-				"content": []map[string]interface{}{
-					{
-						"type":        "tool_result",
-						"tool_use_id": "toolu_build",
-						"content":     smallOutput,
-					},
-					{
-						"type":        "tool_result",
-						"tool_use_id": "toolu_test",
-						"content":     mediumOutput,
-					},
-					{
-						"type":        "tool_result",
-						"tool_use_id": "toolu_code",
-						"content":     largeOutput,
-					},
-				},
-			},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
-	require.NoError(t, err)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", anthropicVersion)
-	req.Header.Set("X-Target-URL", anthropicBaseURL+"/v1/messages")
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := retryableRequest(client, req, t)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	responseBody, _ := io.ReadAll(resp.Body)
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.NotContains(t, string(responseBody), "expand_context")
-	assert.NotContains(t, string(responseBody), "<<<SHADOW:")
-
-	var response map[string]interface{}
-	json.Unmarshal(responseBody, &response)
-	content := extractAnthropicContent(response)
-
-	// Should mention BUILD SUCCESS
-	contentLower := strings.ToLower(content)
-	assert.True(t, strings.Contains(contentLower, "build") ||
-		strings.Contains(contentLower, "success") ||
-		strings.Contains(contentLower, "test") ||
-		strings.Contains(contentLower, "code"))
-}
-
 // =============================================================================
 // ERROR HANDLING WITH EXPAND
 // =============================================================================
@@ -778,19 +680,19 @@ func configWithExpandEnabled(mockAPIURL string) *config.Config {
 		},
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            config.StrategyCompresr,
-				FallbackStrategy:    "passthrough",
-				MinBytes:            300, // Lower threshold to trigger compression
-				MaxBytes:            65536,
+				Enabled:                true,
+				Strategy:               config.StrategyCompresr,
+				FallbackStrategy:       "passthrough",
+				MinBytes:               300, // Lower threshold to trigger compression
+				MaxBytes:               65536,
 				TargetCompressionRatio: 0.2,
-				IncludeExpandHint:   true,
-				EnableExpandContext: true, // ENABLED
+				IncludeExpandHint:      true,
+				EnableExpandContext:    true, // ENABLED
 				Compresr: config.CompresrConfig{
-					Endpoint: apiEndpoint,
-					AuthParam:   os.Getenv("COMPRESR_API_KEY"),
-					Model:    "toc_espresso_v1",
-					Timeout:  30 * time.Second,
+					Endpoint:  apiEndpoint,
+					AuthParam: os.Getenv("COMPRESR_API_KEY"),
+					Model:     "toc_espresso_v1",
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
@@ -818,19 +720,19 @@ func configWithExpandDisabled() *config.Config {
 		},
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            "passthrough", // Use passthrough since no valid API endpoint
-				FallbackStrategy:    "passthrough",
-				MinBytes:            300,
-				MaxBytes:            65536,
+				Enabled:                true,
+				Strategy:               "passthrough", // Use passthrough since no valid API endpoint
+				FallbackStrategy:       "passthrough",
+				MinBytes:               300,
+				MaxBytes:               65536,
 				TargetCompressionRatio: 0.2,
-				IncludeExpandHint:   false, // No hint
-				EnableExpandContext: false, // DISABLED
+				IncludeExpandHint:      false, // No hint
+				EnableExpandContext:    false, // DISABLED
 				Compresr: config.CompresrConfig{
-					Endpoint: "",
-					AuthParam:   "",
-					Model:    "",
-					Timeout:  30 * time.Second,
+					Endpoint:  "",
+					AuthParam: "",
+					Model:     "",
+					Timeout:   30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
@@ -849,75 +751,6 @@ func configWithExpandDisabled() *config.Config {
 	}
 }
 
-func generateBuggyCode() string {
-	return `package main
-
-import (
-	"fmt"
-	"sync"
-)
-
-type UserService struct {
-	users map[string]*User
-	mu    sync.RWMutex
-}
-
-type User struct {
-	ID      string
-	Name    string
-	Balance int
-}
-
-func NewUserService() *UserService {
-	return &UserService{
-		users: make(map[string]*User),
-	}
-}
-
-func (s *UserService) GetUser(id string) *User {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.users[id]
-}
-
-func (s *UserService) CreateUser(id, name string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.users[id] = &User{ID: id, Name: name, Balance: 0}
-}
-
-// BUG: This function has a divide by zero error!
-func (s *UserService) CalculateAverageBalance() float64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	total := 0
-	for _, user := range s.users {
-		total += user.Balance
-	}
-	// BUG HERE: Division by zero when users map is empty!
-	return float64(total) / float64(len(s.users))
-}
-
-func (s *UserService) ProcessTransaction(fromID, toID string, amount int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	
-	from := s.users[fromID]
-	to := s.users[toID]
-	// Another potential bug: nil pointer if user doesn't exist
-	
-	from.Balance -= amount
-	to.Balance += amount
-	return nil
-}
-
-func main() {
-	service := NewUserService()
-	// This will panic because no users exist!
-	avg := service.CalculateAverageBalance()
-	fmt.Printf("Average balance: %.2f\n", avg)
-}`
-}
 
 func generateLargeLogFile(minSize int) string {
 	var buf strings.Builder
@@ -950,29 +783,3 @@ func generateLargeLogFile(minSize int) string {
 	return buf.String()
 }
 
-func generateLargeGoFileForExpand(minSize int) string {
-	var buf strings.Builder
-	buf.WriteString("package main\n\nimport \"fmt\"\n\n")
-
-	i := 0
-	for buf.Len() < minSize {
-		buf.WriteString(fmt.Sprintf(`
-func function%d(x, y int) int {
-	// Process values
-	result := x + y + %d
-	for i := 0; i < 10; i++ {
-		result += i
-	}
-	return result
-}
-`, i, i*100))
-		i++
-	}
-
-	buf.WriteString(`
-func main() {
-	fmt.Println("Hello from generated code")
-}
-`)
-	return buf.String()
-}

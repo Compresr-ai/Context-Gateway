@@ -51,6 +51,8 @@ func detectProvider(path string, headers http.Header) Provider {
 			return ProviderBedrock
 		case "ollama":
 			return ProviderOllama
+		case "litellm":
+			return ProviderLiteLLM
 		}
 	}
 
@@ -78,7 +80,9 @@ func detectProvider(path string, headers http.Header) Provider {
 	}
 	if strings.HasSuffix(path, "/v1/chat/completions") ||
 		strings.HasSuffix(path, "/v1/completions") ||
-		strings.HasSuffix(path, "/chat/completions") {
+		strings.HasSuffix(path, "/chat/completions") ||
+		strings.HasSuffix(path, "/v1/responses") ||
+		strings.HasSuffix(path, "/responses") {
 		return ProviderOpenAI
 	}
 

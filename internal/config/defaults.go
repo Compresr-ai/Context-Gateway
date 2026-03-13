@@ -130,8 +130,11 @@ const DefaultMaxBytes = 512 * 1024
 // GATEWAY PORT RANGE
 // =============================================================================
 
+// DefaultDashboardPort is the fixed port for the centralized dashboard.
+const DefaultDashboardPort = 18080
+
 // DefaultGatewayBasePort is the starting port for gateway instances.
-const DefaultGatewayBasePort = 18080
+const DefaultGatewayBasePort = 18081
 
 // MaxGatewayPorts is the maximum concurrent gateway instances.
 const MaxGatewayPorts = 10

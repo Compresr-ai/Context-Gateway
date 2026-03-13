@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 RUN apk add --no-cache make
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -13,6 +13,6 @@ WORKDIR /app
 COPY --from=builder /build/gateway .
 RUN mkdir -p /app/logs && chown -R gateway:gateway /app
 USER gateway
-EXPOSE 18080
+EXPOSE 18081
 ENTRYPOINT ["./gateway"]
 CMD ["serve", "--no-banner"]

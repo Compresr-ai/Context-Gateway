@@ -18,6 +18,9 @@ type MonitoringConfig struct {
 	LogToStdout      bool   `yaml:"log_to_stdout"`     // Also log telemetry to stdout
 	VerbosePayloads  bool   `yaml:"verbose_payloads"`  // Log full request/response payloads
 
+	// Debug settings
+	DebugToolSchemas bool `yaml:"debug_tool_schemas"` // Log full tool schemas before/after filtering
+
 	// Additional log files
 	CompressionLogPath   string `yaml:"compression_log_path"`    // Log original vs compressed
 	ToolDiscoveryLogPath string `yaml:"tool_discovery_log_path"` // Log tool discovery filtering details

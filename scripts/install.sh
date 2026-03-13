@@ -122,7 +122,7 @@ print_next_steps() {
     echo "     context-gateway start"
     echo ""
     echo "  3. Configure your AI agent:"
-    echo "     export ANTHROPIC_BASE_URL=http://localhost:18080"
+    echo "     export ANTHROPIC_BASE_URL=http://localhost:18081"
     echo ""
 }
 

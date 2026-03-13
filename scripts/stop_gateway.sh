@@ -18,7 +18,7 @@ PID_FILE=$(find "$LOGS_DIR" -name "gateway.pid" -type f 2>/dev/null | head -1)
 if [ -n "$PID_FILE" ] && [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
     if kill -0 "$PID" 2>/dev/null; then
-        echo -e "${BLUE}[INFO]${NC} Stopping gateway (PID: $PID)..."
+        echo -e "  ${BLUE}·${NC} Stopping gateway (PID: $PID)..."
         kill "$PID" 2>/dev/null || true
         sleep 2
         STOPPED=true
@@ -29,4 +29,4 @@ fi
 pgrep -f "$PROJECT_DIR/bin/gateway" > /dev/null 2>&1 && { pkill -f "$PROJECT_DIR/bin/gateway"; STOPPED=true; }
 pgrep -f "/tmp/gateway" > /dev/null 2>&1 && { pkill -f "/tmp/gateway"; STOPPED=true; }
 
-[ "$STOPPED" = true ] && echo -e "${GREEN}[OK]${NC} Gateway stopped" || echo -e "${BLUE}[INFO]${NC} No running gateway found"
+[ "$STOPPED" = true ] && echo -e "${GREEN}[OK]${NC} Gateway stopped" || echo -e "  ${BLUE}·${NC} No running gateway found"

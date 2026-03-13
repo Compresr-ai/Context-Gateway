@@ -75,14 +75,14 @@ func SimpleCompressionConfig() *config.Config {
 		},
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
-				Enabled:             true,
-				Strategy:            "simple", // Uses first-N-words compression
-				FallbackStrategy:    "passthrough",
-				MinBytes:            100, // Low threshold to trigger compression
-				MaxBytes:            65536,
+				Enabled:                true,
+				Strategy:               "simple", // Uses first-N-words compression
+				FallbackStrategy:       "passthrough",
+				MinBytes:               100, // Low threshold to trigger compression
+				MaxBytes:               65536,
 				TargetCompressionRatio: 0.1, // Aggressive compression
-				IncludeExpandHint:   true,
-				EnableExpandContext: true, // Key: enable expand_context
+				IncludeExpandHint:      true,
+				EnableExpandContext:    true, // Key: enable expand_context
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled: false,

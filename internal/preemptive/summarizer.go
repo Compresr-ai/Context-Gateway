@@ -14,6 +14,7 @@ import (
 
 	"github.com/compresr/context-gateway/external"
 	"github.com/compresr/context-gateway/internal/compresr"
+	"github.com/compresr/context-gateway/internal/tokenizer"
 )
 
 // Summarizer generates conversation summaries.
@@ -160,7 +161,7 @@ func (s *Summarizer) summarizeViaLLM(ctx context.Context, input SummarizeInput) 
 		return nil, fmt.Errorf("empty summary returned")
 	}
 
-	tokens := len(summary) / 4
+	tokens := tokenizer.CountTokens(summary)
 	if result.OutputTokens > 0 {
 		tokens = result.OutputTokens
 	}
@@ -305,18 +306,13 @@ func (s *Summarizer) findCutoffByTokens(messages []json.RawMessage, keepTokens i
 		return -1, fmt.Errorf("no messages")
 	}
 
-	// Estimate tokens per message (bytes / 4 is a rough approximation)
-	ratio := s.config.TokenEstimateRatio
-	if ratio <= 0 {
-		ratio = 4
-	}
-
+	// Count tokens per message using tiktoken
 	// Walk backwards, accumulating tokens
 	accumulatedTokens := 0
 	cutoffIndex := -1
 
 	for i := total - 1; i >= 0; i-- {
-		msgTokens := len(messages[i]) / ratio
+		msgTokens := tokenizer.CountBytes(messages[i])
 		accumulatedTokens += msgTokens
 
 		// Once we've accumulated enough "recent" tokens, everything before is summarizable

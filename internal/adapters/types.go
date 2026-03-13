@@ -57,6 +57,15 @@ type CompressedResult struct {
 
 	// Keep indicates whether to keep this item (tool_discovery filtering)
 	Keep bool
+
+	// MessageIndex is the position in messages array (from ExtractedContent).
+	// Used by sjson-based ApplyToolOutput to replace content at exact byte path
+	// without re-serializing the entire JSON (preserves KV-cache prefix).
+	MessageIndex int
+
+	// BlockIndex is the position within content blocks (Anthropic format).
+	// Used together with MessageIndex for precise sjson path targeting.
+	BlockIndex int
 }
 
 // =============================================================================
@@ -99,6 +108,7 @@ const (
 	ProviderGemini    Provider = "gemini"
 	ProviderBedrock   Provider = "bedrock"
 	ProviderOllama    Provider = "ollama"
+	ProviderLiteLLM   Provider = "litellm"
 	ProviderUnknown   Provider = "unknown"
 )
 
@@ -120,6 +130,8 @@ func ProviderFromString(s string) Provider {
 		return ProviderBedrock
 	case "ollama":
 		return ProviderOllama
+	case "litellm":
+		return ProviderLiteLLM
 	default:
 		return ProviderUnknown
 	}
