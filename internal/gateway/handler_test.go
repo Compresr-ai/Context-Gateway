@@ -1,11 +1,17 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/coder/websocket"
+	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/auth"
+	"github.com/compresr/context-gateway/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,8 +22,8 @@ import (
 
 func TestSanitizeModelName(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
+		name      string
+		input     string
 		wantModel string
 	}{
 		{
@@ -160,4 +166,135 @@ func TestWriteError_InternalServerError(t *testing.T) {
 	errObj, ok := body["error"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "internal error", errObj["message"])
+}
+
+func TestSetupRoutes_RegistersModelsAlias(t *testing.T) {
+	g := &Gateway{}
+	mux := http.NewServeMux()
+
+	g.registerModelRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/models?client_version=0.114.0", nil)
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var body codexModelsResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &body)
+	require.NoError(t, err)
+	assert.NotEmpty(t, body.Models)
+}
+
+func TestHandleModels_V1ReturnsOpenAICompatibleList(t *testing.T) {
+	g := &Gateway{}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+
+	g.handleModels(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var body modelsResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &body)
+	require.NoError(t, err)
+	assert.Equal(t, "list", body.Object)
+	assert.NotEmpty(t, body.Data)
+}
+
+func TestHandleModels_ProxiesUpstreamWhenAuthContextPresent(t *testing.T) {
+	EnableLocalHostsForTesting()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/models", r.URL.Path)
+		assert.Equal(t, "Bearer subscription-token", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4"}]}`))
+	}))
+	defer upstream.Close()
+
+	g := &Gateway{
+		registry:     adapters.NewRegistry(),
+		authRegistry: auth.NewRegistry(),
+		httpClient:   upstream.Client(),
+		configReloader: config.NewReloader(&config.Config{
+			Server:  config.ServerConfig{Port: 18081},
+			Bedrock: config.BedrockConfig{Enabled: false},
+		}, ""),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/models?client_version=0.114.0", nil)
+	req.Header.Set("Authorization", "Bearer subscription-token")
+	req.Header.Set(HeaderTargetURL, upstream.URL)
+	rec := httptest.NewRecorder()
+
+	g.handleModels(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"models":[{"slug":"gpt-5.4"}]}`, rec.Body.String())
+}
+
+func TestHandleModels_ChatGPTSubscriptionUsesSyntheticList(t *testing.T) {
+	g := &Gateway{}
+
+	req := httptest.NewRequest(http.MethodGet, "/models?client_version=0.114.0", nil)
+	req.Header.Set("Authorization", "Bearer subscription-token")
+	rec := httptest.NewRecorder()
+
+	g.handleModels(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var body codexModelsResponse
+	err := json.Unmarshal(rec.Body.Bytes(), &body)
+	require.NoError(t, err)
+	assert.NotEmpty(t, body.Models)
+}
+
+func TestHandleProxy_WebSocketUpgradeProxiesResponses(t *testing.T) {
+	EnableLocalHostsForTesting()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/responses", r.URL.Path)
+		assert.Equal(t, "Bearer subscription-token", r.Header.Get("Authorization"))
+
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		require.NoError(t, err)
+		defer func() { _ = conn.CloseNow() }()
+
+		ctx := context.Background()
+		msgType, payload, err := conn.Read(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, websocket.MessageText, msgType)
+		assert.Equal(t, "ping", string(payload))
+		require.NoError(t, conn.Write(ctx, msgType, []byte("pong")))
+	}))
+	defer upstream.Close()
+
+	g := &Gateway{}
+	gatewayServer := httptest.NewServer(http.HandlerFunc(g.handleProxy))
+	defer gatewayServer.Close()
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer subscription-token")
+	headers.Set(HeaderTargetURL, upstream.URL)
+
+	ctx := context.Background()
+	conn, resp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(gatewayServer.URL, "http")+"/responses", &websocket.DialOptions{
+		HTTPHeader: headers,
+	})
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	require.NoError(t, err)
+	defer func() { _ = conn.CloseNow() }()
+
+	require.NoError(t, conn.Write(ctx, websocket.MessageText, []byte("ping")))
+	msgType, payload, err := conn.Read(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, websocket.MessageText, msgType)
+	assert.Equal(t, "pong", string(payload))
 }

@@ -348,6 +348,11 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 	requestID := g.getRequestID(r)
 
+	if isWebSocketUpgrade(r) {
+		g.handleWebSocketProxy(w, r)
+		return
+	}
+
 	// Validate request
 	if r.Method != http.MethodPost {
 		g.alerts.FlagInvalidRequest(requestID, "method not allowed", nil)
@@ -811,17 +816,9 @@ func (g *Gateway) processCompressionPipeline(body []byte, pipeCtx *PipelineConte
 // forwardPassthrough forwards the request body unchanged to upstream.
 func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body []byte) (*http.Response, forwardAuthMeta, error) {
 	authMeta := forwardAuthMeta{InitialMode: "unknown", EffectiveMode: "unknown"}
-	targetURL := r.Header.Get(HeaderTargetURL)
-	if targetURL != "" {
-		// X-Target-URL provided - append request path if not already included
-		if !strings.HasSuffix(targetURL, r.URL.Path) {
-			targetURL = strings.TrimSuffix(targetURL, "/") + r.URL.Path
-		}
-	} else {
-		targetURL = g.autoDetectTargetURL(r)
-		if targetURL == "" {
-			return nil, authMeta, fmt.Errorf("missing %s header", HeaderTargetURL)
-		}
+	targetURL, err := g.resolveTargetURL(r)
+	if err != nil {
+		return nil, authMeta, err
 	}
 
 	// Detect if this is a Bedrock request
@@ -868,7 +865,7 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 
 	sendUpstream := func(useAPIKeyMode bool, fallbackHeaders map[string]string) (*http.Response, []byte, error) {
 		// #nosec G704 -- targetURL is from configured provider URLs, not user input
-		httpReq, reqErr := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
+		httpReq, reqErr := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewReader(body))
 		if reqErr != nil {
 			return nil, nil, reqErr
 		}
@@ -965,6 +962,22 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 	}
 
 	return resp, authMeta, nil
+}
+
+func (g *Gateway) resolveTargetURL(r *http.Request) (string, error) {
+	targetURL := r.Header.Get(HeaderTargetURL)
+	if targetURL != "" {
+		// X-Target-URL provided - append request path if not already included
+		if !strings.HasSuffix(targetURL, r.URL.Path) {
+			targetURL = strings.TrimSuffix(targetURL, "/") + r.URL.Path
+		}
+	} else {
+		targetURL = g.autoDetectTargetURL(r)
+		if targetURL == "" {
+			return "", fmt.Errorf("missing %s header", HeaderTargetURL)
+		}
+	}
+	return targetURL, nil
 }
 
 // isBedrockRequest checks if the request path matches Bedrock URL patterns.
