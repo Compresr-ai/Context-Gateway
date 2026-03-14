@@ -633,7 +633,7 @@ func (g *Gateway) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/prompts/erase", g.handleErasePrompts)
 	mux.HandleFunc("/api/compress/", g.handleCompressAPINotFound)
 	mux.HandleFunc("/stats", g.handleStats)
-	mux.HandleFunc("/v1/models", g.handleModels)
+	g.registerModelRoutes(mux)
 
 	// Session monitoring dashboard
 	monitorHandlers := dashboard.NewHandlers(g.monitorStore, g.monitorHub)
