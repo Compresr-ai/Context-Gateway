@@ -92,7 +92,7 @@ func TestExpandContext_Anthropic_FullFlow(t *testing.T) {
 	if len(capturedRequests) >= 1 {
 		firstReq := string(capturedRequests[0])
 		// Note: JSON encoding escapes < as \u003c, so check for both
-		hasShadow := strings.Contains(firstReq, "<<<SHADOW:") || strings.Contains(firstReq, "SHADOW:")
+		hasShadow := strings.Contains(firstReq, "[REF:") || strings.Contains(firstReq, "SHADOW:")
 		assert.True(t, hasShadow, "First request should have shadow reference from compression")
 		assert.NotContains(t, firstReq, "Rate limit exceeded", "First request should have truncated content")
 	}
@@ -146,18 +146,24 @@ func TestExpandContext_Anthropic_NoExpand(t *testing.T) {
 	assert.Equal(t, int32(1), callCount.Load(), "Should have only 1 LLM call when no expand needed")
 }
 
-// TestExpandContext_Disabled_Anthropic verifies expand_context is skipped when disabled.
+// TestExpandContext_NoCompressedContent_GracefulDegradation verifies that when the LLM
+// calls expand_context but no compressed content exists (ShadowStore empty), the gateway
+// handles it gracefully: returns a "not found" tool result, re-forwards to LLM, and
+// gets a final response. expand_context is always injected (MCP-server pattern), so the
+// LLM can always call it — the handler degrades gracefully when nothing is in the store.
 func TestExpandContext_Disabled_Anthropic(t *testing.T) {
 	var callCount atomic.Int32
 
 	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count := callCount.Add(1)
 		if count == 1 {
+			// LLM calls expand_context (it's always in tools[])
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(fixtures.AnthropicResponseWithExpandCall("toolu_expand_001", "shadow_abc"))
 		} else {
+			// Gateway handled the "not found" gracefully → LLM gets second chance → final response
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(fixtures.AnthropicFinalResponse("This should not happen"))
+			w.Write(fixtures.AnthropicFinalResponse("Proceeding with compressed summary."))
 		}
 	}))
 	defer mockLLM.Close()
@@ -183,7 +189,9 @@ func TestExpandContext_Disabled_Anthropic(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, int32(1), callCount.Load(), "Should have only 1 LLM call when expand disabled")
+	// 2 calls: (1) LLM calls expand_context → gateway returns "not found", (2) LLM gets final response
+	// expand_context is always injected (MCP-server pattern) — graceful degradation when store is empty
+	assert.Equal(t, int32(2), callCount.Load(), "Should make 2 LLM calls: expand handled gracefully then final response")
 }
 
 // TestExpandContext_SmallContent_NoCompression verifies small content is not compressed.
@@ -220,12 +228,12 @@ func TestExpandContext_SmallContent_NoCompression(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Content should NOT have shadow reference in the messages (not compressed).
-	// Note: the expand_context tool description legitimately contains "<<<SHADOW:shadow_xxx>>>"
+	// Note: the expand_context tool description legitimately contains "[REF:shadow_xxx]"
 	// so we scope this check to the messages content only.
 	var parsedReq map[string]json.RawMessage
 	if err := json.Unmarshal(capturedRequest, &parsedReq); err == nil {
 		if msgsJSON, ok := parsedReq["messages"]; ok {
-			assert.NotContains(t, string(msgsJSON), "<<<SHADOW:",
+			assert.NotContains(t, string(msgsJSON), "[REF:",
 				"Small content should NOT be compressed (no shadow reference in messages)")
 		}
 	}
@@ -318,7 +326,7 @@ func extractShadowIDFromRequest(body []byte) string {
 	bodyStr := string(body)
 
 	// Try direct match first
-	idx := strings.Index(bodyStr, "<<<SHADOW:")
+	idx := strings.Index(bodyStr, "[REF:")
 	if idx == -1 {
 		// Try JSON-escaped unicode version (\u003c = <)
 		idx = strings.Index(bodyStr, "SHADOW:")
@@ -347,8 +355,8 @@ func extractShadowIDFromRequest(body []byte) string {
 		return bodyStr[start:end]
 	}
 
-	// Extract shadow_xxx from <<<SHADOW:shadow_xxx>>> or SHADOW:shadow_xxx>>>
-	startOffset := 10 // "<<<SHADOW:" length
+	// Extract shadow_xxx from [REF:shadow_xxx] or SHADOW:shadow_xxx>>>
+	startOffset := 10 // "[REF:" length
 	if bodyStr[idx] != '<' {
 		startOffset = 7 // "SHADOW:" length
 	}

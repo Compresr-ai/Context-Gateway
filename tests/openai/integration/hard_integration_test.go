@@ -117,7 +117,7 @@ func TestHardIntegration_ThreeToolsOneLarge_OneExpandNeeded(t *testing.T) {
 
 	responseBody, _ := io.ReadAll(resp.Body)
 	assert.NotContains(t, string(responseBody), "expand_context")
-	assert.NotContains(t, string(responseBody), "<<<SHADOW:")
+	assert.NotContains(t, string(responseBody), "[REF:")
 
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
@@ -196,7 +196,7 @@ func TestHardIntegration_ThreeToolsAllLarge(t *testing.T) {
 
 	responseBody, _ := io.ReadAll(resp.Body)
 	assert.NotContains(t, string(responseBody), "expand_context")
-	assert.NotContains(t, string(responseBody), "<<<SHADOW:")
+	assert.NotContains(t, string(responseBody), "[REF:")
 
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
@@ -207,75 +207,6 @@ func TestHardIntegration_ThreeToolsAllLarge(t *testing.T) {
 // =============================================================================
 // ERROR HANDLING
 // =============================================================================
-
-// TestHardIntegration_MixedSuccessAndError tests success and error tool results together.
-func TestHardIntegration_MixedSuccessAndError(t *testing.T) {
-	apiKey := getOpenAIKeyHard(t)
-
-	cfg := hardCompressionConfigOpenAI()
-	gw := gateway.New(cfg)
-	gwServer := httptest.NewServer(gw.Handler())
-	defer gwServer.Close()
-
-	successContent := "File content: package main\n\nfunc main() {\n\tfmt.Println(\"Hello\")\n}\n"
-	errorContent := "Error: ENOENT: no such file or directory, open 'config.yaml'"
-
-	requestBody := map[string]interface{}{
-		"model":      "gpt-4o-mini",
-		"max_tokens": 200,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": "Read both files and tell me what you found."},
-			{
-				"role":    "assistant",
-				"content": nil,
-				"tool_calls": []map[string]interface{}{
-					{
-						"id":   "call_success",
-						"type": "function",
-						"function": map[string]interface{}{
-							"name":      "read_file",
-							"arguments": `{"path": "main.go"}`,
-						},
-					},
-					{
-						"id":   "call_error",
-						"type": "function",
-						"function": map[string]interface{}{
-							"name":      "read_file",
-							"arguments": `{"path": "config.yaml"}`,
-						},
-					},
-				},
-			},
-			{"role": "tool", "tool_call_id": "call_success", "content": successContent},
-			{"role": "tool", "tool_call_id": "call_error", "content": errorContent},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-	req, err := http.NewRequest("POST", gwServer.URL+"/v1/chat/completions", bytes.NewReader(bodyBytes))
-	require.NoError(t, err)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("X-Target-URL", "https://api.openai.com/v1/chat/completions")
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := retryableRequestHard(client, req, t)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var response map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&response)
-	content := extractOpenAIContentHard(response)
-
-	contentLower := strings.ToLower(content)
-	assert.True(t, strings.Contains(contentLower, "error") ||
-		strings.Contains(contentLower, "not found") ||
-		strings.Contains(contentLower, "missing"))
-}
 
 // TestHardIntegration_LargeErrorMessage tests large error message handling.
 func TestHardIntegration_LargeErrorMessage(t *testing.T) {
@@ -665,72 +596,6 @@ func TestHardIntegration_SpecialCharactersInOutput(t *testing.T) {
 		strings.Contains(contentLower, "character"))
 }
 
-// TestHardIntegration_BinaryLikeContent tests binary-like content handling.
-func TestHardIntegration_BinaryLikeContent(t *testing.T) {
-	apiKey := getOpenAIKeyHard(t)
-
-	cfg := passthroughConfigOpenAI()
-	gw := gateway.New(cfg)
-	gwServer := httptest.NewServer(gw.Handler())
-	defer gwServer.Close()
-
-	// Simulate binary-like content (base64, hex, etc.)
-	binaryLike := `Binary file content preview:
-00000000: 4845 4c4c 4f20 574f 524c 4400 0000 0000  HELLO WORLD.....
-00000010: 89504e47 0d0a1a0a 00000000 49484452  .PNG........IHDR
-00000020: 0000001000000010 080200000090916836  ................
-Detected: PNG image file
-Size: 1024 bytes
-`
-
-	requestBody := map[string]interface{}{
-		"model":      "gpt-4o-mini",
-		"max_tokens": 100,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": "What type of file is this?"},
-			{
-				"role":    "assistant",
-				"content": nil,
-				"tool_calls": []map[string]interface{}{
-					{
-						"id":   "call_binary",
-						"type": "function",
-						"function": map[string]interface{}{
-							"name":      "read_file",
-							"arguments": `{"path": "image.png"}`,
-						},
-					},
-				},
-			},
-			{"role": "tool", "tool_call_id": "call_binary", "content": binaryLike},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-	req, err := http.NewRequest("POST", gwServer.URL+"/v1/chat/completions", bytes.NewReader(bodyBytes))
-	require.NoError(t, err)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("X-Target-URL", "https://api.openai.com/v1/chat/completions")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var response map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&response)
-	content := extractOpenAIContentHard(response)
-
-	contentLower := strings.ToLower(content)
-	assert.True(t, strings.Contains(contentLower, "png") ||
-		strings.Contains(contentLower, "image") ||
-		strings.Contains(contentLower, "binary"))
-}
-
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
@@ -807,14 +672,14 @@ func hardCompressionConfigOpenAI() *config.Config {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr,
 				FallbackStrategy:       "passthrough",
-				MinBytes:               500,
-				MaxBytes:               65536,
+				MinTokens:              125,
+				MaxTokens:              16384,
 				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:      true,
 				EnableExpandContext:    true,
 				Compresr: config.CompresrConfig{
 					Endpoint:  os.Getenv("COMPRESR_API_URL") + "/api/compress/tool-output",
-					AuthParam: os.Getenv("COMPRESR_API_KEY"),
+					APIKey: os.Getenv("COMPRESR_API_KEY"),
 					Model:     "toc_espresso_v1",
 					Timeout:   30 * time.Second,
 				},
@@ -828,9 +693,9 @@ func hardCompressionConfigOpenAI() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

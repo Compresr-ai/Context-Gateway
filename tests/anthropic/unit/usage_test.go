@@ -122,13 +122,14 @@ func TestAnthropic_ExtractUsage_Standard(t *testing.T) {
 func TestAnthropic_ExtractUsage_WithCacheTokens(t *testing.T) {
 	adapter := adapters.NewAnthropicAdapter()
 
-	// Response with prompt caching (cache_creation and cache_read tokens)
-	// Anthropic's input_tokens (5000) includes cache tokens, so:
-	// non-cached input = 5000 - 1000 - 500 = 3500
+	// Response with prompt caching.
+	// Anthropic's input_tokens is ALREADY the non-cached suffix (50 new tokens).
+	// cache_creation_input_tokens + cache_read_input_tokens are billed separately.
+	// Total = 50 + 1000 + 500 + 1500 = 3050
 	response := []byte(`{
 		"id": "msg_456",
 		"usage": {
-			"input_tokens": 5000,
+			"input_tokens": 50,
 			"output_tokens": 1500,
 			"cache_creation_input_tokens": 1000,
 			"cache_read_input_tokens": 500
@@ -137,12 +138,12 @@ func TestAnthropic_ExtractUsage_WithCacheTokens(t *testing.T) {
 
 	usage := adapter.ExtractUsage(response)
 
-	assert.Equal(t, 3500, usage.InputTokens, "should subtract cache tokens from input_tokens")
+	assert.Equal(t, 50, usage.InputTokens, "input_tokens is already the non-cached portion")
 	assert.Equal(t, 1500, usage.OutputTokens)
 	assert.Equal(t, 1000, usage.CacheCreationInputTokens)
 	assert.Equal(t, 500, usage.CacheReadInputTokens)
-	// TotalTokens = original input_tokens (5000) + output (1500) = 6500
-	assert.Equal(t, 6500, usage.TotalTokens, "total should be original input + output")
+	// TotalTokens = input(50) + cache_creation(1000) + cache_read(500) + output(1500) = 3050
+	assert.Equal(t, 3050, usage.TotalTokens, "total must include all input categories")
 }
 
 func TestAnthropic_ExtractUsage_NoUsageField(t *testing.T) {

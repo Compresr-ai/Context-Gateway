@@ -123,7 +123,7 @@ func TestSessionManager_GetSession_NotFound(t *testing.T) {
 		HashMessageCount: 3,
 	})
 
-	session := sm.GetSession("nonexistent")
+	session := sm.Get("nonexistent")
 	assert.Nil(t, session)
 }
 
@@ -137,7 +137,7 @@ func TestSessionManager_UpdateSession(t *testing.T) {
 	sm.GetOrCreateSession("session-123", "model", 200000)
 
 	// Update session
-	err := sm.UpdateSession("session-123", func(s *preemptive.Session) {
+	err := sm.Update("session-123", func(s *preemptive.Session) {
 		s.LastKnownTokens = 100000
 		s.UsagePercent = 50.0
 	})
@@ -145,7 +145,7 @@ func TestSessionManager_UpdateSession(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify update
-	session := sm.GetSession("session-123")
+	session := sm.Get("session-123")
 	assert.Equal(t, 100000, session.LastKnownTokens)
 	assert.Equal(t, 50.0, session.UsagePercent)
 }
@@ -156,7 +156,7 @@ func TestSessionManager_UpdateSession_NotFound(t *testing.T) {
 		HashMessageCount: 3,
 	})
 
-	err := sm.UpdateSession("nonexistent", func(s *preemptive.Session) {})
+	err := sm.Update("nonexistent", func(s *preemptive.Session) {})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -172,7 +172,7 @@ func TestSessionManager_SetSummaryReady(t *testing.T) {
 	err := sm.SetSummaryReady("session-123", "This is the summary", 500, 10, 15) // 15 total messages
 	require.NoError(t, err)
 
-	session := sm.GetSession("session-123")
+	session := sm.Get("session-123")
 	assert.Equal(t, preemptive.StateReady, session.State)
 	assert.Equal(t, "This is the summary", session.Summary)
 	assert.Equal(t, 500, session.SummaryTokens)
@@ -193,7 +193,7 @@ func TestSessionManager_MarkSummaryUsed(t *testing.T) {
 	err := sm.MarkSummaryUsed("session-123")
 	require.NoError(t, err)
 
-	session := sm.GetSession("session-123")
+	session := sm.Get("session-123")
 	assert.Equal(t, preemptive.StateUsed, session.State)
 }
 
@@ -206,9 +206,9 @@ func TestSessionManager_ResetSession(t *testing.T) {
 	sm.GetOrCreateSession("session-123", "model", 200000)
 	sm.SetSummaryReady("session-123", "Summary", 100, 5, 10)
 
-	sm.ResetSession("session-123")
+	sm.Reset("session-123")
 
-	session := sm.GetSession("session-123")
+	session := sm.Get("session-123")
 	assert.Equal(t, preemptive.StateIdle, session.State)
 	assert.Empty(t, session.Summary)
 	assert.Zero(t, session.SummaryTokens)
@@ -226,10 +226,10 @@ func TestSessionManager_DeleteSession(t *testing.T) {
 	})
 
 	sm.GetOrCreateSession("session-123", "model", 200000)
-	assert.NotNil(t, sm.GetSession("session-123"))
+	assert.NotNil(t, sm.Get("session-123"))
 
 	sm.DeleteSession("session-123")
-	assert.Nil(t, sm.GetSession("session-123"))
+	assert.Nil(t, sm.Get("session-123"))
 }
 
 func TestSessionManager_Stats(t *testing.T) {
@@ -265,14 +265,14 @@ func TestSessionStateTransition_IdleToPending(t *testing.T) {
 	session := sm.GetOrCreateSession("session-123", "model", 200000)
 	assert.Equal(t, preemptive.StateIdle, session.State)
 
-	err := sm.UpdateSession("session-123", func(s *preemptive.Session) {
+	err := sm.Update("session-123", func(s *preemptive.Session) {
 		s.State = preemptive.StatePending
 		now := time.Now()
 		s.SummaryTriggeredAt = &now
 	})
 	require.NoError(t, err)
 
-	session = sm.GetSession("session-123")
+	session = sm.Get("session-123")
 	assert.Equal(t, preemptive.StatePending, session.State)
 	assert.NotNil(t, session.SummaryTriggeredAt)
 }
@@ -284,14 +284,14 @@ func TestSessionStateTransition_PendingToReady(t *testing.T) {
 	})
 
 	sm.GetOrCreateSession("session-123", "model", 200000)
-	sm.UpdateSession("session-123", func(s *preemptive.Session) {
+	sm.Update("session-123", func(s *preemptive.Session) {
 		s.State = preemptive.StatePending
 	})
 
 	err := sm.SetSummaryReady("session-123", "Generated summary", 500, 15, 20)
 	require.NoError(t, err)
 
-	session := sm.GetSession("session-123")
+	session := sm.Get("session-123")
 	assert.Equal(t, preemptive.StateReady, session.State)
 	assert.Equal(t, "Generated summary", session.Summary)
 }
@@ -308,7 +308,7 @@ func TestSessionStateTransition_ReadyToUsed(t *testing.T) {
 	err := sm.MarkSummaryUsed("session-123")
 	require.NoError(t, err)
 
-	session := sm.GetSession("session-123")
+	session := sm.Get("session-123")
 	assert.Equal(t, preemptive.StateUsed, session.State)
 	// Summary should still be preserved
 	assert.Equal(t, "Summary", session.Summary)
@@ -376,7 +376,7 @@ func TestSessionManager_InvalidateSummaryIfNewMessages(t *testing.T) {
 	invalidated := sm.InvalidateSummaryIfNewMessages("session-123", 10)
 	assert.False(t, invalidated)
 
-	session := sm.GetSession("session-123")
+	session := sm.Get("session-123")
 	assert.Equal(t, preemptive.StateUsed, session.State)
 	assert.Equal(t, "Summary", session.Summary)
 
@@ -384,7 +384,7 @@ func TestSessionManager_InvalidateSummaryIfNewMessages(t *testing.T) {
 	invalidated = sm.InvalidateSummaryIfNewMessages("session-123", 12)
 	assert.True(t, invalidated)
 
-	session = sm.GetSession("session-123")
+	session = sm.Get("session-123")
 	assert.Equal(t, preemptive.StateIdle, session.State)
 	assert.Empty(t, session.Summary)
 	assert.Zero(t, session.SummaryMessageCount)
@@ -409,7 +409,7 @@ func TestSessionManager_MultipleCompactionsWithoutNewMessages(t *testing.T) {
 		sm.MarkSummaryUsed("session-123")
 	}
 
-	session := sm.GetSession("session-123")
+	session := sm.Get("session-123")
 	assert.Equal(t, 5, session.CompactionUseCount)
 	assert.Equal(t, "Summary", session.Summary) // Summary still available!
 }

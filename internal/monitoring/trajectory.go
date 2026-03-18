@@ -1,16 +1,5 @@
-// Package monitoring - trajectory.go provides trajectory logging in ATIF format.
-//
-// DESIGN: TrajectoryTracker maintains a session-long trajectory of agent interactions.
-// Writes each step to a JSONL file (one step per line) for real-time logging.
-// Each line contains the step data plus session context for grouping.
-//
-// Usage:
-//  1. Create tracker with NewTrajectoryTracker()
-//  2. Record interactions via RecordUserMessage(), RecordAgentResponse(), etc.
-//  3. Each record operation appends the step to the JSONL file immediately
-//  4. Call Close() on shutdown for final summary
-//
-// Thread Safety: All methods are safe for concurrent use.
+// Package monitoring - trajectory.go provides simplified trajectory logging in ATIF format.
+// Mimics Harbor's clean approach: one trajectory per session, simple data recording.
 package monitoring
 
 import (
@@ -18,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,964 +14,882 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// TrajectoryConfig contains trajectory logging configuration.
-type TrajectoryConfig struct {
-	Enabled   bool   // Enable trajectory logging
-	LogPath   string // Path to trajectory.json file
-	AgentName string // Agent name (e.g., "claude-code")
-	SessionID string // Optional: use this session ID instead of generating UUID
-}
-
-// TrajectoryTracker manages trajectory recording for a session.
-type TrajectoryTracker struct {
-	config     TrajectoryConfig
-	trajectory *Trajectory
+// TrajectoryRecorder is a simplified trajectory recorder.
+// Handles ONE trajectory per recorder instance - for multi-session management,
+// use TrajectoryStore which maps session IDs to individual recorders.
+type TrajectoryRecorder struct {
 	mu         sync.Mutex
+	trajectory *Trajectory
+	logPath    string
 	closed     bool
-	lastActive time.Time
+	dirty      int // steps added since last flush; flushed when >= flushBatchSize
 }
 
-// NewTrajectoryTracker creates a new trajectory tracker.
-func NewTrajectoryTracker(cfg TrajectoryConfig) (*TrajectoryTracker, error) {
-	t := &TrajectoryTracker{
-		config: cfg,
-	}
+// flushBatchSize is the number of new steps that triggers an automatic flush to disk.
+const flushBatchSize = 10
 
-	if !cfg.Enabled {
-		return t, nil
-	}
+// TrajectoryRecorderConfig contains configuration for the recorder.
+type TrajectoryRecorderConfig struct {
+	LogPath   string // Path to trajectory.json file
+	SessionID string // Unique session identifier (generates UUID if empty)
+	AgentName string // Agent name (e.g., "claude-code")
+	Version   string // Agent version (defaults to "1.0.0")
+}
 
-	// Use provided session ID or generate a new UUID
+// NewTrajectoryRecorder creates a new trajectory recorder.
+func NewTrajectoryRecorder(cfg TrajectoryRecorderConfig) (*TrajectoryRecorder, error) {
+	// Generate session ID if not provided
 	sessionID := cfg.SessionID
 	if sessionID == "" {
-		sessionID = uuid.New().String()
+		sessionID = uuid.New().String()[:16] // Short UUID for readability
 	}
 
-	// Create trajectory
+	// Default values
 	agentName := cfg.AgentName
 	if agentName == "" {
 		agentName = "context-gateway"
 	}
-	t.trajectory = NewTrajectory(sessionID, agentName, "1.0.0")
-	t.lastActive = time.Now()
+	version := cfg.Version
+	if version == "" {
+		version = "1.0.0"
+	}
+
+	// Create trajectory
+	traj := &Trajectory{
+		SchemaVersion: "ATIF-v1.6",
+		SessionID:     sessionID,
+		Agent: Agent{
+			Name:    agentName,
+			Version: version,
+		},
+		Steps: make([]Step, 0),
+	}
 
 	// Ensure directory exists
 	if cfg.LogPath != "" {
 		if err := os.MkdirAll(filepath.Dir(cfg.LogPath), 0750); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("create log directory: %w", err)
 		}
 	}
 
-	log.Info().
-		Str("session_id", sessionID).
-		Str("path", cfg.LogPath).
-		Msg("trajectory tracking enabled")
-
-	return t, nil
+	return &TrajectoryRecorder{
+		trajectory: traj,
+		logPath:    cfg.LogPath,
+	}, nil
 }
 
-// RecordUserMessage records a user message in the trajectory.
-func (t *TrajectoryTracker) RecordUserMessage(message string) {
-	if !t.config.Enabled || t.trajectory == nil {
-		return
+// SessionID returns the trajectory's session ID.
+func (r *TrajectoryRecorder) SessionID() string {
+	if r == nil || r.trajectory == nil {
+		return ""
 	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.closed {
-		return
-	}
-
-	step := NewUserStep(message)
-	t.trajectory.AddStep(step)
-	t.lastActive = time.Now()
-
-	// Flush to disk immediately
-	t.flushLocked()
-
-	log.Debug().
-		Int("step_id", len(t.trajectory.Steps)).
-		Str("source", "user").
-		Msg("trajectory: recorded user message")
+	return r.trajectory.SessionID
 }
 
-// RecordAgentResponse records an agent response with tool calls and metrics.
-func (t *TrajectoryTracker) RecordAgentResponse(response AgentResponseData) {
-	if !t.config.Enabled || t.trajectory == nil {
+// SetModel sets the default model name for the agent.
+func (r *TrajectoryRecorder) SetModel(model string) {
+	if r == nil || r.trajectory == nil {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.trajectory.Agent.ModelName = model
+}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.closed {
-		return
+// RecordUserTurn records a user message and immediately following agent response.
+// This is the primary recording method - represents one complete turn.
+// Call this once per user turn, not per LLM request.
+func (r *TrajectoryRecorder) RecordUserTurn(user UserTurnData, agent AgentTurnData) error {
+	if r == nil || r.trajectory == nil {
+		return nil
 	}
 
-	step := NewAgentStep(response.Message, response.Model)
-	step.ReasoningContent = response.Reasoning
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	// Add tool calls if present
-	if len(response.ToolCalls) > 0 {
-		step.ToolCalls = response.ToolCalls
+	if r.closed {
+		return fmt.Errorf("recorder closed")
 	}
 
-	// Add metrics if present
-	if response.PromptTokens > 0 || response.CompletionTokens > 0 {
-		step.Metrics = &Metrics{
-			PromptTokens:     response.PromptTokens,
-			CompletionTokens: response.CompletionTokens,
-			CachedTokens:     response.CachedTokens,
-			CostUSD:          response.CostUSD,
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Add user step
+	userStep := Step{
+		StepID:    len(r.trajectory.Steps) + 1,
+		Timestamp: now,
+		Source:    StepSourceUser,
+		Message:   user.Message,
+	}
+	r.trajectory.Steps = append(r.trajectory.Steps, userStep)
+
+	// Add agent step
+	agentStep := Step{
+		StepID:           len(r.trajectory.Steps) + 1,
+		Timestamp:        now,
+		Source:           StepSourceAgent,
+		Message:          agent.Message,
+		ModelName:        agent.Model,
+		ReasoningContent: agent.Reasoning,
+	}
+
+	// Add tool calls
+	if len(agent.ToolCalls) > 0 {
+		agentStep.ToolCalls = agent.ToolCalls
+	}
+
+	// Add observations (tool results)
+	if len(agent.Observations) > 0 {
+		agentStep.Observation = &Observation{
+			Results: agent.Observations,
 		}
 	}
 
-	t.trajectory.AddStep(step)
-	t.lastActive = time.Now()
+	// Add metrics
+	if agent.PromptTokens > 0 || agent.CompletionTokens > 0 {
+		agentStep.Metrics = &Metrics{
+			PromptTokens:     agent.PromptTokens,
+			CompletionTokens: agent.CompletionTokens,
+			CachedTokens:     agent.CachedTokens,
+			CostUSD:          agent.CostUSD,
+		}
+	}
 
-	// Flush to disk immediately
-	t.flushLocked()
+	// Add proxy interaction if provided
+	if agent.ProxyInfo != nil {
+		agentStep.ProxyInteraction = agent.ProxyInfo
+	}
 
-	log.Debug().
-		Int("step_id", len(t.trajectory.Steps)).
-		Str("source", "agent").
-		Str("model", response.Model).
-		Int("tool_calls", len(response.ToolCalls)).
-		Msg("trajectory: recorded agent response")
+	r.trajectory.Steps = append(r.trajectory.Steps, agentStep)
+
+	// Batch flush: write to disk every flushBatchSize steps.
+	r.batchFlushLocked()
+
+	return nil
 }
 
-// AccumulateAgentResponse appends tool calls and metrics to the last agent step
-// instead of creating a new one. Used for tool-loop iterations where multiple
-// LLM API calls are part of the same logical agent turn.
-func (t *TrajectoryTracker) AccumulateAgentResponse(response AgentResponseData) {
-	if !t.config.Enabled || t.trajectory == nil {
+// AccumulateToolCalls adds tool calls to the last agent step.
+// Use this for tool-loop iterations where multiple LLM calls happen per user turn.
+func (r *TrajectoryRecorder) AccumulateToolCalls(toolCalls []ToolCall, observations []ObservationResult, metrics *Metrics) {
+	if r == nil || r.trajectory == nil {
 		return
 	}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	if t.closed {
+	if r.closed || len(r.trajectory.Steps) == 0 {
 		return
 	}
 
-	// Find the last agent step to accumulate into
-	for i := len(t.trajectory.Steps) - 1; i >= 0; i-- {
-		step := &t.trajectory.Steps[i]
+	// Find last agent step
+	for i := len(r.trajectory.Steps) - 1; i >= 0; i-- {
+		step := &r.trajectory.Steps[i]
+		if step.Source != StepSourceAgent {
+			continue
+		}
+
+		// Append tool calls (deduplicate by ID)
+		if len(toolCalls) > 0 {
+			existing := make(map[string]bool)
+			for _, tc := range step.ToolCalls {
+				existing[tc.ToolCallID] = true
+			}
+			for _, tc := range toolCalls {
+				if !existing[tc.ToolCallID] {
+					step.ToolCalls = append(step.ToolCalls, tc)
+				}
+			}
+		}
+
+		// Append observations
+		if len(observations) > 0 {
+			if step.Observation == nil {
+				step.Observation = &Observation{Results: make([]ObservationResult, 0)}
+			}
+			step.Observation.Results = append(step.Observation.Results, observations...)
+		}
+
+		// Accumulate metrics
+		if metrics != nil {
+			if step.Metrics == nil {
+				step.Metrics = &Metrics{}
+			}
+			step.Metrics.PromptTokens += metrics.PromptTokens
+			step.Metrics.CompletionTokens += metrics.CompletionTokens
+			step.Metrics.CachedTokens += metrics.CachedTokens
+			step.Metrics.CostUSD += metrics.CostUSD
+		}
+
+		r.batchFlushLocked()
+		return
+	}
+}
+
+// UpdateLastAgentMessage updates the message of the last agent step.
+// Use this when streaming completes and final message is available.
+func (r *TrajectoryRecorder) UpdateLastAgentMessage(message string) {
+	if r == nil || r.trajectory == nil || message == "" {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return
+	}
+
+	for i := len(r.trajectory.Steps) - 1; i >= 0; i-- {
+		step := &r.trajectory.Steps[i]
 		if step.Source == StepSourceAgent {
-			// Append new tool calls (deduplicate by ID to avoid double-counting
-			// when the same tool call appears in both response body and request history)
-			if len(response.ToolCalls) > 0 {
-				existing := make(map[string]bool, len(step.ToolCalls))
-				for _, tc := range step.ToolCalls {
-					existing[tc.ToolCallID] = true
-				}
-				for _, tc := range response.ToolCalls {
-					if !existing[tc.ToolCallID] {
-						step.ToolCalls = append(step.ToolCalls, tc)
-					}
-				}
-			}
-
-			// Update message with the latest non-empty content.
-			// Tool-loop iterations often have empty content; keep the most
-			// recent meaningful message (the final response to the user).
-			if response.Message != "" && response.Message != "[streaming response]" {
-				step.Message = response.Message
-			}
-
-			// Accumulate token metrics
-			if response.PromptTokens > 0 || response.CompletionTokens > 0 {
-				if step.Metrics == nil {
-					step.Metrics = &Metrics{}
-				}
-				step.Metrics.PromptTokens += response.PromptTokens
-				step.Metrics.CompletionTokens += response.CompletionTokens
-			}
-
-			t.lastActive = time.Now()
-			t.flushLocked()
-
-			log.Debug().
-				Int("step_id", step.StepID).
-				Int("total_tool_calls", len(step.ToolCalls)).
-				Msg("trajectory: accumulated tool calls into existing step")
+			step.Message = message
+			r.batchFlushLocked()
 			return
 		}
 	}
-
-	// No existing agent step found — create new one as fallback
-	step := NewAgentStep(response.Message, response.Model)
-	step.ReasoningContent = response.Reasoning
-	if len(response.ToolCalls) > 0 {
-		step.ToolCalls = response.ToolCalls
-	}
-	if response.PromptTokens > 0 || response.CompletionTokens > 0 {
-		step.Metrics = &Metrics{
-			PromptTokens:     response.PromptTokens,
-			CompletionTokens: response.CompletionTokens,
-		}
-	}
-	t.trajectory.AddStep(step)
-	t.lastActive = time.Now()
-	t.flushLocked()
 }
 
-// RecordToolResult records the result of a tool execution.
-func (t *TrajectoryTracker) RecordToolResult(toolCallID string, content string) {
-	if !t.config.Enabled || t.trajectory == nil {
+// RecordSystemMessage records a system message step.
+func (r *TrajectoryRecorder) RecordSystemMessage(message string) {
+	if r == nil || r.trajectory == nil {
 		return
 	}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	if t.closed {
+	if r.closed {
 		return
 	}
 
-	// Find the last agent step and add observation
-	for i := len(t.trajectory.Steps) - 1; i >= 0; i-- {
-		step := &t.trajectory.Steps[i]
-		if step.Source == StepSourceAgent && len(step.ToolCalls) > 0 {
-			// Check if this step has the matching tool call
-			for _, tc := range step.ToolCalls {
-				if tc.ToolCallID == toolCallID {
-					// Add or update observation
-					if step.Observation == nil {
-						step.Observation = &Observation{
-							Results: make([]ObservationResult, 0),
-						}
-					}
-					step.Observation.Results = append(step.Observation.Results, ObservationResult{
-						SourceCallID: toolCallID,
-						Content:      content,
-					})
-					t.lastActive = time.Now()
-					// Flush to disk immediately
-					t.flushLocked()
-					return
-				}
+	step := Step{
+		StepID:    len(r.trajectory.Steps) + 1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Source:    StepSourceSystem,
+		Message:   message,
+	}
+	r.trajectory.Steps = append(r.trajectory.Steps, step)
+	r.batchFlushLocked()
+}
+
+// AddNote appends a note to the trajectory.
+func (r *TrajectoryRecorder) AddNote(note string) {
+	if r == nil || r.trajectory == nil {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.trajectory.Notes != "" {
+		r.trajectory.Notes += "\n"
+	}
+	r.trajectory.Notes += note
+}
+
+// Validate checks the trajectory for ATIF compliance.
+// Returns nil if valid, error describing the issue otherwise.
+func (r *TrajectoryRecorder) Validate() error {
+	if r == nil || r.trajectory == nil {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.validateLocked()
+}
+
+func (r *TrajectoryRecorder) validateLocked() error {
+	t := r.trajectory
+
+	// Validate required top-level fields
+	if t.SchemaVersion == "" {
+		return fmt.Errorf("schema_version is required")
+	}
+	if t.SessionID == "" {
+		return fmt.Errorf("session_id is required")
+	}
+	if t.Agent.Name == "" {
+		return fmt.Errorf("agent.name is required")
+	}
+
+	// Validate step IDs are sequential starting from 1
+	for i, step := range t.Steps {
+		expected := i + 1
+		if step.StepID != expected {
+			return fmt.Errorf("step %d: expected step_id %d, got %d", i, expected, step.StepID)
+		}
+	}
+
+	// Validate tool calls have required fields
+	for _, step := range t.Steps {
+		for j, tc := range step.ToolCalls {
+			if tc.ToolCallID == "" {
+				return fmt.Errorf("step %d: tool_call[%d] tool_call_id cannot be empty", step.StepID, j)
+			}
+			if tc.FunctionName == "" {
+				return fmt.Errorf("step %d: tool_call[%d] function_name cannot be empty", step.StepID, j)
 			}
 		}
 	}
 
-	// If no matching step found, log warning
-	log.Warn().
-		Str("tool_call_id", toolCallID).
-		Msg("trajectory: no matching tool call found for result")
-}
+	// Validate observation source_call_ids reference valid tool_call_ids
+	for _, step := range t.Steps {
+		if step.Observation == nil {
+			continue
+		}
 
-// RecordSystemMessage records a system message (e.g., system prompt).
-func (t *TrajectoryTracker) RecordSystemMessage(message string) {
-	if !t.config.Enabled || t.trajectory == nil {
-		return
-	}
+		toolCallIDs := make(map[string]bool)
+		for _, tc := range step.ToolCalls {
+			toolCallIDs[tc.ToolCallID] = true
+		}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.closed {
-		return
-	}
-
-	step := NewSystemStep(message)
-	t.trajectory.AddStep(step)
-	t.lastActive = time.Now()
-
-	// Flush to disk immediately
-	t.flushLocked()
-
-	log.Debug().
-		Int("step_id", len(t.trajectory.Steps)).
-		Str("source", "system").
-		Msg("trajectory: recorded system message")
-}
-
-// AgentResponseData contains data for recording an agent response.
-type AgentResponseData struct {
-	Message          string
-	Model            string
-	Reasoning        string
-	ToolCalls        []ToolCall
-	PromptTokens     int
-	CompletionTokens int
-	CachedTokens     int
-	CostUSD          float64
-}
-
-// GetSessionID returns the current session ID.
-func (t *TrajectoryTracker) GetSessionID() string {
-	if t.trajectory == nil {
-		return ""
-	}
-	return t.trajectory.SessionID
-}
-
-// GetStepCount returns the number of steps recorded.
-func (t *TrajectoryTracker) GetStepCount() int {
-	if t.trajectory == nil {
-		return 0
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return len(t.trajectory.Steps)
-}
-
-// SetAgentModel sets the default model name for the agent.
-func (t *TrajectoryTracker) SetAgentModel(model string) {
-	if t.trajectory == nil {
-		return
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.trajectory.Agent.ModelName = model
-	t.lastActive = time.Now()
-}
-
-// AddNote appends a note to the trajectory.
-func (t *TrajectoryTracker) AddNote(note string) {
-	if t.trajectory == nil {
-		return
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.trajectory.Notes != "" {
-		t.trajectory.Notes += "\n"
-	}
-	t.trajectory.Notes += note
-	t.lastActive = time.Now()
-}
-
-// LastActivity returns the timestamp of the last tracker update.
-func (t *TrajectoryTracker) LastActivity() time.Time {
-	if t == nil {
-		return time.Time{}
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.lastActive.IsZero() {
-		return time.Now()
-	}
-	return t.lastActive
-}
-
-// =============================================================================
-// SESSION METRICS - Track aggregate metrics for summary
-// =============================================================================
-
-// flushLocked writes the current trajectory to disk. Must be called with lock held.
-func (t *TrajectoryTracker) flushLocked() {
-	if t.config.LogPath == "" || len(t.trajectory.Steps) == 0 {
-		return
-	}
-
-	// Compute metrics before writing
-	t.trajectory.ComputeFinalMetrics()
-
-	// Serialize to JSON
-	data, err := t.trajectory.ToJSON()
-	if err != nil {
-		log.Error().Err(err).Msg("trajectory: failed to serialize for flush")
-		return
-	}
-
-	// Write to file
-	if err := os.WriteFile(t.config.LogPath, data, 0600); err != nil {
-		log.Error().Err(err).Str("path", t.config.LogPath).Msg("trajectory: failed to flush")
-	}
-}
-
-// Close finalizes and writes the trajectory to disk.
-func (t *TrajectoryTracker) Close() error {
-	if !t.config.Enabled || t.trajectory == nil {
-		return nil
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.closed {
-		return nil
-	}
-	t.closed = true
-
-	// Skip if no steps recorded
-	if len(t.trajectory.Steps) == 0 {
-		log.Info().Msg("trajectory: no steps recorded, skipping write")
-		return nil
-	}
-
-	// Compute final metrics
-	t.trajectory.ComputeFinalMetrics()
-
-	// Serialize to JSON
-	data, err := t.trajectory.ToJSON()
-	if err != nil {
-		log.Error().Err(err).Msg("trajectory: failed to serialize")
-		return err
-	}
-
-	// Write trajectory to file
-	if t.config.LogPath != "" {
-		if err := os.WriteFile(t.config.LogPath, data, 0600); err != nil {
-			log.Error().Err(err).Str("path", t.config.LogPath).Msg("trajectory: failed to write")
-			return err
+		for _, result := range step.Observation.Results {
+			if result.SourceCallID != "" && !toolCallIDs[result.SourceCallID] {
+				return fmt.Errorf("step %d: observation references unknown tool_call_id %q",
+					step.StepID, result.SourceCallID)
+			}
 		}
 	}
 
+	// Validate agent-only fields
+	for _, step := range t.Steps {
+		if step.Source == StepSourceAgent {
+			continue
+		}
+		if step.ModelName != "" {
+			return fmt.Errorf("step %d: model_name only valid for agent steps", step.StepID)
+		}
+		if len(step.ToolCalls) > 0 {
+			return fmt.Errorf("step %d: tool_calls only valid for agent steps", step.StepID)
+		}
+		if step.Metrics != nil {
+			return fmt.Errorf("step %d: metrics only valid for agent steps", step.StepID)
+		}
+	}
+
+	return nil
+}
+
+// batchFlushLocked increments the dirty counter and flushes to disk only when
+// flushBatchSize steps have accumulated, deferring most disk writes. Must hold mu.
+func (r *TrajectoryRecorder) batchFlushLocked() {
+	r.dirty++
+	if r.dirty >= flushBatchSize {
+		r.dirty = 0
+		r.flushLocked()
+	}
+}
+
+// flushLocked writes the trajectory to disk. Must hold mutex.
+func (r *TrajectoryRecorder) flushLocked() {
+	if r.logPath == "" || len(r.trajectory.Steps) == 0 {
+		return
+	}
+
+	// Compute final metrics
+	r.trajectory.ComputeFinalMetrics()
+
+	data, err := json.MarshalIndent(r.trajectory, "", "  ")
+	if err != nil {
+		log.Error().Err(err).Msg("trajectory: marshal failed")
+		return
+	}
+
+	if err := os.WriteFile(r.logPath, data, 0600); err != nil {
+		log.Error().Err(err).Str("path", r.logPath).Msg("trajectory: write failed")
+	}
+}
+
+// Close finalizes and writes the trajectory.
+func (r *TrajectoryRecorder) Close() error {
+	if r == nil || r.trajectory == nil {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	r.dirty = 0 // reset so flushLocked always writes on Close
+
+	if len(r.trajectory.Steps) == 0 {
+		log.Debug().Msg("trajectory: no steps recorded")
+		return nil
+	}
+
+	// Validate before final write
+	if err := r.validateLocked(); err != nil {
+		log.Warn().Err(err).Msg("trajectory: validation warning")
+	}
+
+	r.trajectory.ComputeFinalMetrics()
+	r.flushLocked()
+
 	log.Info().
-		Str("session_id", t.trajectory.SessionID).
-		Str("path", t.config.LogPath).
-		Int("steps", len(t.trajectory.Steps)).
-		Int("total_prompt_tokens", t.trajectory.FinalMetrics.TotalPromptTokens).
-		Int("total_completion_tokens", t.trajectory.FinalMetrics.TotalCompletionTokens).
+		Str("session_id", r.trajectory.SessionID).
+		Str("path", r.logPath).
+		Int("steps", len(r.trajectory.Steps)).
 		Msg("trajectory: saved")
 
 	return nil
 }
 
-// Enabled returns whether trajectory tracking is enabled.
-func (t *TrajectoryTracker) Enabled() bool {
-	return t.config.Enabled && t.trajectory != nil
+// GetStepCount returns the number of recorded steps.
+func (r *TrajectoryRecorder) GetStepCount() int {
+	if r == nil || r.trajectory == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.trajectory.Steps)
 }
 
-// =============================================================================
-// HELPERS - Extract data from OpenAI-style messages
-// =============================================================================
+// DATA TYPES for recording
 
-// ExtractToolCallsFromResponse extracts tool calls from an OpenAI API response.
-func ExtractToolCallsFromResponse(choices []map[string]any) []ToolCall {
-	var toolCalls []ToolCall
-
-	for _, choice := range choices {
-		msg, ok := choice["message"].(map[string]any)
-		if !ok {
-			continue
-		}
-
-		tcs, ok := msg["tool_calls"].([]any)
-		if !ok {
-			continue
-		}
-
-		for _, tc := range tcs {
-			tcMap, ok := tc.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			toolCall := ToolCall{}
-
-			if id, ok := tcMap["id"].(string); ok {
-				toolCall.ToolCallID = id
-			}
-
-			if fn, ok := tcMap["function"].(map[string]any); ok {
-				if name, ok := fn["name"].(string); ok {
-					toolCall.FunctionName = name
-				}
-				if args, ok := fn["arguments"].(string); ok {
-					// Parse arguments JSON string
-					var argsMap map[string]any
-					if err := json.Unmarshal([]byte(args), &argsMap); err == nil {
-						toolCall.Arguments = argsMap
-					} else {
-						toolCall.Arguments = args // Keep as string if parse fails
-					}
-				}
-			}
-
-			if toolCall.ToolCallID != "" && toolCall.FunctionName != "" {
-				toolCalls = append(toolCalls, toolCall)
-			}
-		}
-	}
-
-	return toolCalls
+// UserTurnData contains data for a user turn.
+type UserTurnData struct {
+	Message string
 }
 
-// ExtractContentFromResponse extracts the assistant message content.
-func ExtractContentFromResponse(choices []map[string]any) string {
-	for _, choice := range choices {
-		msg, ok := choice["message"].(map[string]any)
-		if !ok {
-			continue
-		}
-		if content, ok := msg["content"].(string); ok {
-			return content
-		}
-	}
-	return ""
+// AgentTurnData contains data for an agent turn.
+type AgentTurnData struct {
+	Message          string
+	Model            string
+	Reasoning        string
+	ToolCalls        []ToolCall
+	Observations     []ObservationResult
+	PromptTokens     int
+	CompletionTokens int
+	CachedTokens     int
+	CostUSD          float64
+	ProxyInfo        *ProxyInteraction
 }
 
-// ExtractUsageFromResponse extracts token usage from an OpenAI API response.
-func ExtractUsageFromResponse(usage map[string]any) (prompt, completion, cached int) {
-	if usage == nil {
-		return 0, 0, 0
-	}
+// ============================================================================
+// TrajectoryStore - Multi-session management (gateway integration layer)
+// ============================================================================
 
-	if p, ok := usage["prompt_tokens"].(float64); ok {
-		prompt = int(p)
-	}
-	if c, ok := usage["completion_tokens"].(float64); ok {
-		completion = int(c)
-	}
-	// Cached tokens might be in different locations depending on provider
-	if cache, ok := usage["prompt_tokens_details"].(map[string]any); ok {
-		if ct, ok := cache["cached_tokens"].(float64); ok {
-			cached = int(ct)
-		}
-	}
+// trajectorySessionTTL is the TTL for inactive trajectory sessions.
+// After this duration of inactivity, sessions are closed and removed.
+const trajectorySessionTTL = 1 * time.Hour
 
-	return prompt, completion, cached
-}
-
-// extractContentText returns the text from a message's "content" field,
-// handling both string content and Anthropic-style array-of-blocks content.
-func extractContentText(content any) string {
-	// Case 1: Simple string content (OpenAI / simple Anthropic)
-	if s, ok := content.(string); ok {
-		return s
-	}
-
-	// Case 2: Array of content blocks (Anthropic format)
-	blocks, ok := content.([]any)
-	if !ok {
-		return ""
-	}
-	var texts []string
-	for _, block := range blocks {
-		m, ok := block.(map[string]any)
-		if !ok {
-			continue
-		}
-		if m["type"] == "text" {
-			if t, ok := m["text"].(string); ok && t != "" {
-				texts = append(texts, t)
-			}
-		}
-	}
-	return strings.Join(texts, "\n")
-}
-
-// ExtractUserMessages extracts user message content from request messages.
-func ExtractUserMessages(messages []map[string]any) []string {
-	var userMessages []string
-	for _, msg := range messages {
-		role, ok := msg["role"].(string)
-		if !ok || role != "user" {
-			continue
-		}
-		if text := extractContentText(msg["content"]); text != "" {
-			userMessages = append(userMessages, text)
-		}
-	}
-	return userMessages
-}
-
-// ExtractLastUserMessage gets the last user message from request.
-func ExtractLastUserMessage(messages []map[string]any) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		msg := messages[i]
-		role, ok := msg["role"].(string)
-		if !ok || role != "user" {
-			continue
-		}
-		if text := extractContentText(msg["content"]); text != "" {
-			return text
-		}
-	}
-	return ""
-}
-
-// TrackingStartTime returns the time when the tracker was created.
-func (t *TrajectoryTracker) TrackingStartTime() time.Time {
-	if t.trajectory == nil || len(t.trajectory.Steps) == 0 {
-		return time.Now()
-	}
-	// Parse first step timestamp
-	ts, err := time.Parse(time.RFC3339, t.trajectory.Steps[0].Timestamp)
-	if err != nil {
-		return time.Now()
-	}
-	return ts
-}
-
-// =============================================================================
-// PROXY INTERACTION RECORDING
-// =============================================================================
-
-// ProxyInteractionData contains data for recording a proxy interaction.
-// Uses message counts instead of full arrays to avoid duplicating the system
-// prompt and growing conversation history in every trajectory step.
-type ProxyInteractionData struct {
-	// Pipeline info
-	PipeType     string // Which pipe was used: passthrough, tool_output, tool_discovery
-	PipeStrategy string // How it was processed: passthrough, api, llm
-
-	// Token counts
-	ClientTokens     int // Tokens in original request
-	CompressedTokens int // Tokens in compressed request
-
-	// Message counts (instead of full arrays to avoid system prompt duplication)
-	ClientMsgCount     int // Number of messages from client
-	CompressedMsgCount int // Number of messages after compression
-
-	// Compression details
-	CompressionEnabled bool
-	ToolCompressions   []ToolCompressionEntry // Individual tool compression details
-
-	// LLM response
-	ResponseTokens int // Tokens in response
-}
-
-// RecordProxyInteraction records the full proxy flow for the last agent step.
-// Call this after RecordAgentResponse to add proxy interaction details.
-func (t *TrajectoryTracker) RecordProxyInteraction(data ProxyInteractionData) {
-	if !t.config.Enabled || t.trajectory == nil {
-		return
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.closed || len(t.trajectory.Steps) == 0 {
-		return
-	}
-
-	// Find the last agent step
-	for i := len(t.trajectory.Steps) - 1; i >= 0; i-- {
-		step := &t.trajectory.Steps[i]
-		if step.Source == StepSourceAgent {
-			now := time.Now().UTC().Format(time.RFC3339)
-
-			step.ProxyInteraction = &ProxyInteraction{
-				PipeType:     data.PipeType,
-				PipeStrategy: data.PipeStrategy,
-				ClientToProxy: &ProxyMessage{
-					Timestamp:    now,
-					TokenCount:   data.ClientTokens,
-					MessageCount: data.ClientMsgCount,
-				},
-				ProxyToLLM: &ProxyMessage{
-					Timestamp:    now,
-					TokenCount:   data.CompressedTokens,
-					MessageCount: data.CompressedMsgCount,
-				},
-				LLMToProxy: &ProxyMessage{
-					Timestamp:  now,
-					TokenCount: data.ResponseTokens,
-				},
-			}
-			t.lastActive = time.Now()
-
-			// Add compression info if compression was applied
-			if data.CompressionEnabled && data.ClientTokens > 0 {
-				// tokensSaved := data.ClientTokens - data.CompressedTokens
-				ratio := float64(data.CompressedTokens) / float64(data.ClientTokens)
-
-				step.ProxyInteraction.Compression = &ProxyCompressionInfo{
-					Enabled:          true,
-					OriginalTokens:   data.ClientTokens,
-					CompressedTokens: data.CompressedTokens,
-					// TokensSaved:      tokensSaved,
-					CompressionRatio: ratio,
-					ToolCompressions: data.ToolCompressions,
-				}
-			}
-
-			log.Debug().
-				Int("step_id", step.StepID).
-				Str("pipe_type", data.PipeType).
-				Str("pipe_strategy", data.PipeStrategy).
-				Int("client_tokens", data.ClientTokens).
-				Int("compressed_tokens", data.CompressedTokens).
-				Bool("compression", data.CompressionEnabled).
-				Int("tool_compressions", len(data.ToolCompressions)).
-				Msg("trajectory: recorded proxy interaction")
-
-			// Flush to disk immediately
-			t.flushLocked()
-			return
-		}
-	}
-
-	log.Warn().Msg("trajectory: no agent step found for proxy interaction")
-}
-
-// =============================================================================
-// TRAJECTORY MANAGER - Multiple Trackers by Session ID
-// =============================================================================
-
-// TrajectoryManagerConfig contains configuration for the trajectory manager.
-type TrajectoryManagerConfig struct {
-	Enabled         bool          // Enable trajectory logging
-	BaseDir         string        // Base directory for trajectory files (e.g., "logs/session_1/")
-	AgentName       string        // Agent name (e.g., "claude-code")
-	SessionTTL      time.Duration // Inactive session eviction TTL
-	CleanupInterval time.Duration // Inactive session cleanup interval
-}
-
-// TrajectoryManager manages multiple TrajectoryTrackers by session ID.
-// Each unique session ID gets its own trajectory file: trajectory_<sessionID>.json
-type TrajectoryManager struct {
-	config       TrajectoryManagerConfig
-	trackers     map[string]*TrajectoryTracker
-	mainSessions map[string]bool // session IDs marked as main agent
+// TrajectoryStore manages multiple trajectory recorders, one per session.
+// This is the top-level interface for the gateway.
+type TrajectoryStore struct {
 	mu           sync.RWMutex
-	stopChan     chan struct{}
-	wg           sync.WaitGroup
+	recorders    map[string]*TrajectoryRecorder
+	lastActive   map[string]time.Time // Track last activity per session
+	baseDir      string
+	agentName    string
+	version      string
+	enabled      bool
+	mainSessions map[string]bool // Track main sessions (vs subagents)
+	stopCh       chan struct{}   // Signal cleanup goroutine to stop
 }
 
-// NewTrajectoryManager creates a new trajectory manager.
-func NewTrajectoryManager(cfg TrajectoryManagerConfig) *TrajectoryManager {
-	if cfg.SessionTTL <= 0 {
-		cfg.SessionTTL = time.Hour
-	}
-	if cfg.CleanupInterval <= 0 {
-		cfg.CleanupInterval = 5 * time.Minute
+// TrajectoryStoreConfig contains configuration for the store.
+type TrajectoryStoreConfig struct {
+	Enabled   bool
+	BaseDir   string // Directory for trajectory files
+	AgentName string
+	Version   string
+}
+
+// NewTrajectoryStore creates a new trajectory store.
+func NewTrajectoryStore(cfg TrajectoryStoreConfig) *TrajectoryStore {
+	if !cfg.Enabled || cfg.BaseDir == "" {
+		return &TrajectoryStore{enabled: false}
 	}
 
-	m := &TrajectoryManager{
-		config:       cfg,
-		trackers:     make(map[string]*TrajectoryTracker),
+	agentName := cfg.AgentName
+	if agentName == "" {
+		agentName = "context-gateway"
+	}
+
+	store := &TrajectoryStore{
+		recorders:    make(map[string]*TrajectoryRecorder),
+		lastActive:   make(map[string]time.Time),
+		baseDir:      cfg.BaseDir,
+		agentName:    agentName,
+		version:      cfg.Version,
+		enabled:      true,
 		mainSessions: make(map[string]bool),
-		stopChan:     make(chan struct{}),
+		stopCh:       make(chan struct{}),
 	}
-	if cfg.Enabled {
-		m.wg.Add(1)
-		go m.cleanupLoop()
-	}
-	return m
+
+	// Start cleanup goroutine to prevent memory leaks
+	go store.cleanup()
+
+	return store
 }
 
-// Enabled returns whether trajectory tracking is enabled.
-func (m *TrajectoryManager) Enabled() bool {
-	return m.config.Enabled
+// Enabled returns whether trajectory recording is enabled.
+func (s *TrajectoryStore) Enabled() bool {
+	return s != nil && s.enabled
 }
 
-// getOrCreateTracker returns existing tracker or creates a new one for the session.
-func (m *TrajectoryManager) getOrCreateTracker(sessionID string) *TrajectoryTracker {
-	if !m.config.Enabled || sessionID == "" {
+// MarkMainSession marks a session as the main agent session.
+func (s *TrajectoryStore) MarkMainSession(sessionID string) {
+	if s == nil || !s.enabled {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mainSessions[sessionID] = true
+}
+
+// IsMainSession returns whether the session is a main agent session.
+func (s *TrajectoryStore) IsMainSession(sessionID string) bool {
+	if s == nil || !s.enabled {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mainSessions[sessionID]
+}
+
+// SetAgentModel sets the model name for a session's recorder.
+func (s *TrajectoryStore) SetAgentModel(sessionID, model string) {
+	r := s.getOrCreate(sessionID)
+	if r != nil {
+		r.SetModel(model)
+	}
+}
+
+// getOrCreate returns the recorder for a session, creating if needed.
+func (s *TrajectoryStore) getOrCreate(sessionID string) *TrajectoryRecorder {
+	if s == nil || !s.enabled || sessionID == "" {
 		return nil
 	}
 
-	// Fast path: check with read lock
-	m.mu.RLock()
-	tracker, exists := m.trackers[sessionID]
-	m.mu.RUnlock()
+	s.mu.RLock()
+	r, exists := s.recorders[sessionID]
+	s.mu.RUnlock()
 
 	if exists {
-		return tracker
+		// Update last active time
+		s.mu.Lock()
+		s.lastActive[sessionID] = time.Now()
+		s.mu.Unlock()
+		return r
 	}
 
-	// Slow path: create with write lock
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Double-check after acquiring write lock
-	if tracker, exists = m.trackers[sessionID]; exists {
-		return tracker
+	if r, exists = s.recorders[sessionID]; exists {
+		s.lastActive[sessionID] = time.Now()
+		return r
 	}
 
-	// Check if this session is marked as main agent — tag filename accordingly
-	suffix := sessionID
-	if m.mainSessions[sessionID] {
-		suffix = sessionID + "_MAIN"
-	}
-	logPath := filepath.Join(m.config.BaseDir, fmt.Sprintf("trajectory_%s.json", suffix))
-	tracker, err := NewTrajectoryTracker(TrajectoryConfig{
-		Enabled:   true,
+	// Create new recorder for this session
+	logPath := filepath.Join(s.baseDir, fmt.Sprintf("trajectory_%s.json", sessionID))
+	cfg := TrajectoryRecorderConfig{
 		LogPath:   logPath,
-		AgentName: m.config.AgentName,
 		SessionID: sessionID,
-	})
+		AgentName: s.agentName,
+		Version:   s.version,
+	}
+
+	recorder, err := NewTrajectoryRecorder(cfg)
 	if err != nil {
-		log.Error().Err(err).Str("session_id", sessionID).Msg("trajectory manager: failed to create tracker")
+		log.Error().Err(err).Str("session", sessionID).Msg("trajectory: failed to create recorder")
 		return nil
 	}
 
-	m.trackers[sessionID] = tracker
-	log.Info().
-		Str("session_id", sessionID).
-		Str("path", logPath).
-		Bool("main", m.mainSessions[sessionID]).
-		Msg("trajectory manager: created new tracker for session")
-
-	return tracker
+	s.recorders[sessionID] = recorder
+	s.lastActive[sessionID] = time.Now()
+	return recorder
 }
 
-// MarkMainSession marks a session ID as the main agent session.
-// Only the FIRST session to be marked wins — subsequent calls with different
-// session IDs are ignored. This prevents multiple trajectory files from being
-// tagged _MAIN when several conversations hit the same gateway instance.
-//
-// Must be called before the first recording for that session to take effect on the filename.
-// If the tracker already exists, renames the file on disk.
-func (m *TrajectoryManager) MarkMainSession(sessionID string) {
-	if !m.config.Enabled || sessionID == "" {
+// RecordUserMessage records a user message step for a session.
+// For ATIF compliance, call this followed by RecordAgentResponse for a complete turn.
+func (s *TrajectoryStore) RecordUserMessage(sessionID, message string) {
+	r := s.getOrCreate(sessionID)
+	if r == nil {
 		return
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	// Already marked — check if it's the same session (no-op) or different (reject)
-	if len(m.mainSessions) > 0 {
-		if m.mainSessions[sessionID] {
-			return // same session, already marked
-		}
-		return // different session — only one MAIN allowed
+	if r.closed {
+		return
 	}
-	m.mainSessions[sessionID] = true
 
-	// If tracker already exists, rename its file to include _MAIN
-	if tracker, exists := m.trackers[sessionID]; exists {
-		oldPath := tracker.config.LogPath
-		newPath := filepath.Join(m.config.BaseDir, fmt.Sprintf("trajectory_%s_MAIN.json", sessionID))
-		if oldPath != newPath {
-			if err := os.Rename(oldPath, newPath); err == nil {
-				tracker.config.LogPath = newPath
-				log.Info().Str("old", oldPath).Str("new", newPath).Msg("trajectory: renamed to MAIN")
+	step := Step{
+		StepID:    len(r.trajectory.Steps) + 1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Source:    StepSourceUser,
+		Message:   message,
+	}
+	r.trajectory.Steps = append(r.trajectory.Steps, step)
+	r.batchFlushLocked()
+}
+
+// RecordAgentResponse records an agent response step for a session.
+func (s *TrajectoryStore) RecordAgentResponse(sessionID string, data AgentResponseData) {
+	r := s.getOrCreate(sessionID)
+	if r == nil {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return
+	}
+
+	step := Step{
+		StepID:    len(r.trajectory.Steps) + 1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Source:    StepSourceAgent,
+		Message:   data.Message,
+		ModelName: data.Model,
+	}
+
+	if len(data.ToolCalls) > 0 {
+		step.ToolCalls = data.ToolCalls
+	}
+
+	if data.PromptTokens > 0 || data.CompletionTokens > 0 {
+		step.Metrics = &Metrics{
+			PromptTokens:     data.PromptTokens,
+			CompletionTokens: data.CompletionTokens,
+		}
+	}
+
+	r.trajectory.Steps = append(r.trajectory.Steps, step)
+	r.batchFlushLocked()
+}
+
+// AccumulateAgentResponse accumulates tool calls to the last agent step.
+func (s *TrajectoryStore) AccumulateAgentResponse(sessionID string, data AgentResponseData) {
+	r := s.getOrCreate(sessionID)
+	if r == nil {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed || len(r.trajectory.Steps) == 0 {
+		return
+	}
+
+	// Find last agent step
+	for i := len(r.trajectory.Steps) - 1; i >= 0; i-- {
+		step := &r.trajectory.Steps[i]
+		if step.Source != StepSourceAgent {
+			continue
+		}
+
+		// Append tool calls (deduplicate by ID)
+		if len(data.ToolCalls) > 0 {
+			existing := make(map[string]bool)
+			for _, tc := range step.ToolCalls {
+				existing[tc.ToolCallID] = true
+			}
+			for _, tc := range data.ToolCalls {
+				if !existing[tc.ToolCallID] {
+					step.ToolCalls = append(step.ToolCalls, tc)
+				}
 			}
 		}
+
+		// Update message if non-empty
+		if data.Message != "" {
+			step.Message = data.Message
+		}
+
+		// Accumulate metrics
+		if data.PromptTokens > 0 || data.CompletionTokens > 0 {
+			if step.Metrics == nil {
+				step.Metrics = &Metrics{}
+			}
+			step.Metrics.PromptTokens += data.PromptTokens
+			step.Metrics.CompletionTokens += data.CompletionTokens
+		}
+
+		r.batchFlushLocked()
+		return
 	}
 }
 
-// RecordUserMessage records a user message for a specific session.
-func (m *TrajectoryManager) RecordUserMessage(sessionID string, message string) {
-	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
-		tracker.RecordUserMessage(message)
+// RecordProxyInteraction records compression metadata for the current agent step.
+func (s *TrajectoryStore) RecordProxyInteraction(sessionID string, data ProxyInteractionData) {
+	r := s.getOrCreate(sessionID)
+	if r == nil {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed || len(r.trajectory.Steps) == 0 {
+		return
+	}
+
+	// Find last agent step and add proxy interaction
+	for i := len(r.trajectory.Steps) - 1; i >= 0; i-- {
+		step := &r.trajectory.Steps[i]
+		if step.Source != StepSourceAgent {
+			continue
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+
+		step.ProxyInteraction = &ProxyInteraction{
+			PipeType:     data.PipeType,
+			PipeStrategy: data.PipeStrategy,
+			ClientToProxy: &ProxyMessage{
+				Timestamp:    now,
+				TokenCount:   data.ClientTokens,
+				MessageCount: data.ClientMsgCount,
+			},
+			ProxyToLLM: &ProxyMessage{
+				Timestamp:    now,
+				TokenCount:   data.CompressedTokens,
+				MessageCount: data.CompressedMsgCount,
+			},
+			LLMToProxy: &ProxyMessage{
+				Timestamp:  now,
+				TokenCount: data.ResponseTokens,
+			},
+		}
+
+		// Add compression info if compression was applied
+		if data.CompressionEnabled && data.ClientTokens > 0 {
+			ratio := 0.0
+			if data.ClientTokens > 0 {
+				ratio = 1.0 - float64(data.CompressedTokens)/float64(data.ClientTokens)
+			}
+			step.ProxyInteraction.Compression = &ProxyCompressionInfo{
+				Enabled:          true,
+				OriginalTokens:   data.ClientTokens,
+				CompressedTokens: data.CompressedTokens,
+				CompressionRatio: ratio,
+				ToolCompressions: data.ToolCompressions,
+			}
+		}
+
+		r.batchFlushLocked()
+		return
 	}
 }
 
-// RecordAgentResponse records an agent response for a specific session.
-func (m *TrajectoryManager) RecordAgentResponse(sessionID string, response AgentResponseData) {
-	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
-		tracker.RecordAgentResponse(response)
+// Close closes all recorders and writes final trajectories.
+func (s *TrajectoryStore) Close() error {
+	if s == nil || !s.enabled {
+		return nil
 	}
-}
 
-// AccumulateAgentResponse accumulates tool calls into the last agent step for a session.
-func (m *TrajectoryManager) AccumulateAgentResponse(sessionID string, response AgentResponseData) {
-	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
-		tracker.AccumulateAgentResponse(response)
-	}
-}
-
-// RecordToolResult records a tool result for a specific session.
-func (m *TrajectoryManager) RecordToolResult(sessionID string, toolCallID string, content string) {
-	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
-		tracker.RecordToolResult(toolCallID, content)
-	}
-}
-
-// RecordSystemMessage records a system message for a specific session.
-func (m *TrajectoryManager) RecordSystemMessage(sessionID string, message string) {
-	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
-		tracker.RecordSystemMessage(message)
-	}
-}
-
-// RecordProxyInteraction records proxy interaction for a specific session.
-func (m *TrajectoryManager) RecordProxyInteraction(sessionID string, data ProxyInteractionData) {
-	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
-		tracker.RecordProxyInteraction(data)
-	}
-}
-
-// SetAgentModel sets the model for a specific session.
-func (m *TrajectoryManager) SetAgentModel(sessionID string, model string) {
-	if tracker := m.getOrCreateTracker(sessionID); tracker != nil {
-		tracker.SetAgentModel(model)
-	}
-}
-
-// CloseAll closes all managed trackers.
-func (m *TrajectoryManager) CloseAll() error {
+	// Signal cleanup goroutine to stop
 	select {
-	case <-m.stopChan:
-		// already closed
+	case <-s.stopCh:
+		// Already closed
 	default:
-		close(m.stopChan)
+		close(s.stopCh)
 	}
-	m.wg.Wait()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	var lastErr error
-	for sessionID, tracker := range m.trackers {
-		if err := tracker.Close(); err != nil {
-			log.Error().Err(err).Str("session_id", sessionID).Msg("trajectory manager: failed to close tracker")
-			lastErr = err
+	for sessionID, r := range s.recorders {
+		if err := r.Close(); err != nil {
+			log.Error().Err(err).Str("session", sessionID).Msg("trajectory: close failed")
 		}
 	}
-	m.trackers = make(map[string]*TrajectoryTracker)
-	return lastErr
+
+	// Clear maps to free memory
+	s.recorders = make(map[string]*TrajectoryRecorder)
+	s.lastActive = make(map[string]time.Time)
+	s.mainSessions = make(map[string]bool)
+
+	return nil
 }
 
-func (m *TrajectoryManager) cleanupLoop() {
-	defer m.wg.Done()
-
-	ticker := time.NewTicker(m.config.CleanupInterval)
+// cleanup periodically removes inactive sessions to prevent memory leaks.
+func (s *TrajectoryStore) cleanup() {
+	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-m.stopChan:
+		case <-s.stopCh:
 			return
 		case <-ticker.C:
-			m.cleanupInactiveTrackers()
+			s.cleanupStale()
 		}
 	}
 }
 
-func (m *TrajectoryManager) cleanupInactiveTrackers() {
-	if !m.config.Enabled || m.config.SessionTTL <= 0 {
-		return
-	}
+// cleanupStale removes sessions that have been inactive for longer than trajectorySessionTTL.
+func (s *TrajectoryStore) cleanupStale() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	cutoff := time.Now().Add(-m.config.SessionTTL)
-	stale := make(map[string]*TrajectoryTracker)
+	now := time.Now()
+	stale := make([]string, 0)
 
-	m.mu.Lock()
-	for sessionID, tracker := range m.trackers {
-		if tracker == nil {
-			delete(m.trackers, sessionID)
-			continue
-		}
-		if tracker.LastActivity().Before(cutoff) {
-			stale[sessionID] = tracker
-			delete(m.trackers, sessionID)
+	for sessionID, lastActive := range s.lastActive {
+		if now.Sub(lastActive) > trajectorySessionTTL {
+			stale = append(stale, sessionID)
 		}
 	}
-	m.mu.Unlock()
 
-	for sessionID, tracker := range stale {
-		if err := tracker.Close(); err != nil {
-			log.Error().Err(err).Str("session_id", sessionID).Msg("trajectory manager: failed to close evicted tracker")
-		} else {
-			log.Debug().Str("session_id", sessionID).Msg("trajectory manager: evicted inactive tracker")
+	for _, sessionID := range stale {
+		if r, exists := s.recorders[sessionID]; exists {
+			if err := r.Close(); err != nil {
+				log.Error().Err(err).Str("session", sessionID).Msg("trajectory: cleanup close failed")
+			}
+			delete(s.recorders, sessionID)
 		}
+		delete(s.lastActive, sessionID)
+		delete(s.mainSessions, sessionID)
+		log.Debug().Str("session", sessionID).Msg("trajectory: cleaned up stale session")
+	}
+
+	if len(stale) > 0 {
+		log.Info().Int("cleaned", len(stale)).Int("remaining", len(s.recorders)).Msg("trajectory: cleanup complete")
 	}
 }
 
-// Stats returns statistics about managed trackers.
-func (m *TrajectoryManager) Stats() map[string]interface{} {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	sessionStats := make(map[string]int)
-	for sessionID, tracker := range m.trackers {
-		sessionStats[sessionID] = tracker.GetStepCount()
+// GetSessionCount returns the number of active sessions.
+func (s *TrajectoryStore) GetSessionCount() int {
+	if s == nil || !s.enabled {
+		return 0
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.recorders)
+}
 
-	return map[string]interface{}{
-		"enabled":         m.config.Enabled,
-		"active_sessions": len(m.trackers),
-		"sessions":        sessionStats,
-	}
+// AgentResponseData contains data for an agent response (store interface).
+type AgentResponseData struct {
+	Message          string
+	Model            string
+	ToolCalls        []ToolCall
+	PromptTokens     int
+	CompletionTokens int
+}
+
+// ProxyInteractionData contains proxy compression metadata (store interface).
+type ProxyInteractionData struct {
+	PipeType           string
+	PipeStrategy       string
+	ClientTokens       int
+	CompressedTokens   int
+	ClientMsgCount     int
+	CompressedMsgCount int
+	CompressionEnabled bool
+	ToolCompressions   []ToolCompressionEntry
+	ResponseTokens     int
 }

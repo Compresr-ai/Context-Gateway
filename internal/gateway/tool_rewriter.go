@@ -1,26 +1,19 @@
-// Bidirectional rewriting for the universal dispatcher (gateway_search_tool).
-//
-// DESIGN: The proxy rewrites tool calls in two directions:
-//   - Outbound (LLM -> Client): gateway_search_tool call-mode -> real tool_use
-//   - Inbound  (Client -> LLM): real tool_use/tool_result in history -> gateway_search_tool
-//
-// This keeps the LLM's view consistent (tools=[gateway_search_tool]) while
-// the client sees normal tool_use/tool_result exchanges.
+// tool_rewriter.go rewrites gateway_search_tool calls bidirectionally between LLM and client.
 package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 
+	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/utils"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
-
-// =============================================================================
-// OUTBOUND: Rewrite LLM response for client (gateway_search_tool -> real tool)
-// =============================================================================
 
 // rewriteResponseForClient transforms gateway_search_tool call-mode blocks
 // into real tool_use blocks before sending to the client.
-func rewriteResponseForClient(responseBody []byte, mappings []*ToolCallMapping, isAnthropic bool) ([]byte, error) {
+func rewriteResponseForClient(responseBody []byte, mappings []*ToolCallMapping, provider adapters.Provider) ([]byte, error) {
 	var response map[string]any
 	if err := json.Unmarshal(responseBody, &response); err != nil {
 		return responseBody, err
@@ -31,7 +24,7 @@ func rewriteResponseForClient(responseBody []byte, mappings []*ToolCallMapping, 
 		lookup[m.ProxyToolUseID] = m
 	}
 
-	if isAnthropic {
+	if provider == adapters.ProviderAnthropic || provider == adapters.ProviderBedrock {
 		rewriteAnthropicResponse(response, lookup)
 	} else {
 		rewriteOpenAIResponse(response, lookup)
@@ -118,218 +111,154 @@ func rewriteOpenAIResponse(response map[string]any, lookup map[string]*ToolCallM
 	response["choices"] = choices
 }
 
-// =============================================================================
-// INBOUND: Rewrite client request for LLM (real tool -> gateway_search_tool)
-// =============================================================================
-
 // rewriteInboundMessages transforms all tool_use/tool_result references in the
 // message history from client-facing names back to gateway_search_tool.
-// Must be called on every inbound request before forwarding to LLM.
-func rewriteInboundMessages(body []byte, mappings map[string]*ToolCallMapping, isAnthropic bool, searchToolName string) ([]byte, error) {
+// Uses gjson/sjson for surgical field replacements to preserve original JSON key
+// ordering — re-marshaling a map would reorder keys and break KV-cache prefix hits.
+func rewriteInboundMessages(body []byte, mappings map[string]*ToolCallMapping, provider adapters.Provider, searchToolName string) ([]byte, error) {
 	if len(mappings) == 0 {
 		return body, nil
 	}
-
-	var request map[string]any
-	if err := json.Unmarshal(body, &request); err != nil {
-		return body, err
+	// Responses API: uses input[] instead of messages[]
+	if gjson.GetBytes(body, "input").Exists() && !gjson.GetBytes(body, "messages").Exists() {
+		return rewriteInboundInputItemsSjson(body, mappings, searchToolName)
 	}
-
-	messages, ok := request["messages"].([]any)
-	if !ok {
-		// Responses API: check for input[] instead of messages[]
-		input, inputOk := request["input"].([]any)
-		if !inputOk {
-			return body, nil
-		}
-		return rewriteInboundInputItems(request, input, mappings, searchToolName)
+	if provider == adapters.ProviderAnthropic || provider == adapters.ProviderBedrock {
+		return rewriteAnthropicMessagesSjson(body, mappings, searchToolName)
 	}
+	return rewriteOpenAIMessagesSjson(body, mappings, searchToolName)
+}
 
+// rewriteAnthropicMessagesSjson rewrites tool_use/tool_result content blocks using
+// sjson path-based replacements so unmodified fields keep their original byte order.
+func rewriteAnthropicMessagesSjson(body []byte, mappings map[string]*ToolCallMapping, searchToolName string) ([]byte, error) {
+	result := body
 	modified := false
 
-	for i, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-
-		role, _ := msgMap["role"].(string)
-
-		var changed bool
-		if isAnthropic {
-			changed = rewriteAnthropicMessage(msgMap, role, mappings, searchToolName)
-		} else {
-			changed = rewriteOpenAIMessage(msgMap, role, mappings, searchToolName)
-		}
-
-		if changed {
-			messages[i] = msgMap
-			modified = true
-		}
-	}
+	var msgIdx int
+	gjson.GetBytes(body, "messages").ForEach(func(_, msg gjson.Result) bool {
+		var blockIdx int
+		msg.Get("content").ForEach(func(_, block gjson.Result) bool {
+			basePath := fmt.Sprintf("messages.%d.content.%d", msgIdx, blockIdx)
+			switch block.Get("type").String() {
+			case "tool_use":
+				id := block.Get("id").String()
+				if mapping := mappings[id]; mapping != nil {
+					newInput := map[string]any{
+						"tool_name":  mapping.ClientToolName,
+						"tool_input": mapping.OriginalInput,
+					}
+					inputJSON, _ := json.Marshal(newInput)
+					result, _ = sjson.SetBytes(result, basePath+".name", searchToolName)
+					result, _ = sjson.SetBytes(result, basePath+".id", mapping.ProxyToolUseID)
+					result, _ = sjson.SetRawBytes(result, basePath+".input", inputJSON)
+					modified = true
+				}
+			case "tool_result":
+				toolUseID := block.Get("tool_use_id").String()
+				if mapping := mappings[toolUseID]; mapping != nil {
+					result, _ = sjson.SetBytes(result, basePath+".tool_use_id", mapping.ProxyToolUseID)
+					modified = true
+				}
+			}
+			blockIdx++
+			return true
+		})
+		msgIdx++
+		return true
+	})
 
 	if !modified {
 		return body, nil
 	}
-
-	request["messages"] = messages
-	return utils.MarshalNoEscape(request)
+	return result, nil
 }
 
-func rewriteAnthropicMessage(msg map[string]any, role string, mappings map[string]*ToolCallMapping, searchToolName string) bool {
-	content, ok := msg["content"].([]any)
-	if !ok {
-		return false
-	}
-
-	changed := false
-
-	for i, block := range content {
-		blockMap, ok := block.(map[string]any)
-		if !ok {
-			continue
-		}
-
-		blockType, _ := blockMap["type"].(string)
-
-		switch blockType {
-		case "tool_use":
-			id, _ := blockMap["id"].(string)
-			mapping := mappings[id]
-			if mapping != nil {
-				blockMap["name"] = searchToolName
-				blockMap["id"] = mapping.ProxyToolUseID
-				blockMap["input"] = map[string]any{
-					"tool_name":  mapping.ClientToolName,
-					"tool_input": mapping.OriginalInput,
-				}
-				content[i] = blockMap
-				changed = true
-			}
-
-		case "tool_result":
-			toolUseID, _ := blockMap["tool_use_id"].(string)
-			mapping := mappings[toolUseID]
-			if mapping != nil {
-				blockMap["tool_use_id"] = mapping.ProxyToolUseID
-				content[i] = blockMap
-				changed = true
-			}
-		}
-	}
-
-	if changed {
-		msg["content"] = content
-	}
-	return changed
-}
-
-func rewriteOpenAIMessage(msg map[string]any, role string, mappings map[string]*ToolCallMapping, searchToolName string) bool {
-	changed := false
-
-	switch role {
-	case "assistant":
-		toolCalls, ok := msg["tool_calls"].([]any)
-		if !ok {
-			return false
-		}
-		for i, tc := range toolCalls {
-			tcMap, ok := tc.(map[string]any)
-			if !ok {
-				continue
-			}
-			tcID, _ := tcMap["id"].(string)
-			mapping := mappings[tcID]
-			if mapping == nil {
-				continue
-			}
-
-			function, ok := tcMap["function"].(map[string]any)
-			if !ok {
-				continue
-			}
-
-			function["name"] = searchToolName
-			wrappedInput := map[string]any{
-				"tool_name":  mapping.ClientToolName,
-				"tool_input": mapping.OriginalInput,
-			}
-			argsJSON, _ := json.Marshal(wrappedInput)
-			function["arguments"] = string(argsJSON)
-			tcMap["function"] = function
-			tcMap["id"] = mapping.ProxyToolUseID
-			toolCalls[i] = tcMap
-			changed = true
-		}
-		if changed {
-			msg["tool_calls"] = toolCalls
-		}
-
-	case "tool":
-		toolCallID, _ := msg["tool_call_id"].(string)
-		mapping := mappings[toolCallID]
-		if mapping != nil {
-			msg["tool_call_id"] = mapping.ProxyToolUseID
-			changed = true
-		}
-	}
-
-	return changed
-}
-
-// rewriteInboundInputItems rewrites function_call/function_call_output references
-// in Responses API input[] items from client-facing names back to gateway_search_tool.
-func rewriteInboundInputItems(request map[string]any, input []any, mappings map[string]*ToolCallMapping, searchToolName string) ([]byte, error) {
+// rewriteOpenAIMessagesSjson rewrites tool_calls/tool_call_id fields using
+// sjson path-based replacements so unmodified fields keep their original byte order.
+func rewriteOpenAIMessagesSjson(body []byte, mappings map[string]*ToolCallMapping, searchToolName string) ([]byte, error) {
+	result := body
 	modified := false
 
-	for i, item := range input {
-		itemMap, ok := item.(map[string]any)
-		if !ok {
-			continue
+	var msgIdx int
+	gjson.GetBytes(body, "messages").ForEach(func(_, msg gjson.Result) bool {
+		baseMsgPath := fmt.Sprintf("messages.%d", msgIdx)
+		switch msg.Get("role").String() {
+		case "assistant":
+			var tcIdx int
+			msg.Get("tool_calls").ForEach(func(_, tc gjson.Result) bool {
+				tcID := tc.Get("id").String()
+				if mapping := mappings[tcID]; mapping != nil {
+					wrappedInput := map[string]any{
+						"tool_name":  mapping.ClientToolName,
+						"tool_input": mapping.OriginalInput,
+					}
+					argsJSON, _ := json.Marshal(wrappedInput)
+					tcPath := fmt.Sprintf("%s.tool_calls.%d", baseMsgPath, tcIdx)
+					result, _ = sjson.SetBytes(result, tcPath+".id", mapping.ProxyToolUseID)
+					result, _ = sjson.SetBytes(result, tcPath+".function.name", searchToolName)
+					result, _ = sjson.SetBytes(result, tcPath+".function.arguments", string(argsJSON))
+					modified = true
+				}
+				tcIdx++
+				return true
+			})
+		case "tool":
+			toolCallID := msg.Get("tool_call_id").String()
+			if mapping := mappings[toolCallID]; mapping != nil {
+				result, _ = sjson.SetBytes(result, baseMsgPath+".tool_call_id", mapping.ProxyToolUseID)
+				modified = true
+			}
 		}
+		msgIdx++
+		return true
+	})
 
-		itemType, _ := itemMap["type"].(string)
+	if !modified {
+		return body, nil
+	}
+	return result, nil
+}
 
-		switch itemType {
+// rewriteInboundInputItemsSjson rewrites function_call/function_call_output references
+// in Responses API input[] items using sjson so unmodified items keep original byte order.
+func rewriteInboundInputItemsSjson(body []byte, mappings map[string]*ToolCallMapping, searchToolName string) ([]byte, error) {
+	result := body
+	modified := false
+
+	var idx int
+	gjson.GetBytes(body, "input").ForEach(func(_, item gjson.Result) bool {
+		basePath := fmt.Sprintf("input.%d", idx)
+		switch item.Get("type").String() {
 		case "function_call":
-			callID, _ := itemMap["call_id"].(string)
-			mapping := mappings[callID]
-			if mapping != nil {
-				itemMap["name"] = searchToolName
-				itemMap["call_id"] = mapping.ProxyToolUseID
-				// Rewrite arguments to wrap with tool_name/tool_input
+			callID := item.Get("call_id").String()
+			if mapping := mappings[callID]; mapping != nil {
 				wrappedInput := map[string]any{
 					"tool_name":  mapping.ClientToolName,
 					"tool_input": mapping.OriginalInput,
 				}
 				argsJSON, _ := json.Marshal(wrappedInput)
-				itemMap["arguments"] = string(argsJSON)
-				input[i] = itemMap
+				result, _ = sjson.SetBytes(result, basePath+".name", searchToolName)
+				result, _ = sjson.SetBytes(result, basePath+".call_id", mapping.ProxyToolUseID)
+				result, _ = sjson.SetBytes(result, basePath+".arguments", string(argsJSON))
 				modified = true
 			}
-
 		case "function_call_output":
-			callID, _ := itemMap["call_id"].(string)
-			mapping := mappings[callID]
-			if mapping != nil {
-				itemMap["call_id"] = mapping.ProxyToolUseID
-				input[i] = itemMap
+			callID := item.Get("call_id").String()
+			if mapping := mappings[callID]; mapping != nil {
+				result, _ = sjson.SetBytes(result, basePath+".call_id", mapping.ProxyToolUseID)
 				modified = true
 			}
 		}
-	}
+		idx++
+		return true
+	})
 
 	if !modified {
-		return utils.MarshalNoEscape(request)
+		return body, nil
 	}
-
-	request["input"] = input
-	return utils.MarshalNoEscape(request)
+	return result, nil
 }
-
-// =============================================================================
-// HELPERS
-// =============================================================================
 
 // extractInputSchemaForDisplay extracts the input schema from a tool definition,
 // handling both Anthropic (input_schema) and OpenAI (parameters, function.parameters) formats.

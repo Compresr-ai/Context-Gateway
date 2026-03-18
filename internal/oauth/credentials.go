@@ -29,7 +29,7 @@ type ClaudeCredentials struct {
 // MarshalJSON implements json.Marshaler to output accessToken/refreshToken keys.
 // Uses map to avoid exported struct fields matching gosec G117 secret patterns.
 func (c ClaudeCredentials) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]interface{}{
+	return json.Marshal(map[string]any{
 		"accessToken":      c.OAuthAccess,
 		"refreshToken":     c.OAuthRefresh,
 		"expiresAt":        c.ExpiresAt,

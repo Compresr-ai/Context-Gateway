@@ -44,23 +44,6 @@ Supported agents:
 - **openclaw**: Open-source Claude Code alternative
 - **custom**: Bring your own agent configuration
 
-## Supported Providers
-
-Context Gateway supports all major LLM providers:
-
-| Provider | Format | Detection |
-|----------|--------|-----------|
-| **Anthropic** (Claude) | Native | Auto-detected via `anthropic-version` header |
-| **OpenAI** (GPT, o1, o3) | Native | Auto-detected via path `/v1/chat/completions` |
-| **Google Gemini** | Native | Auto-detected via `x-goog-api-key` header |
-| **AWS Bedrock** | Native | Auto-detected via Bedrock URL patterns |
-| **MiniMax** (M2.5) | OpenAI-compatible | Via `X-Provider: minimax` header |
-| **Ollama** | OpenAI-compatible | Auto-detected via `/api/chat` path |
-| **LiteLLM** | OpenAI-compatible | Via `X-Provider: litellm` header |
-| **OpenRouter** | OpenAI-compatible | Via `X-Provider: openrouter` header |
-
-To use MiniMax with Context Gateway, set the `X-Provider: minimax` header and configure `MINIMAX_API_KEY` in your environment. MiniMax supports the `MiniMax-M2.5` and `MiniMax-M2.5-highspeed` models with 204K context window. Learn more at [MiniMax Platform](https://platform.minimax.io).
-
 ## What you'll notice
 
 - **No more waiting** when conversation hits context limits

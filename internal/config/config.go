@@ -1,23 +1,25 @@
 // Package config loads and validates the gateway configuration.
-//
-// DESIGN: All configuration MUST come from YAML files. No defaults.
-// This ensures explicit, auditable configuration for production deployments.
-//
-// FILES:
-//   - config.go:     Root Config struct, Load(), Validate()
-//   - pipes.go:      Pipe configs, compression thresholds, strategies
-//   - monitoring.go: Logging and telemetry settings
 package config
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/compresr/context-gateway/internal/costcontrol"
+	"github.com/compresr/context-gateway/internal/postsession"
 )
+
+// PostSessionConfig is an alias for postsession.Config.
+type PostSessionConfig = postsession.Config
+
+// CostControlConfig is an alias for costcontrol.CostControlConfig.
+type CostControlConfig = costcontrol.CostControlConfig
 
 // Config is the root configuration for the Context Gateway.
 // All fields are required - no defaults are applied.
@@ -34,6 +36,7 @@ type Config struct {
 	Notifications NotificationsConfig `yaml:"notifications"` // Notification integrations (Slack, etc.)
 	PostSession   PostSessionConfig   `yaml:"post_session"`  // Post-session CLAUDE.md updates
 	Dashboard     DashboardConfig     `yaml:"dashboard"`     // Dashboard UI settings
+	CompresrCreds CompresrCredsConfig `yaml:"compresr"`      // Centralized Compresr credentials (inherited by all pipes)
 
 	// Runtime-only fields (not loaded from YAML)
 	AgentFlags *AgentFlags `yaml:"-"` // Agent CLI flags, set at runtime by cmd/agent.go
@@ -122,8 +125,7 @@ type ServerConfig struct {
 
 // URLsConfig contains upstream URL configuration.
 type URLsConfig struct {
-	Gateway  string `yaml:"gateway"`  // Gateway's own URL (for external access)
-	Compresr string `yaml:"compresr"` // Compresr platform URL - not used in current release
+	Compresr string `yaml:"compresr"` // Compresr platform URL (e.g., "https://api.compresr.ai")
 }
 
 // NotificationsConfig controls notification integrations.
@@ -139,7 +141,8 @@ type SlackConfig struct {
 
 // DashboardConfig controls the embedded dashboard UI.
 type DashboardConfig struct {
-	HiddenTabs []string `yaml:"hidden_tabs"` // Tabs to hide from the dashboard UI (e.g., ["savings"])
+	HiddenTabs         []string      `yaml:"hidden_tabs"`          // Tabs to hide from the dashboard UI (e.g., ["savings"])
+	SessionIdleTimeout time.Duration `yaml:"session_idle_timeout"` // Inactivity window before heartbeat liveness check fires (default: 10m)
 }
 
 // StoreConfig contains shadow context store settings.
@@ -148,31 +151,26 @@ type StoreConfig struct {
 	TTL  time.Duration `yaml:"ttl"`  // Time-to-live for entries
 }
 
+// envVarRe matches ${VAR:-default} and ${VAR} syntax.
+// Compiled once at package level — this function is called on every config load and hot-reload.
+var envVarRe = regexp.MustCompile(`\$\{([^}:]+)(?::-([^}]*))?\}`)
+
 // expandEnvWithDefaults expands environment variables with support for default values.
 // Supports both ${VAR} and ${VAR:-default} syntax.
 func expandEnvWithDefaults(s string) string {
-	// Pattern matches ${VAR:-default} or ${VAR}
-	re := regexp.MustCompile(`\$\{([^}:]+)(?::-([^}]*))?\}`)
-
-	return re.ReplaceAllStringFunc(s, func(match string) string {
-		// Extract variable name and default value
-		parts := re.FindStringSubmatch(match)
+	return envVarRe.ReplaceAllStringFunc(s, func(match string) string {
+		parts := envVarRe.FindStringSubmatch(match)
 		if len(parts) < 2 {
 			return match
 		}
-
 		varName := parts[1]
 		defaultValue := ""
 		if len(parts) > 2 {
 			defaultValue = parts[2]
 		}
-
-		// Get environment variable value
 		if value := os.Getenv(varName); value != "" {
 			return value
 		}
-
-		// Return default if provided, otherwise empty string
 		return defaultValue
 	})
 }
@@ -205,7 +203,10 @@ func LoadFromBytes(data []byte) (*Config, error) {
 
 	// Apply environment variable overrides for telemetry paths
 	// This allows Harbor/Daytona to redirect logs without modifying config files
-	cfg.applyEnvOverrides()
+	cfg.ApplySessionEnvOverrides()
+
+	// Apply defaults for optional fields not present in YAML
+	cfg.applyDefaults()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -214,17 +215,81 @@ func LoadFromBytes(data []byte) (*Config, error) {
 	return &cfg, nil
 }
 
+// applyDefaults sets sensible defaults for optional numeric fields that default
+// to zero when absent from YAML but need a non-zero value to function correctly.
+//
+// PIPE PHILOSOPHY: All pipes are always enabled with passthrough as the default
+// strategy. A config section is not required to activate a pipe — omitting it
+// means "run with passthrough". Explicit config overrides the default.
+func (c *Config) applyDefaults() {
+	// TargetCompressionRatio: 0 means "unset" — apply the default.
+	// This ensures consistent behaviour when the field is absent from older configs.
+	if c.Pipes.ToolOutput.TargetCompressionRatio == 0 {
+		c.Pipes.ToolOutput.TargetCompressionRatio = DefaultTargetCompressionRatio
+	}
+
+	// All pipes default to enabled=true with passthrough strategy.
+	// - Strategy defaults to passthrough when absent from config (empty string).
+	// - Enabled defaults to true when the pipe has no explicit config at all
+	//   (i.e., Strategy was empty before defaulting — meaning the entire section
+	//   was omitted). If a strategy was explicitly set, Enabled defaults to true
+	//   as well (a strategy without enabled=true is almost certainly a mistake).
+	// Explicit config can override with enabled: false to disable a pipe entirely.
+	if c.Pipes.ToolOutput.Strategy == "" {
+		c.Pipes.ToolOutput.Strategy = StrategyPassthrough
+	}
+	if !c.Pipes.ToolOutput.Enabled {
+		c.Pipes.ToolOutput.Enabled = true
+	}
+
+	if c.Pipes.ToolDiscovery.Strategy == "" {
+		c.Pipes.ToolDiscovery.Strategy = StrategyPassthrough
+	}
+	if !c.Pipes.ToolDiscovery.Enabled {
+		c.Pipes.ToolDiscovery.Enabled = true
+	}
+
+	if c.Pipes.TaskOutput.Strategy == "" {
+		c.Pipes.TaskOutput.Strategy = StrategyPassthrough
+	}
+	if !c.Pipes.TaskOutput.Enabled {
+		c.Pipes.TaskOutput.Enabled = true
+	}
+
+	// Propagate top-level compresr credentials to per-pipe sections.
+	c.applyCompresrFallbacks()
+}
+
+// applyCompresrFallbacks propagates the top-level CompresrCreds to all per-pipe
+// compresr sections when the per-pipe api_key is absent.
+//
+// This allows configs to define COMPRESR_API_KEY once at the root instead of
+// repeating it in tool_output, tool_discovery, and preemptive.summarizer sections.
+// Per-pipe api_key values (when explicitly set) always take priority.
+func (c *Config) applyCompresrFallbacks() {
+	key := c.CompresrCreds.APIKey
+	if key == "" {
+		return
+	}
+
+	// Propagate to tool output pipe
+	if c.Pipes.ToolOutput.Compresr.APIKey == "" {
+		c.Pipes.ToolOutput.Compresr.APIKey = key
+	}
+	// Propagate to tool discovery pipe
+	if c.Pipes.ToolDiscovery.Compresr.APIKey == "" {
+		c.Pipes.ToolDiscovery.Compresr.APIKey = key
+	}
+	// Propagate to preemptive summarizer (only when compresr section exists)
+	if c.Preemptive.Summarizer.Compresr != nil && c.Preemptive.Summarizer.Compresr.APIKey == "" {
+		c.Preemptive.Summarizer.Compresr.APIKey = key
+	}
+}
+
 // ExpandEnvWithDefaults expands environment variables with support for default values.
 // Exported for use by agent config parsing.
 func ExpandEnvWithDefaults(s string) string {
 	return expandEnvWithDefaults(s)
-}
-
-// applyEnvOverrides applies environment variable overrides to the config.
-// This allows external systems (Harbor, Daytona) to redirect log paths
-// without modifying the base config files.
-func (c *Config) applyEnvOverrides() {
-	c.ApplySessionEnvOverrides()
 }
 
 // ApplySessionEnvOverrides applies SESSION_* environment variable overrides.
@@ -245,6 +310,11 @@ func (c *Config) ApplySessionEnvOverrides() {
 		c.Monitoring.ToolDiscoveryLogPath = envPath
 	}
 
+	// SESSION_TASK_OUTPUT_LOG overrides the task output log path
+	if envPath := os.Getenv("SESSION_TASK_OUTPUT_LOG"); envPath != "" {
+		c.Monitoring.TaskOutputLogPath = envPath
+	}
+
 	// SESSION_TRAJECTORY_LOG overrides the trajectory log path
 	if envPath := os.Getenv("SESSION_TRAJECTORY_LOG"); envPath != "" {
 		c.Monitoring.TrajectoryPath = envPath
@@ -255,6 +325,43 @@ func (c *Config) ApplySessionEnvOverrides() {
 	// SESSION_COMPACTION_LOG overrides the preemptive compaction log path
 	if envPath := os.Getenv("SESSION_COMPACTION_LOG"); envPath != "" {
 		c.Preemptive.CompactionLogPath = envPath
+	}
+
+	// SESSION_TOOLS_LOG overrides the session tools catalog path
+	if envPath := os.Getenv("SESSION_TOOLS_LOG"); envPath != "" {
+		c.Monitoring.SessionToolsPath = envPath
+	}
+
+	// SESSION_STATS_LOG overrides the live session stats snapshot path
+	if envPath := os.Getenv("SESSION_STATS_LOG"); envPath != "" {
+		c.Monitoring.SessionStatsPath = envPath
+	}
+
+	// SESSION_EXPAND_CALLS_LOG overrides the expand_context_calls.jsonl path
+	if envPath := os.Getenv("SESSION_EXPAND_CALLS_LOG"); envPath != "" {
+		c.Monitoring.ExpandContextCallsPath = envPath
+	}
+
+	// Auto-derive ExpandContextCallsPath from CompressionLogPath when missing.
+	// Handles stale configs that predate expand_context_calls_path.
+	if c.Monitoring.ExpandContextCallsPath == "" && c.Monitoring.CompressionLogPath != "" {
+		dir := filepath.Dir(c.Monitoring.CompressionLogPath)
+		c.Monitoring.ExpandContextCallsPath = filepath.Join(dir, "expand_context_calls.jsonl")
+	}
+
+	// Auto-derive TaskOutputLogPath from CompressionLogPath when missing.
+	// This handles stale configs generated before task_output_log_path was added,
+	// so task output events are logged without requiring a config migration.
+	// Example: "logs/session1/tool_output_compression.jsonl" → "logs/session1/task_output"
+	if c.Monitoring.TaskOutputLogPath == "" && c.Monitoring.CompressionLogPath != "" {
+		dir := filepath.Dir(c.Monitoring.CompressionLogPath)
+		c.Monitoring.TaskOutputLogPath = filepath.Join(dir, "task_output")
+	}
+
+	// Apply monitoring.TaskOutputLogPath to pipes.task_output.log_file if not explicitly set.
+	// This centralizes log path configuration in the monitoring section.
+	if c.Pipes.TaskOutput.LogFile == "" && c.Monitoring.TaskOutputLogPath != "" {
+		c.Pipes.TaskOutput.LogFile = c.Monitoring.TaskOutputLogPath
 	}
 }
 
@@ -267,11 +374,11 @@ func (c *Config) Validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("invalid server.port: %d (must be 1-65535)", c.Server.Port)
 	}
-	if c.Server.ReadTimeout == 0 {
-		return fmt.Errorf("server.read_timeout is required")
+	if c.Server.ReadTimeout <= 0 {
+		return fmt.Errorf("server.read_timeout must be positive")
 	}
-	if c.Server.WriteTimeout == 0 {
-		return fmt.Errorf("server.write_timeout is required")
+	if c.Server.WriteTimeout <= 0 {
+		return fmt.Errorf("server.write_timeout must be positive")
 	}
 
 	// Store validation

@@ -275,7 +275,12 @@ func TestMiniMax_ApplyToolDiscovery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	assert.Len(t, tools, 2, "Should have filtered out write_file")
+	// With stub behavior, deferred tools remain as stubs with DeferredStubDescription.
+	// Total count stays at 3 (write_file becomes a stub, not removed).
+	require.Len(t, tools, 3, "Deferred tools remain as stubs, total count unchanged")
+	// write_file (deferred) becomes a stub with DeferredStubDescription
+	writeFn := tools[1].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, adapters.DeferredStubDescription, writeFn["description"], "write_file should be stubbed with DeferredStubDescription")
 }
 
 // =============================================================================

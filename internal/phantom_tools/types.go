@@ -1,15 +1,4 @@
-// Package phantom_tools provides a centralized registry for phantom tool definitions.
-//
-// DESIGN: Phantom tools are tools injected by the gateway into LLM requests.
-// They are intercepted on response and handled internally - the client never
-// sees them. This package centralizes all phantom tool definitions so that:
-//   - Adding a new phantom tool = create a file + register in init()
-//   - The gateway can iterate all tools and inject them in one pass
-//   - Pre-computed JSON bytes ensure KV-cache stability
-//   - Future MCP server tools can plug in via the same registry
-//
-// Each phantom tool provides pre-computed JSON bytes for each provider format.
-// This avoids runtime marshaling and ensures byte-identical output across calls.
+// Package phantom_tools provides a registry for gateway-injected phantom tools.
 package phantom_tools
 
 import "encoding/json"
@@ -18,30 +7,23 @@ import "encoding/json"
 type ProviderFormat int
 
 const (
-	// FormatAnthropic is the Anthropic Messages API format: {name, description, input_schema}
+	// FormatAnthropic is the Anthropic Messages API format.
 	FormatAnthropic ProviderFormat = iota
 
-	// FormatOpenAIChat is the OpenAI Chat Completions format: {type, function: {name, description, parameters}}
+	// FormatOpenAIChat is the OpenAI Chat Completions format.
 	FormatOpenAIChat
 
-	// FormatOpenAIResponses is the OpenAI Responses API format: {type, name, description, parameters}
+	// FormatOpenAIResponses is the OpenAI Responses API format.
 	FormatOpenAIResponses
 
-	// FormatGemini is the Google Gemini format. Currently maps to Anthropic format
-	// but kept separate for future Gemini-specific tool schemas.
+	// FormatGemini is the Google Gemini format (kept separate for future Gemini-specific schemas).
 	FormatGemini
 )
 
 // PhantomTool represents a single phantom tool with pre-computed JSON for each provider format.
 type PhantomTool struct {
-	// Name is the tool name as seen by the LLM (e.g., "expand_context", "gateway_search_tools").
-	Name string
-
-	// Description is a human-readable description of the tool.
-	Description string
-
-	// PrecomputedJSON holds pre-built JSON bytes for each provider format.
-	// Computed once at init() time for deterministic, cache-safe output.
+	Name            string
+	Description     string
 	PrecomputedJSON map[ProviderFormat][]byte
 }
 
@@ -55,12 +37,9 @@ func (t *PhantomTool) GetJSON(format ProviderFormat) []byte {
 }
 
 // StubBuilder generates minimal tool stubs for phantom tools.
-// Used when phantom tool calls appear in conversation history - the stub ensures
-// the LLM doesn't error on unknown tool names while keeping token overhead minimal.
 type StubBuilder struct{}
 
 // BuildStub creates a minimal tool definition stub for the given tool name and format.
-// The stub has an empty schema ({type: "object", properties: {}}) to satisfy validation.
 func (s *StubBuilder) BuildStub(toolName string, format ProviderFormat) []byte {
 	emptySchema := struct {
 		Type       string         `json:"type"`

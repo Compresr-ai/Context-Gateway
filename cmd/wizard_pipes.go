@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -99,12 +98,8 @@ func saveCompresrAPIKey(apiKey string) {
 	}
 	idx, _ := tui.SelectMenu("Save API key?", items)
 	if idx == 0 {
-		homeDir, err := os.UserHomeDir()
-		if err == nil {
-			envPath := filepath.Join(homeDir, ".config", "context-gateway", ".env")
-			appendToEnvFile(envPath, envVar, apiKey)
-			fmt.Printf("%s✓%s Saved %s\n", tui.ColorGreen, tui.ColorReset, envVar)
-		}
+		persistCredential(envVar, apiKey, ScopeGlobal)
+		fmt.Printf("%s✓%s Saved %s\n", tui.ColorGreen, tui.ColorReset, envVar)
 	}
 }
 
@@ -166,33 +161,6 @@ func editToolDiscovery(state *ConfigState) {
 					Description: keyStatus,
 					Value:       "apikey",
 				})
-				// Advanced settings for API strategy
-				advancedDesc := fmt.Sprintf("min: %d, max: %d, ratio: %.2f", state.ToolDiscoveryMinTools, state.ToolDiscoveryMaxTools, state.ToolDiscoveryTargetRatio)
-				items = append(items, tui.MenuItem{Label: "Advanced Settings", Description: advancedDesc, Value: "advanced"})
-			}
-
-			// tool-search strategy: show search fallback toggle
-			if state.ToolDiscoveryStrategy == pipes.StrategyToolSearch {
-				searchFallbackDesc := "● Enabled (required)"
-				items = append(items, tui.MenuItem{
-					Label:       "Search Fallback",
-					Description: searchFallbackDesc,
-					Value:       "__info__",
-				})
-			}
-
-			// relevance strategy: show filtering params
-			if state.ToolDiscoveryStrategy == pipes.StrategyRelevance {
-				searchFallbackDesc := "○ Disabled"
-				if state.ToolDiscoverySearchFallback {
-					searchFallbackDesc = "● Enabled"
-				}
-				items = append(items,
-					tui.MenuItem{Label: "Min Tools", Description: strconv.Itoa(state.ToolDiscoveryMinTools), Value: "min_tools", Editable: true},
-					tui.MenuItem{Label: "Max Tools", Description: strconv.Itoa(state.ToolDiscoveryMaxTools), Value: "max_tools", Editable: true},
-					tui.MenuItem{Label: "Target Ratio", Description: fmt.Sprintf("%.2f", state.ToolDiscoveryTargetRatio), Value: "target_ratio", Editable: true},
-					tui.MenuItem{Label: "Search Fallback", Description: searchFallbackDesc, Value: "toggle_search_fallback"},
-				)
 			}
 		}
 
@@ -200,61 +168,8 @@ func editToolDiscovery(state *ConfigState) {
 
 		idx, err := tui.SelectMenu("Tool Discovery Settings", items)
 
-		// Process editable fields BEFORE checking for back (user may have edited inline)
-		minToolsInvalid := false
-		maxToolsInvalid := false
-		targetRatioInvalid := false
-		for _, item := range items {
-			switch item.Value {
-			case "min_tools":
-				expected := strconv.Itoa(state.ToolDiscoveryMinTools)
-				if item.Editable && item.Description != expected {
-					if v, parseErr := strconv.Atoi(strings.TrimSpace(item.Description)); parseErr == nil && v >= 1 {
-						state.ToolDiscoveryMinTools = v
-					} else {
-						minToolsInvalid = true
-					}
-				}
-			case "max_tools":
-				expected := strconv.Itoa(state.ToolDiscoveryMaxTools)
-				if item.Editable && item.Description != expected {
-					if v, parseErr := strconv.Atoi(strings.TrimSpace(item.Description)); parseErr == nil && v >= 1 {
-						state.ToolDiscoveryMaxTools = v
-					} else {
-						maxToolsInvalid = true
-					}
-				}
-			case "target_ratio":
-				expected := fmt.Sprintf("%.2f", state.ToolDiscoveryTargetRatio)
-				if item.Editable && item.Description != expected {
-					if v, parseErr := strconv.ParseFloat(strings.TrimSpace(item.Description), 64); parseErr == nil && v > 0 && v <= 1 {
-						state.ToolDiscoveryTargetRatio = v
-					} else {
-						targetRatioInvalid = true
-					}
-				}
-			}
-		}
-
 		if err != nil || items[idx].Value == "back" {
 			return
-		}
-
-		if minToolsInvalid {
-			fmt.Printf("%s⚠%s Min Tools must be a whole number >= 1.\n", tui.ColorYellow, tui.ColorReset)
-			continue
-		}
-		if maxToolsInvalid {
-			fmt.Printf("%s⚠%s Max Tools must be a whole number >= 1.\n", tui.ColorYellow, tui.ColorReset)
-			continue
-		}
-		if targetRatioInvalid {
-			fmt.Printf("%s⚠%s Target Ratio must be a number between 0 and 1.\n", tui.ColorYellow, tui.ColorReset)
-			continue
-		}
-		if state.ToolDiscoveryMaxTools < state.ToolDiscoveryMinTools {
-			fmt.Printf("%s⚠%s Max Tools must be >= Min Tools.\n", tui.ColorYellow, tui.ColorReset)
-			continue
 		}
 
 		switch items[idx].Value {
@@ -266,92 +181,6 @@ func editToolDiscovery(state *ConfigState) {
 			selectToolDiscoveryModel(state)
 		case "apikey":
 			promptAndSetCompresrAPIKey(state, "tool-discovery")
-		case "toggle_search_fallback":
-			state.ToolDiscoverySearchFallback = !state.ToolDiscoverySearchFallback
-		case "advanced":
-			editToolDiscoveryAdvanced(state)
-		}
-	}
-}
-
-// editToolDiscoveryAdvanced opens the advanced settings submenu for tool discovery
-func editToolDiscoveryAdvanced(state *ConfigState) {
-	for {
-		searchFallbackDesc := "○ Disabled"
-		if state.ToolDiscoverySearchFallback {
-			searchFallbackDesc = "● Enabled"
-		}
-
-		items := []tui.MenuItem{
-			{Label: "Min Tools", Description: strconv.Itoa(state.ToolDiscoveryMinTools), Value: "min_tools", Editable: true},
-			{Label: "Max Tools", Description: strconv.Itoa(state.ToolDiscoveryMaxTools), Value: "max_tools", Editable: true},
-			{Label: "Target Ratio", Description: fmt.Sprintf("%.2f", state.ToolDiscoveryTargetRatio), Value: "target_ratio", Editable: true},
-			{Label: "Search Fallback", Description: searchFallbackDesc, Value: "toggle_search_fallback"},
-			{Label: "← Back", Value: "back"},
-		}
-
-		idx, err := tui.SelectMenu("Advanced Tool Discovery Settings", items)
-
-		// Process editable fields BEFORE checking for back (user may have edited inline)
-		minToolsInvalid := false
-		maxToolsInvalid := false
-		targetRatioInvalid := false
-		for _, item := range items {
-			switch item.Value {
-			case "min_tools":
-				expected := strconv.Itoa(state.ToolDiscoveryMinTools)
-				if item.Editable && item.Description != expected {
-					if v, parseErr := strconv.Atoi(strings.TrimSpace(item.Description)); parseErr == nil && v >= 1 {
-						state.ToolDiscoveryMinTools = v
-					} else {
-						minToolsInvalid = true
-					}
-				}
-			case "max_tools":
-				expected := strconv.Itoa(state.ToolDiscoveryMaxTools)
-				if item.Editable && item.Description != expected {
-					if v, parseErr := strconv.Atoi(strings.TrimSpace(item.Description)); parseErr == nil && v >= 1 {
-						state.ToolDiscoveryMaxTools = v
-					} else {
-						maxToolsInvalid = true
-					}
-				}
-			case "target_ratio":
-				expected := fmt.Sprintf("%.2f", state.ToolDiscoveryTargetRatio)
-				if item.Editable && item.Description != expected {
-					if v, parseErr := strconv.ParseFloat(strings.TrimSpace(item.Description), 64); parseErr == nil && v > 0 && v <= 1 {
-						state.ToolDiscoveryTargetRatio = v
-					} else {
-						targetRatioInvalid = true
-					}
-				}
-			}
-		}
-
-		if err != nil || items[idx].Value == "back" {
-			return
-		}
-
-		if minToolsInvalid {
-			fmt.Printf("%s⚠%s Min Tools must be a whole number >= 1.\n", tui.ColorYellow, tui.ColorReset)
-			continue
-		}
-		if maxToolsInvalid {
-			fmt.Printf("%s⚠%s Max Tools must be a whole number >= 1.\n", tui.ColorYellow, tui.ColorReset)
-			continue
-		}
-		if targetRatioInvalid {
-			fmt.Printf("%s⚠%s Target Ratio must be a number between 0 and 1.\n", tui.ColorYellow, tui.ColorReset)
-			continue
-		}
-		if state.ToolDiscoveryMaxTools < state.ToolDiscoveryMinTools {
-			fmt.Printf("%s⚠%s Max Tools must be >= Min Tools.\n", tui.ColorYellow, tui.ColorReset)
-			continue
-		}
-
-		switch items[idx].Value {
-		case "toggle_search_fallback":
-			state.ToolDiscoverySearchFallback = !state.ToolDiscoverySearchFallback
 		}
 	}
 }
@@ -526,7 +355,7 @@ func editToolOutputCompression(state *ConfigState) {
 			}
 
 			// Advanced settings (shown for all strategies when enabled)
-			advancedDesc := fmt.Sprintf("min: %dB, ratio: %.2f", state.ToolOutputMinBytes, state.ToolOutputTargetRatio)
+			advancedDesc := fmt.Sprintf("min: %dB, ratio: %.2f", state.ToolOutputMinTokens, state.ToolOutputTargetRatio)
 			items = append(items, tui.MenuItem{Label: "Advanced Settings", Description: advancedDesc, Value: "advanced"})
 		}
 
@@ -568,7 +397,7 @@ func editToolOutputCompression(state *ConfigState) {
 func editToolOutputAdvanced(state *ConfigState) {
 	for {
 		items := []tui.MenuItem{
-			{Label: "Min Bytes", Description: strconv.Itoa(state.ToolOutputMinBytes), Value: "min_bytes", Editable: true},
+			{Label: "Min Tokens", Description: strconv.Itoa(state.ToolOutputMinTokens), Value: "min_tokens", Editable: true},
 			{Label: "Target Ratio", Description: fmt.Sprintf("%.2f", state.ToolOutputTargetRatio), Value: "target_ratio", Editable: true},
 			{Label: "← Back", Value: "back"},
 		}
@@ -576,23 +405,23 @@ func editToolOutputAdvanced(state *ConfigState) {
 		idx, err := tui.SelectMenu("Advanced Compression Settings", items)
 
 		// Process editable fields BEFORE checking for back (user may have edited inline)
-		minBytesInvalid := false
+		minTokensInvalid := false
 		targetRatioInvalid := false
 		for _, item := range items {
 			switch item.Value {
-			case "min_bytes":
-				expected := strconv.Itoa(state.ToolOutputMinBytes)
+			case "min_tokens":
+				expected := strconv.Itoa(state.ToolOutputMinTokens)
 				if item.Editable && item.Description != expected {
 					if v, parseErr := strconv.Atoi(strings.TrimSpace(item.Description)); parseErr == nil && v >= 0 {
-						state.ToolOutputMinBytes = v
+						state.ToolOutputMinTokens = v
 					} else {
-						minBytesInvalid = true
+						minTokensInvalid = true
 					}
 				}
 			case "target_ratio":
 				expected := fmt.Sprintf("%.2f", state.ToolOutputTargetRatio)
 				if item.Editable && item.Description != expected {
-					if v, parseErr := strconv.ParseFloat(strings.TrimSpace(item.Description), 64); parseErr == nil && v > 0 && v <= 1 {
+					if v, parseErr := strconv.ParseFloat(strings.TrimSpace(item.Description), 64); parseErr == nil && (v == 0 || (v >= config.MinTargetCompressionRatio && v <= config.MaxTargetCompressionRatio)) {
 						state.ToolOutputTargetRatio = v
 					} else {
 						targetRatioInvalid = true
@@ -605,12 +434,13 @@ func editToolOutputAdvanced(state *ConfigState) {
 			return
 		}
 
-		if minBytesInvalid {
-			fmt.Printf("%s⚠%s Min Bytes must be a whole number >= 0.\n", tui.ColorYellow, tui.ColorReset)
+		if minTokensInvalid {
+			fmt.Printf("%s⚠%s Min Tokens must be a whole number >= 0.\n", tui.ColorYellow, tui.ColorReset)
 			continue
 		}
 		if targetRatioInvalid {
-			fmt.Printf("%s⚠%s Target Ratio must be between 0 and 1 (higher = more aggressive compression).\n", tui.ColorYellow, tui.ColorReset)
+			fmt.Printf("%s⚠%s Target Ratio must be 0 (API default) or between %.1f (least aggressive) and %.1f (most aggressive).\n",
+				tui.ColorYellow, tui.ColorReset, config.MinTargetCompressionRatio, config.MaxTargetCompressionRatio)
 			continue
 		}
 	}

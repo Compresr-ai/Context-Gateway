@@ -1,13 +1,4 @@
 // Provider configuration for LLM services.
-//
-// DESIGN: Define providers once, reference everywhere.
-// Endpoints are auto-resolved from provider name + model.
-//
-// Supported providers:
-//   - anthropic: api.anthropic.com/v1/messages
-//   - gemini:    generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-//   - openai:    api.openai.com/v1/chat/completions
-//   - minimax:   api.minimax.io/v1/chat/completions
 package config
 
 import (
@@ -33,7 +24,6 @@ const (
 	ProviderAnthropic = "anthropic"
 	ProviderGemini    = "gemini"
 	ProviderOpenAI    = "openai"
-	ProviderMiniMax   = "minimax"
 )
 
 // GetEndpoint returns the endpoint URL for a provider.
@@ -56,8 +46,6 @@ func ResolveProviderEndpoint(provider, model string) string {
 		return fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", model)
 	case ProviderOpenAI:
 		return "https://api.openai.com/v1/chat/completions"
-	case ProviderMiniMax:
-		return "https://api.minimax.io/v1/chat/completions"
 	default:
 		// Treat unknown providers as OpenAI-compatible
 		return "https://api.openai.com/v1/chat/completions"
@@ -238,11 +226,6 @@ func inferProviderFromModel(model string) string {
 	// Gemini models
 	if strings.Contains(model, "gemini") {
 		return ProviderGemini
-	}
-
-	// MiniMax models
-	if strings.Contains(model, "minimax") {
-		return ProviderMiniMax
 	}
 
 	// OpenAI models (gpt, o1, o3, etc.)

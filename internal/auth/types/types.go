@@ -6,9 +6,7 @@ import (
 	"strings"
 )
 
-// =============================================================================
 // AUTH MODE TYPES
-// =============================================================================
 
 // AuthMode defines the authentication strategy for a provider.
 type AuthMode string
@@ -38,9 +36,7 @@ func ParseAuthMode(s string) AuthMode {
 	}
 }
 
-// =============================================================================
 // CONFIGURATION TYPES
-// =============================================================================
 
 // AuthConfig contains authentication configuration for a provider.
 type AuthConfig struct {
@@ -56,9 +52,7 @@ type AuthConfig struct {
 	SubscriptionOK bool
 }
 
-// =============================================================================
 // FALLBACK RESULT TYPES
-// =============================================================================
 
 // FallbackResult describes whether to fall back to API key auth.
 type FallbackResult struct {
@@ -73,9 +67,7 @@ type FallbackResult struct {
 	Headers map[string]string
 }
 
-// =============================================================================
 // HANDLER INTERFACE
-// =============================================================================
 
 // Handler defines the interface for provider-specific auth handling.
 type Handler interface {
@@ -113,9 +105,7 @@ type Handler interface {
 	Stop()
 }
 
-// =============================================================================
 // HEADER CONSTANTS
-// =============================================================================
 
 const (
 	// HeaderAuthorization is the standard Authorization header.
@@ -128,9 +118,52 @@ const (
 	HeaderContentType = "Content-Type"
 )
 
-// =============================================================================
+// CAPTURED AUTH - Single auth struct used by all subsystems
+
+// CapturedAuth contains auth credentials captured from incoming HTTP requests.
+// This is the single auth type used by all subsystems (pipes, preemptive, tool discovery).
+type CapturedAuth struct {
+	Token      string // API key or OAuth token (without "Bearer " prefix)
+	IsXAPIKey  bool   // true = x-api-key header; false = Authorization: Bearer
+	BetaHeader string // anthropic-beta header value (required for OAuth tokens)
+	Endpoint   string // X-Target-URL from headers (endpoint bound to OAuth token)
+}
+
+// HasAuth returns true if any auth credential was captured.
+func (a CapturedAuth) HasAuth() bool {
+	return a.Token != ""
+}
+
+// CaptureFromHeaders extracts auth credentials from HTTP request headers.
+// Single source of truth — use this everywhere instead of parsing headers manually.
+//
+// Priority (handles all providers):
+//  1. x-api-key header (Anthropic API users) — sets IsXAPIKey=true
+//  2. api-key header (Azure OpenAI users) — sets IsXAPIKey=true
+//  3. Authorization: Bearer header (OpenAI, subscription/OAuth users) — sets IsXAPIKey=false
+//
+// Also captures anthropic-beta and X-Target-URL headers.
+func CaptureFromHeaders(h http.Header) CapturedAuth {
+	var auth CapturedAuth
+	if apiKey := h.Get("x-api-key"); apiKey != "" {
+		// Anthropic-style API key header
+		auth.Token = apiKey
+		auth.IsXAPIKey = true
+	} else if apiKey := h.Get("api-key"); apiKey != "" {
+		// Azure OpenAI-style API key header
+		auth.Token = apiKey
+		auth.IsXAPIKey = true
+	} else if authHeader := h.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+		// OpenAI-style and OAuth/subscription users
+		auth.Token = strings.TrimPrefix(authHeader, "Bearer ")
+		auth.IsXAPIKey = false
+	}
+	auth.BetaHeader = h.Get("anthropic-beta")
+	auth.Endpoint = h.Get("X-Target-URL")
+	return auth
+}
+
 // HELPER FUNCTIONS
-// =============================================================================
 
 // BearerToken extracts the bearer token value from an Authorization header.
 // Input: "Bearer sk-ant-..." -> Output: "sk-ant-..."

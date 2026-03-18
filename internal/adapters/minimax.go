@@ -6,6 +6,10 @@ package adapters
 // so this adapter embeds OpenAIAdapter and delegates all methods.
 // MiniMax returns standard OpenAI usage format (prompt_tokens/completion_tokens),
 // so no custom usage parsing is needed.
+// MiniMaxAdapter embeds both BaseAdapter and *OpenAIAdapter, which creates ambiguous
+// selectors for methods implemented on both. Any method that exists on both embedded
+// types MUST be explicitly delegated below (e.g. Name, Provider, ExtractAssistantIntent,
+// ExtractTurnSignal). Do not remove those delegation stubs without resolving the ambiguity.
 type MiniMaxAdapter struct {
 	BaseAdapter
 	*OpenAIAdapter
@@ -70,6 +74,11 @@ func (a *MiniMaxAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, resul
 // ExtractAssistantIntent delegates to OpenAI (resolves ambiguity from dual embedding).
 func (a *MiniMaxAdapter) ExtractAssistantIntent(body []byte) string {
 	return a.OpenAIAdapter.ExtractAssistantIntent(body)
+}
+
+// ExtractTurnSignal delegates to OpenAI (resolves ambiguity from dual embedding).
+func (a *MiniMaxAdapter) ExtractTurnSignal(responseBody []byte, streamStopReason string) TurnSignal {
+	return a.OpenAIAdapter.ExtractTurnSignal(responseBody, streamStopReason)
 }
 
 // Ensure MiniMaxAdapter implements Adapter and ParsedRequestAdapter

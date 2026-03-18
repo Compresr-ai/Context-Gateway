@@ -67,9 +67,9 @@ func passthroughConfigGemini() *config.Config {
 			TTL:  5 * time.Minute,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "info",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

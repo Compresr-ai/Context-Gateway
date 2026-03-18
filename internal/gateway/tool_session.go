@@ -1,15 +1,4 @@
 // Tool session management for hybrid tool discovery.
-//
-// DESIGN: Stores deferred tools (filtered out) and expanded tools (retrieved via search)
-// per session. Used to enable the LLM to request tools that were filtered out.
-//
-// FLOW:
-//  1. Tool discovery pipe filters tools, stores deferred tools in session
-//  2. Gateway injects gateway_search_tools into the tools list
-//  3. If LLM calls gateway_search_tools, gateway searches deferred tools
-//  4. Matching tools are marked as "expanded" and included in subsequent requests
-//
-// Session ID is derived from the first user message hash (same as preemptive summarization).
 package gateway
 
 import (
@@ -45,6 +34,10 @@ type ToolSession struct {
 	// Search loop-breaking state
 	SearchCallCount     int      // How many search-mode calls in current phantom loop sequence
 	DiscoveredToolNames []string // Tools the model has seen via search results
+
+	// isMainAgentCached stores the isMainAgent classification for this session (BUG-027).
+	// true: cached as main agent; false: cached as subagent; nil: not yet set.
+	isMainAgentCached *bool
 }
 
 // ToolSessionStore manages tool sessions with automatic TTL cleanup.
@@ -186,9 +179,41 @@ func (s *ToolSessionStore) cleanup() {
 	}
 }
 
-// =============================================================================
+// MAIN AGENT CLASSIFICATION CACHE (BUG-027)
+
+// StoreIsMainAgent caches the isMainAgent classification for a session.
+// Called on the first turn when isMainAgent is freshly computed.
+// Subsequent turns read from this cache via GetIsMainAgent to prevent
+// mis-classification when tool arrays shrink across turns.
+func (s *ToolSessionStore) StoreIsMainAgent(sessionID string, isMainAgent bool) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.getOrCreate(sessionID)
+	if session.isMainAgentCached == nil {
+		v := isMainAgent
+		session.isMainAgentCached = &v
+	}
+}
+
+// GetIsMainAgent returns (cachedValue, true) if the classification is cached,
+// or (false, false) if not yet set for this session.
+func (s *ToolSessionStore) GetIsMainAgent(sessionID string) (bool, bool) {
+	if sessionID == "" {
+		return false, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	session, ok := s.sessions[sessionID]
+	if !ok || session.isMainAgentCached == nil {
+		return false, false
+	}
+	return *session.isMainAgentCached, true
+}
+
 // REWRITE MAP (Universal Dispatcher)
-// =============================================================================
 
 // RecordCallRewrite stores a mapping for bidirectional rewriting.
 // Called when the proxy rewrites a gateway_search_tool call to a real tool call.
@@ -280,9 +305,7 @@ func (s *ToolSessionStore) getOrCreate(sessionID string) *ToolSession {
 	return session
 }
 
-// =============================================================================
 // TOOL SEARCH
-// =============================================================================
 
 // SearchDeferredTools searches deferred tools by query.
 // Returns top matches sorted by relevance score.

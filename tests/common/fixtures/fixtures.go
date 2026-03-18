@@ -78,9 +78,9 @@ func SimpleCompressionConfig() *config.Config {
 				Enabled:                true,
 				Strategy:               "simple", // Uses first-N-words compression
 				FallbackStrategy:       "passthrough",
-				MinBytes:               100, // Low threshold to trigger compression
-				MaxBytes:               65536,
-				TargetCompressionRatio: 0.1, // Aggressive compression
+				MinTokens:              25, // Low threshold to trigger compression
+				MaxTokens:              16384,
+				TargetCompressionRatio: 0.1, // Least aggressive compression (remove ~10%)
 				IncludeExpandHint:      true,
 				EnableExpandContext:    true, // Key: enable expand_context
 			},
@@ -93,9 +93,9 @@ func SimpleCompressionConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }
@@ -121,7 +121,7 @@ func PassthroughConfig() *config.Config {
 				Enabled:             false,
 				Strategy:            "passthrough",
 				FallbackStrategy:    "passthrough",
-				MinBytes:            256,
+				MinTokens:          64,
 				EnableExpandContext: false,
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
@@ -133,9 +133,9 @@ func PassthroughConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "error",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

@@ -30,14 +30,21 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: string |
 function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<'savings' | 'history' | 'monitor' | 'settings'>(() => {
+  const [activeTab, setActiveTabState] = useState<'savings' | 'history' | 'monitor' | 'settings'>(() => {
     // Check URL hash for direct navigation (e.g., #/settings, #/monitor)
     if (window.location.hash === '#/settings') return 'settings'
     if (window.location.hash === '#/history') return 'history'
     if (window.location.hash === '#/savings') return 'savings'
-    return 'monitor'
+    if (window.location.hash === '#/monitor') return 'monitor'
+    return 'savings'
   })
   const [selectedSession, setSelectedSession] = useState('all')
+
+  // Update URL hash when tab changes (so refresh stays on same tab)
+  const setActiveTab = (tab: typeof activeTab) => {
+    setActiveTabState(tab)
+    window.location.hash = '#/' + tab
+  }
 
   useEffect(() => {
     const fetchData = async () => {
@@ -45,8 +52,18 @@ function Dashboard() {
         const params = selectedSession && selectedSession !== 'all' ? `?session=${encodeURIComponent(selectedSession)}` : ''
         const dashRes = await fetch(`/api/dashboard${params}`)
         if (!dashRes.ok) { setError(`API returned ${dashRes.status}`); return }
-        const dashJson = await dashRes.json()
-        setData(dashJson)
+        const dashJson: DashboardData = await dashRes.json()
+        setData(prev => {
+          if (!prev) return dashJson
+          // Preserve sessions reference when unchanged to avoid re-rendering
+          // components that only depend on session list (e.g. PromptHistoryTab)
+          const sessionsUnchanged = prev.sessions.length === dashJson.sessions.length &&
+            prev.sessions.every((s, i) => s.id === dashJson.sessions[i]?.id && s.last_updated === dashJson.sessions[i]?.last_updated)
+          return {
+            ...dashJson,
+            sessions: sessionsUnchanged ? prev.sessions : dashJson.sessions,
+          }
+        })
         setError(null)
       } catch (e) {
         setError(String(e))
@@ -87,46 +104,33 @@ function Dashboard() {
       <div style={{ maxWidth: 1100, width: '100%', margin: '0 auto', padding: '48px 32px', flex: 1 }}>
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 18, marginBottom: 0, paddingBottom: 32 }}>
-          <div style={{
-            width: 44, height: 44, borderRadius: 12,
-            background: 'linear-gradient(135deg, #16a34a, #22c55e)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 0 32px rgba(34,197,94,0.15)',
-            flexShrink: 0,
-          }}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M4 6h16M4 12h10M4 18h6" stroke="white" strokeWidth="2.2" strokeLinecap="round" />
-            </svg>
-          </div>
-          <div>
-            <h1 style={{
-              fontSize: 24,
-              fontWeight: 800,
+          <img
+            src="/dashboard/logo.png"
+            alt="compresr"
+            style={{ height: 48, width: 'auto', display: 'block' }}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{
+              fontSize: 26,
+              fontWeight: 700,
+              color: '#178044',
               letterSpacing: '-0.03em',
-              color: '#f3f4f6',
-              margin: 0,
-              lineHeight: 1.2,
-            }}>
-              Context Gateway
-            </h1>
-            <p style={{
+              lineHeight: 1.1,
+            }}>Context Gateway</span>
+            <span style={{
               fontSize: 13,
               color: '#6b7280',
-              marginTop: 4,
-              margin: 0,
-              marginBlockStart: 4,
               letterSpacing: '0.02em',
-            }}>
-              Dashboard
-            </p>
+              fontWeight: 500,
+            }}>Dashboard</span>
           </div>
           <div style={{
             marginLeft: 'auto',
             fontFamily: "'JetBrains Mono', monospace",
             fontSize: 11,
-            color: '#9ca3af',
-            background: 'rgba(255,255,255,0.03)',
-            border: '1px solid rgba(255,255,255,0.08)',
+            color: error ? '#eab308' : '#9ca3af',
+            background: error ? 'rgba(234,179,8,0.06)' : 'rgba(255,255,255,0.03)',
+            border: `1px solid ${error ? 'rgba(234,179,8,0.25)' : 'rgba(255,255,255,0.08)'}`,
             padding: '7px 16px',
             borderRadius: 20,
             display: 'flex',
@@ -134,19 +138,20 @@ function Dashboard() {
             gap: 8,
             letterSpacing: '0.04em',
             textTransform: 'uppercase' as const,
+            transition: 'all 0.3s ease',
           }}>
             <span
               className="live-dot"
               style={{
                 width: 7,
                 height: 7,
-                background: '#22c55e',
+                background: error ? '#eab308' : '#22c55e',
                 borderRadius: '50%',
                 display: 'inline-block',
-                animation: 'livePulse 2s ease-in-out infinite',
+                animation: error ? 'none' : 'livePulse 2s ease-in-out infinite',
               }}
             />
-            Live
+            {error ? 'Offline' : 'Live'}
           </div>
         </div>
 
@@ -180,7 +185,7 @@ function Dashboard() {
           } />
         )}
         {activeTab === 'monitor' && (
-          <MonitorTab />
+          <MonitorTab dashboardData={data} />
         )}
         {activeTab === 'settings' && (
           <SettingsTab />

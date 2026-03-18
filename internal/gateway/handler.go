@@ -1,17 +1,4 @@
 // HTTP request handling for the compression gateway.
-//
-// DESIGN: Main request flow:
-//   - handleProxy():                 Entry point for all LLM requests
-//   - processCompressionPipeline():  Route to appropriate pipe
-//   - handleStreamingWithExpand():   SSE streaming with compressed request
-//   - handleNonStreaming():          Standard request with expand loop
-//
-// Split across files:
-//   - handler.go:              Core proxy, health, expand, forwarding
-//   - handler_streaming.go:    Streaming path + SSE usage parsing
-//   - handler_nonstreaming.go: Non-streaming path + phantom loop
-//   - handler_telemetry.go:    Telemetry, trajectory, compression logging
-//   - handler_dashboard.go:    Dashboard API, savings, cost control
 package gateway
 
 import (
@@ -31,12 +18,14 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/dashboard"
 	"github.com/compresr/context-gateway/internal/monitoring"
-	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
+	phantom_tools "github.com/compresr/context-gateway/internal/phantom_tools"
 	"github.com/compresr/context-gateway/internal/preemptive"
 	"github.com/compresr/context-gateway/internal/prompthistory"
+	"github.com/compresr/context-gateway/internal/tokenizer"
 	"github.com/compresr/context-gateway/internal/utils"
 )
 
@@ -48,6 +37,7 @@ var injectedTagPrefixes = []string{
 	"<user-prompt-submit-hook>",
 	"<fast_mode_info>",
 	"<command-name>",
+	"<local-command-caveat>",
 	"<antml_thinking>",
 	"<antml_thinking_mode>",
 	"<antml_reasoning_effort>",
@@ -66,16 +56,28 @@ func isInjectedText(text string) bool {
 }
 
 // extractCleanUserPrompt parses the request body and extracts only genuinely
-// user-typed text. A prompt is considered user-typed only when:
-//   - It is the very last message in the conversation AND has role "user", AND
-//   - It is the first message (no preceding assistant), OR the preceding assistant
-//     message contains NO tool_use/tool_calls (the model finished its turn and
-//     yielded control back to the user for new input).
+// user-typed text from the last message. Returns non-empty only when the last
+// message (role "user") contains text blocks that are NOT tool_result and NOT
+// system-injected content (e.g. <system-reminder>, <available-deferred-tools>).
 //
-// This handles both Anthropic format (tool_use content blocks, tool_result in user
-// messages) and OpenAI format (tool_calls field on assistant, role "tool" messages).
+// This correctly handles:
+//   - First user message → returns the user's text
+//   - Tool loop (only tool_result blocks) → returns ""
+//   - User feedback alongside tool_result (Bug D) → returns the user text
+//   - New user turn with injected system content → returns clean text only
+//   - Only injected content → returns ""
+//
+// Supports Anthropic (content blocks), OpenAI (tool_calls), and Responses API formats.
 func extractCleanUserPrompt(body []byte) string {
+	// Try Responses API format first (Codex): "input" present AND "messages" absent.
+	// Must check both — some providers send both fields; only pure Responses API omits "messages".
+	input := gjson.GetBytes(body, "input")
 	messages := gjson.GetBytes(body, "messages")
+	if input.Exists() && !messages.Exists() {
+		return extractCleanUserPromptFromResponsesAPI(input)
+	}
+
+	// Chat Completions / Anthropic format: "messages" array
 	if !messages.IsArray() {
 		return ""
 	}
@@ -90,39 +92,6 @@ func extractCleanUserPrompt(body []byte) string {
 	lastMsg := arr[len(arr)-1]
 	if lastMsg.Get("role").String() != "user" {
 		return ""
-	}
-	lastUserIdx := len(arr) - 1
-
-	// Check the preceding assistant message to determine if this is a user-initiated turn.
-	// Only record when: (a) no preceding assistant (first prompt), or
-	// (b) preceding assistant had no tool_use/tool_calls (model yielded to user).
-	if lastUserIdx > 0 {
-		prevAssistantIdx := -1
-		for i := lastUserIdx - 1; i >= 0; i-- {
-			if arr[i].Get("role").String() == "assistant" {
-				prevAssistantIdx = i
-				break
-			}
-		}
-		if prevAssistantIdx >= 0 {
-			prevAssistant := arr[prevAssistantIdx]
-
-			// Check Anthropic format: content array with tool_use blocks
-			assistantContent := prevAssistant.Get("content")
-			if assistantContent.IsArray() {
-				for _, block := range assistantContent.Array() {
-					if block.Get("type").String() == "tool_use" {
-						return "" // Assistant used a tool (Anthropic format) — next user msg is automated
-					}
-				}
-			}
-
-			// Check OpenAI format: tool_calls field on assistant message
-			toolCalls := prevAssistant.Get("tool_calls")
-			if toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
-				return "" // Assistant used tools (OpenAI format) — next user msg is automated
-			}
-		}
 	}
 
 	lastUserContent := lastMsg.Get("content")
@@ -140,20 +109,31 @@ func extractCleanUserPrompt(body []byte) string {
 	}
 
 	// Content is an array of blocks.
-	// If ANY block is a tool_result, this is a tool response — not user-typed.
+	// Extract only genuine user-typed text blocks: skip tool_result and injected content.
+	// This correctly handles:
+	//   - Pure tool loops (only tool_result blocks) → returns ""
+	//   - User text alongside tool_result (Bug D: user feedback during tool approval) → returns text
+	//   - New user turn with injected system content → returns clean text
+	//   - Only injected content (system-reminders, etc.) → returns ""
 	if !lastUserContent.IsArray() {
 		return ""
 	}
 
 	blocks := lastUserContent.Array()
+
+	// Pre-scan: if ANY text block contains <command-name>, the entire message
+	// is a skill/command expansion — the user typed a slash command (e.g. /security-scan)
+	// which was replaced by expanded instructions across multiple text blocks.
+	// Only the <command-name> block has a recognizable tag; the expansion body is
+	// plain text that would otherwise pass through isInjectedText. Skip everything.
 	for _, block := range blocks {
-		if block.Get("type").String() == "tool_result" {
-			return "" // This message is a tool response, not user-typed
+		if block.Get("type").String() == "text" {
+			if strings.Contains(block.Get("text").String(), "<command-name>") {
+				return ""
+			}
 		}
 	}
 
-	// No tool_results — this is a user-typed message.
-	// Extract only text blocks that aren't system-injected.
 	userTexts := make([]string, 0, len(blocks))
 	for _, block := range blocks {
 		if block.Get("type").String() != "text" {
@@ -169,9 +149,91 @@ func extractCleanUserPrompt(body []byte) string {
 	return strings.TrimSpace(strings.Join(userTexts, "\n"))
 }
 
-// isMainAgentRequest checks if the request is from the main Claude Code agent
+// extractCleanUserPromptFromResponsesAPI extracts the user-typed prompt from
+// the OpenAI Responses API format (used by Codex).
+// Format: "input": "string" or "input": [{type: "message", role: "user", content: "..."}]
+// Skips tool-loop turns: if the last item is a function_call_output, the user didn't type anything.
+func extractCleanUserPromptFromResponsesAPI(input gjson.Result) string {
+	// Simple string input: "input": "Say hello"
+	if input.Type == gjson.String {
+		text := strings.TrimSpace(input.String())
+		if text == "" || isInjectedText(text) {
+			return ""
+		}
+		return text
+	}
+
+	// Array input: "input": [{type: "message", role: "user", ...}, {type: "function_call", ...}, ...]
+	if !input.IsArray() {
+		return ""
+	}
+
+	items := input.Array()
+	if len(items) == 0 {
+		return ""
+	}
+
+	// If the last item is a function_call_output, we're in a tool loop — not a user turn.
+	lastItem := items[len(items)-1]
+	lastType := lastItem.Get("type").String()
+	if lastType == "function_call_output" {
+		return ""
+	}
+
+	// If the last item is a function_call, the assistant is calling a tool — not a user turn.
+	if lastType == "function_call" {
+		return ""
+	}
+
+	// Find the last user message by scanning backwards.
+	for i := len(items) - 1; i >= 0; i-- {
+		item := items[i]
+		if item.Get("type").String() != "message" || item.Get("role").String() != "user" {
+			continue
+		}
+
+		// Check if there's a function_call after this user message (tool loop).
+		for j := i + 1; j < len(items); j++ {
+			jType := items[j].Get("type").String()
+			if jType == "function_call" {
+				return "" // Assistant used a tool after this user message — automated turn
+			}
+		}
+
+		// Extract content (string or array of content blocks)
+		content := item.Get("content")
+		if content.Type == gjson.String {
+			text := strings.TrimSpace(content.String())
+			if text == "" || isInjectedText(text) {
+				return ""
+			}
+			return text
+		}
+		if content.IsArray() {
+			var texts []string
+			for _, block := range content.Array() {
+				// Responses API uses "input_text" type; Chat Completions uses "text"
+				bt := block.Get("type").String()
+				if bt != "text" && bt != "input_text" {
+					continue
+				}
+				text := block.Get("text").String()
+				if text != "" && !isInjectedText(text) {
+					texts = append(texts, strings.TrimSpace(text))
+				}
+			}
+			return strings.TrimSpace(strings.Join(texts, "\n"))
+		}
+
+		return ""
+	}
+
+	return ""
+}
+
+// isMainAgentRequest checks if the request is from a main coding agent
 // (not a subagent). Subagents have short task-specific system prompts, while
-// the main agent has the full "You are Claude Code" system prompt.
+// the main agent has the full system prompt (e.g. "You are Claude Code").
 func isMainAgentRequest(body []byte) bool {
 	// Check the top-level "system" field (Anthropic format)
 	sys := gjson.GetBytes(body, "system")
@@ -197,7 +259,13 @@ func isMainAgentRequest(body []byte) bool {
 		}
 	}
 
-	// Check OpenAI format: first message with role "system" or "developer"
+	// Check Responses API format (Codex): has "input" field.
+	// Codex doesn't use subagents, so any Responses API request is a main agent request.
+	if gjson.GetBytes(body, "input").Exists() {
+		return true
+	}
+
+	// Check OpenAI Chat Completions format: first message with role "system" or "developer"
 	messages := gjson.GetBytes(body, "messages")
 	if messages.IsArray() {
 		for _, msg := range messages.Array() {
@@ -264,17 +332,19 @@ func sanitizeModelName(body []byte) []byte {
 func (g *Gateway) writeError(w http.ResponseWriter, msg string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]string{"message": msg, "type": "gateway_error"},
-	})
+	}); err != nil {
+		log.Warn().Err(err).Msg("writeError: failed to encode JSON error response")
+	}
 }
 
 // handleHealth returns gateway health status.
 func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
-	health := map[string]interface{}{
+	health := map[string]any{
 		"status":  "ok",
 		"time":    time.Now().Format(time.RFC3339),
-		"version": "1.0.0",
+		"version": g.version,
 	}
 
 	if err := g.store.Set("_health_", "ok"); err != nil {
@@ -287,7 +357,9 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if health["status"] != "ok" {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
-	_ = json.NewEncoder(w).Encode(health)
+	if err := json.NewEncoder(w).Encode(health); err != nil {
+		log.Warn().Err(err).Msg("handleHealth: failed to encode JSON response")
+	}
 }
 
 // handleExpand retrieves raw data from shadow context.
@@ -331,6 +403,7 @@ func (g *Gateway) handleExpand(w http.ResponseWriter, r *http.Request) {
 			Found:          ok,
 			ContentPreview: preview,
 			ContentLength:  len(data),
+			ContentTokens:  tokenizer.CountTokens(data),
 		})
 	}
 
@@ -340,7 +413,28 @@ func (g *Gateway) handleExpand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"id": req.ID, "content": data})
+	if err := json.NewEncoder(w).Encode(map[string]string{"id": req.ID, "content": data}); err != nil {
+		log.Warn().Err(err).Msg("handleExpand: failed to encode JSON response")
+	}
+}
+
+// detectClientAgent identifies which AI client is making a request from its
+// User-Agent header. Used by the task_output pipe to select the correct schema.
+//
+// Detection heuristics (order matters — more specific first):
+//   - "claude-code" in User-Agent → ClientClaudeCode
+//   - "codex" in User-Agent       → ClientCodex
+//   - fallback                    → ClientGeneric (matches no task tools)
+func detectClientAgent(headers http.Header) string {
+	ua := strings.ToLower(headers.Get("User-Agent"))
+	switch {
+	case strings.Contains(ua, "claude-code") || strings.Contains(ua, "claude_code"):
+		return "claude_code"
+	case strings.Contains(ua, "codex"):
+		return "codex"
+	default:
+		return "generic"
+	}
 }
 
 // handleProxy processes requests through the compression pipeline.
@@ -405,14 +499,23 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// Build pipeline context (no universal parsing needed)
 	pipeCtx := NewPipelineContext(provider, adapter, body, r.URL.Path)
 	pipeCtx.RequestCtx = r.Context()
-	pipeCtx.CompressionThreshold = config.ParseCompressionThreshold(r.Header.Get(HeaderCompressionThreshold))
-
+	pipeCtx.RequestID = requestID
 	// Initialize tool session for hybrid tool discovery
 	// Use canonical session ID from preemptive package (hash of first user message)
 	if g.toolSessions != nil && g.cfg().Pipes.ToolDiscovery.Enabled {
-		sessionID := preemptive.ComputeSessionID(body)
+		// Use clean first-user-message hash so session ID is stable across turns
+		// even when phantom tools are injected (injected XML changes full-body hash).
+		sessionID := preemptive.ComputeSessionIDFromClean(pipeCtx.Classification.FirstUserCleanContent)
 		if sessionID != "" {
 			pipeCtx.ToolSessionID = sessionID
+			pipeCtx.SessionID = sessionID // Also set for tool discovery pipe caching
+			// BUG-027: Cache isMainAgent per session so turn 2+ doesn't mis-classify
+			// when the tools array has shrunk (filtered tools removed from context).
+			if cached, ok := g.toolSessions.GetIsMainAgent(sessionID); ok {
+				pipeCtx.Classification.IsMainAgent = cached
+			} else if pipeCtx.Classification.IsMainAgent {
+				g.toolSessions.StoreIsMainAgent(sessionID, true)
+			}
 			// Load expanded tools from session (tools found via previous searches)
 			pipeCtx.ExpandedTools = g.toolSessions.GetExpanded(sessionID)
 
@@ -421,12 +524,11 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// even though the client sent real tool_use/tool_result references.
 			allMappings := g.toolSessions.GetAllRewriteMappings(sessionID)
 			if len(allMappings) > 0 {
-				isAnthropic := provider == adapters.ProviderAnthropic || provider == adapters.ProviderBedrock
 				searchToolName := g.cfg().Pipes.ToolDiscovery.SearchToolName
 				if searchToolName == "" {
-					searchToolName = "gateway_search_tools"
+					searchToolName = phantom_tools.SearchToolName
 				}
-				if rewritten, err := rewriteInboundMessages(body, allMappings, isAnthropic, searchToolName); err == nil {
+				if rewritten, err := rewriteInboundMessages(body, allMappings, provider, searchToolName); err == nil {
 					body = rewritten
 					pipeCtx.OriginalRequest = body
 				}
@@ -434,25 +536,23 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Capture auth headers from incoming request for compression pipe (Max/Pro OAuth users)
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		pipeCtx.CapturedBearerToken = strings.TrimPrefix(auth, "Bearer ")
-	}
-	if beta := r.Header.Get("anthropic-beta"); beta != "" {
-		pipeCtx.CapturedBetaHeader = beta
-	}
+	// Capture auth headers from incoming request using centralized helper
+	// Used by pipes (tool output compression), preemptive summarizer, and session collector
+	capturedAuth := authtypes.CaptureFromHeaders(r.Header)
 
-	// Capture auth for post-session updater (mirrors preemptive auth capture)
-	if g.sessionCollector != nil {
-		targetURL := r.Header.Get(HeaderTargetURL)
-		if targetURL == "" {
-			targetURL = g.autoDetectTargetURL(r)
+	// Pass full auth to pipes so they can handle both API key and OAuth users
+	pipeCtx.CapturedAuth = capturedAuth
+
+	// Detect AI client agent from request headers for schema-driven task_output detection.
+	pipeCtx.ClientAgent = detectClientAgent(r.Header)
+
+	// Capture auth for post-session updater using the same captured auth
+	if g.sessionCollector != nil && capturedAuth.HasAuth() {
+		sessionAuth := capturedAuth
+		if sessionAuth.Endpoint == "" {
+			sessionAuth.Endpoint = g.autoDetectTargetURL(r)
 		}
-		if xAPIKey := r.Header.Get("x-api-key"); xAPIKey != "" {
-			g.sessionCollector.CaptureAuth(xAPIKey, true, targetURL)
-		} else if authHdr := r.Header.Get("Authorization"); strings.HasPrefix(authHdr, "Bearer ") {
-			g.sessionCollector.CaptureAuth(strings.TrimPrefix(authHdr, "Bearer "), false, targetURL)
-		}
+		g.sessionCollector.CaptureAuth(sessionAuth)
 	}
 
 	// Extract model for preemptive summarization and cost-based compression decisions
@@ -466,30 +566,42 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		g.sessionCollector.RecordRequest(model, msgCount)
 	}
 
-	// Track session in monitoring dashboard
+	// Track session in monitoring dashboard.
+	// Use the gateway's stable session ID (e.g. "session_1_20260315_002607") so all
+	// requests in this gateway run map to exactly ONE dashboard session.
+	// ComputeSessionID was previously used but falls back to a per-request UUID for
+	// requests without a user message, creating phantom extra sessions.
 	if g.monitorStore != nil {
-		monitorSessionID := preemptive.ComputeSessionID(body)
+		monitorSessionID := g.getCurrentSessionID()
 		if monitorSessionID == "" {
-			monitorSessionID = requestID
+			monitorSessionID = requestID // only if session dir not yet initialized
 		}
 		agentType := dashboard.DetectAgent(r.Header)
 		g.monitorStore.Track(monitorSessionID, agentType)
 
-		// Only update Model and UserQuery from the main agent request.
-		// Subagent/compression requests (e.g. Haiku calls) would overwrite
-		// the real model and leak internal prompts into the dashboard.
+		// Update session with request metadata.
+		// Model is always updated (to show primary model used).
+		// UserQuery is only updated from main agent requests (to avoid exposing internal prompts).
+		mc := pipeCtx.Classification
 		update := dashboard.SessionUpdate{
-			Provider: adapter.Name(),
-			ToolUsed: dashboard.ExtractLastToolUsed(body),
+			Provider:      adapter.Name(),
+			Model:         model, // Always track model (will show latest/primary model)
+			ToolUsed:      dashboard.ExtractLastToolUsed(body),
+			IsNewUserTurn: mc.IsNewUserTurn && mc.IsMainAgent,
+			IsMainAgent:   mc.IsMainAgent,
 		}
-		if isMainAgentRequest(body) {
-			update.Model = model
+		if mc.IsMainAgent {
 			update.UserQuery = dashboard.ExtractLastUserQuery(body)
 		}
 		g.monitorStore.Update(monitorSessionID, update)
 
 		// Store monitor session ID in pipeline context for post-response updates
 		pipeCtx.MonitorSessionID = monitorSessionID
+	}
+
+	// Record user turn metric (human-initiated prompts only, not tool loops or subagents)
+	if pipeCtx.Classification.IsNewUserTurn && pipeCtx.Classification.IsMainAgent && g.metrics != nil {
+		g.metrics.RecordUserTurn()
 	}
 
 	// Check for /savings command - return instant synthetic response
@@ -548,9 +660,23 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		conversationSessionID = g.getCurrentSessionID()
 	}
 	if conversationSessionID == "" {
-		conversationSessionID = "default"
+		// Generate a unique anonymous ID to keep sessions distinct in monitoring
+		conversationSessionID = fmt.Sprintf("anon-%s", uuid.New().String()[:8])
 	}
 	pipeCtx.CostSessionID = conversationSessionID
+
+	// Compute stable conversation fingerprint from clean first user message text.
+	// Unlike CostSessionID (which hashes the full message including injected XML),
+	// this is stable across requests because injected content is stripped before hashing.
+	stableFingerprint := preemptive.ComputeSessionIDFromClean(pipeCtx.Classification.FirstUserCleanContent)
+	if stableFingerprint == "" {
+		stableFingerprint = conversationSessionID // fallback
+	}
+	pipeCtx.StableFingerprint = stableFingerprint
+
+	// Track the main conversation for dashboard session filtering and savings.
+	// Uses the stable fingerprint so it works across requests (injected XML doesn't affect it).
+	g.setMainConversationOnce(stableFingerprint)
 
 	// Cost control: budget check (before forwarding)
 	if g.costTracker != nil {
@@ -571,28 +697,22 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	var isCompaction bool
 	var syntheticResponse []byte
 	if g.preemptive != nil {
-		// Capture auth token for summarizer (allows Max/Pro users without explicit API key)
-		if auth := r.Header.Get("x-api-key"); auth != "" {
-			log.Debug().Str("auth_type", "x-api-key").Str("auth", utils.MaskKey(auth)).Msg("Captured auth for summarizer")
-			g.preemptive.SetAuthValue(auth, true) // from x-api-key header
-		} else if auth := r.Header.Get("Authorization"); auth != "" {
-			log.Debug().Str("auth_type", "Authorization").Str("auth", utils.MaskKey(auth)).Msg("Captured auth for summarizer")
-			g.preemptive.SetAuthValue(strings.TrimPrefix(auth, "Bearer "), false) // from Authorization header
-		}
-		// Capture upstream endpoint URL for summarizer (same logic as forwardPassthrough)
-		// Priority: X-Target-URL header > autoDetect
+		// Resolve endpoint: X-Target-URL header > autoDetect
 		xTargetURL := r.Header.Get(HeaderTargetURL)
 		targetURL := xTargetURL
 		if targetURL == "" {
 			targetURL = g.autoDetectTargetURL(r)
 		}
-		if targetURL != "" {
-			log.Info().
-				Str("X-Target-URL_header", xTargetURL).
-				Str("auto_detected", g.autoDetectTargetURL(r)).
-				Str("final_endpoint", targetURL).
-				Msg("Captured endpoint for summarizer")
-			g.preemptive.SetEndpoint(targetURL)
+		// Pass full auth struct to summarizer — single call, single source of truth
+		authForSummarizer := capturedAuth
+		authForSummarizer.Endpoint = targetURL
+		if authForSummarizer.HasAuth() || authForSummarizer.Endpoint != "" {
+			log.Debug().
+				Str("auth_type", map[bool]string{true: "x-api-key", false: "Authorization"}[capturedAuth.IsXAPIKey]).
+				Str("auth", utils.MaskKey(capturedAuth.Token)).
+				Str("endpoint", targetURL).
+				Msg("Passing auth to summarizer")
+			g.preemptive.SetAuth(authForSummarizer)
 		}
 
 		// Pass URL path to preemptive manager for path-based compaction detection (e.g., /responses/compact for Codex)
@@ -600,7 +720,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		requestHeaders.Set("X-Request-Path", r.URL.Path)
 
 		var preemptiveBody []byte
-		preemptiveBody, isCompaction, syntheticResponse, preemptiveHeaders, _ = g.preemptive.ProcessRequest(requestHeaders, body, model, adapter.Name())
+		preemptiveBody, isCompaction, syntheticResponse, preemptiveHeaders, _ = g.preemptive.ProcessRequest(r.Context(), requestHeaders, body, model, adapter.Name())
 
 		// If we have a synthetic response (SDK compaction with cached summary),
 		// return it immediately without forwarding to Anthropic
@@ -659,7 +779,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 			if merged, err := mergeCompactedWithOriginal(preemptiveBody, body); err == nil {
 				// Record preemptive summarization savings before updating body
 				if g.savings != nil && len(merged) < originalBodyLen {
-					g.savings.RecordPreemptiveSummarization(originalBodyLen, len(merged), model, pipeCtx.CostSessionID)
+					origTok := tokenizer.CountBytes(body)
+					mergedTok := tokenizer.CountBytes(merged)
+					g.savings.RecordPreemptiveSummarization(origTok, mergedTok, model, pipeCtx.CostSessionID, g.isMainConversation(pipeCtx.StableFingerprint))
+					g.tracker.RecordPreemptiveStats(origTok, mergedTok)
 				}
 				body = merged
 				// Update pipeCtx with new body
@@ -684,34 +807,47 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	pipeCtx.IsCompaction = isCompaction
 
 	// Capture prompt to persistent history (non-blocking).
-	// Skips: compaction/summarization requests, subagent requests, internal compression models.
-	// Only records for the main conversation (first session ID seen per gateway instance).
-	if g.promptHistory != nil && lastUserMsg != "" && !isCompaction && isMainAgentRequest(body) {
+	// Four-layer filter:
+	//   1. IsMainAgent: only main Claude Code agent, never subagents (Haiku, reviewers, etc.)
+	//   2. extractCleanUserPrompt: only returns text for genuine user turns (not tool loops)
+	//   3. Stable fingerprint lock: hash of CLEAN first user message text — this is stable
+	//      across requests (injected XML stripped) and filters subagents whose first message
+	//      differs from the main conversation's first message.
+	//   4. isMainPromptConversation: fingerprint must match the main conversation
+	if g.promptHistory != nil && lastUserMsg != "" && !isCompaction && pipeCtx.Classification.IsMainAgent {
 		cleanedPrompt := extractCleanUserPrompt(body)
 		if cleanedPrompt != "" {
-			// Lock to main conversation: the first valid prompt sets the conversation hash.
-			// Subagent requests have different hashes (different first user messages) and are excluded.
-			g.mainConvOnce.Do(func() {
-				g.mainConversationID = conversationSessionID
-			})
-			if conversationSessionID == g.mainConversationID {
-				// Store the human-readable session name (e.g. "bal", "jobb"), not the hash.
-				sessionName := g.getCurrentSessionID()
-				if sessionName == "" {
-					sessionName = conversationSessionID
-				}
-				go func() {
-					if err := g.promptHistory.Record(context.WithoutCancel(r.Context()), prompthistory.PromptRecord{
-						Text:      cleanedPrompt,
-						Timestamp: time.Now().Format(time.RFC3339),
-						SessionID: sessionName,
-						Model:     model,
-						Provider:  string(provider),
-						RequestID: requestID,
-					}); err != nil {
-						log.Error().Err(err).Str("request_id", requestID).Msg("failed to record prompt history")
+			// Compute stable conversation fingerprint from clean first user message.
+			// Unlike ComputeSessionID (which hashes the full message including injected
+			// <system-reminder> XML that changes between requests), this only hashes the
+			// actual user-typed text — stable within a conversation, different for subagents.
+			firstCleanText := pipeCtx.Classification.FirstUserCleanContent
+			promptFingerprint := preemptive.ComputeSessionIDFromClean(firstCleanText)
+			if promptFingerprint != "" {
+				g.setPromptConvFingerprintOnce(promptFingerprint)
+				if g.isMainPromptConversation(promptFingerprint) {
+					sessionName := g.getCurrentSessionID()
+					if sessionName == "" {
+						sessionName = conversationSessionID
 					}
-				}()
+					promptAgentName := dashboard.DetectAgent(r.Header)
+					if promptAgentName == "unknown" {
+						promptAgentName = ""
+					}
+					go func() {
+						if err := g.promptHistory.Record(context.WithoutCancel(r.Context()), prompthistory.PromptRecord{
+							Text:      cleanedPrompt,
+							Timestamp: time.Now().Format(time.RFC3339),
+							SessionID: sessionName,
+							Model:     model,
+							Provider:  string(provider),
+							RequestID: requestID,
+							AgentName: promptAgentName,
+						}); err != nil {
+							log.Error().Err(err).Str("request_id", requestID).Msg("failed to record prompt history")
+						}
+					}()
+				}
 			}
 		}
 	}
@@ -724,23 +860,32 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 		g.toolSessions.StoreDeferred(pipeCtx.ToolSessionID, pipeCtx.DeferredTools)
 	}
 
-	// Inject expand_context tool if enabled (always inject, not just when compression occurs)
-	// This allows the LLM to see the tool from the start and use it when needed
+	// Capture compressed body size BEFORE tool injection — this is the true
+	// post-compression size for metrics. Tool injection adds gateway overhead
+	// (expand_context definition) that shouldn't count against compression savings.
+	compressedBodySize := len(forwardBody)
+
+	// Always inject all phantom tools (MCP-server pattern).
+	// Both expand_context and gateway_search_tools are injected unconditionally,
+	// regardless of which pipes are enabled. Config may change mid-session, and
+	// the LLM should consistently see both tools from turn one.
+	// Dedup in InjectPhantomTool prevents double-injection if a tool already exists.
 	isStreaming := g.isStreamingRequest(body)
-	expandEnabled := g.cfg().Pipes.ToolOutput.EnableExpandContext // Enabled for both streaming and non-streaming
-	if expandEnabled {
-		if injected, err := tooloutput.InjectExpandContextTool(forwardBody, pipeCtx.ShadowRefs, string(provider)); err == nil {
-			forwardBody = injected
-		}
+	if injected, err := phantom_tools.InjectAll(forwardBody, provider); err == nil {
+		forwardBody = injected
+		pipeCtx.PhantomToolsInjected = true
 	}
+	// expandEnabled=true: phantom loop always handles calls to either tool.
+	// For streaming: needsExpandBuffer still checks compressionUsed + ShadowRefs.
+	expandEnabled := true
 
 	// Route to streaming or non-streaming handler
 	if isStreaming {
 		g.handleStreamingWithExpand(w, r, forwardBody, pipeCtx, requestID, startTime, adapter,
-			pipeType, pipeStrategy, preCompactionBodySize, compressionUsed, compressLatency, body, expandEnabled)
+			pipeType, pipeStrategy, preCompactionBodySize, compressionUsed, compressLatency, body, expandEnabled, compressedBodySize)
 	} else {
 		g.handleNonStreaming(w, r, forwardBody, pipeCtx, requestID, startTime, adapter,
-			pipeType, pipeStrategy, preCompactionBodySize, compressionUsed, compressLatency, body, expandEnabled)
+			pipeType, pipeStrategy, preCompactionBodySize, compressionUsed, compressLatency, body, expandEnabled, nil, compressedBodySize)
 	}
 }
 
@@ -757,6 +902,17 @@ func (g *Gateway) processCompressionPipeline(body []byte, pipeCtx *PipelineConte
 	var pipeStrategy string
 	var compressionUsed bool
 
+	if flags.TaskOutput && len(pipeCtx.TaskOutputHandledIDs) > 0 {
+		// task_output ran and claimed at least one item — record it as the primary pipe
+		// only when no higher-priority pipe (tool_output) also ran.
+		if pipeType == PipeNone {
+			pipeType = PipeTaskOutput
+			pipeStrategy = g.cfg().Pipes.TaskOutput.Strategy
+		}
+		g.requestLogger.LogPipelineStage(&monitoring.PipelineStageInfo{
+			RequestID: requestID, Stage: "process", Pipe: string(PipeTaskOutput),
+		})
+	}
 	if flags.ToolOutput {
 		pipeType = PipeToolOutput
 		pipeStrategy = g.cfg().Pipes.ToolOutput.Strategy
@@ -786,14 +942,16 @@ func (g *Gateway) processCompressionPipeline(body []byte, pipeCtx *PipelineConte
 
 	// Record compression metrics for tool outputs
 	for _, tc := range pipeCtx.ToolOutputCompressions {
+
+		compressionRatio := tokenizer.CompressionRatio(tc.OriginalTokens, tc.CompressedTokens)
 		g.requestLogger.LogCompression(&monitoring.CompressionInfo{
 			RequestID: requestID, ToolName: tc.ToolName, ToolCallID: tc.ToolCallID,
-			ShadowID: tc.ShadowID, OriginalBytes: tc.OriginalBytes, CompressedBytes: tc.CompressedBytes,
-			CompressionRatio: float64(tc.CompressedBytes) / float64(max(tc.OriginalBytes, 1)),
+			ShadowID: tc.ShadowID, OriginalTokens: tc.OriginalTokens, CompressedTokens: tc.CompressedTokens,
+			CompressionRatio: compressionRatio,
 			CacheHit:         tc.CacheHit, IsLastTool: tc.IsLastTool, MappingStatus: tc.MappingStatus,
 			Duration: compressLatency,
 		})
-		g.metrics.RecordCompression(tc.OriginalBytes, tc.CompressedBytes, true)
+		g.metrics.RecordCompression(tc.OriginalTokens, tc.CompressedTokens, true)
 		if tc.CacheHit {
 			g.metrics.RecordCacheHit()
 		} else {
@@ -801,7 +959,7 @@ func (g *Gateway) processCompressionPipeline(body []byte, pipeCtx *PipelineConte
 		}
 		// Record for post-session collector
 		if g.sessionCollector != nil {
-			g.sessionCollector.RecordCompression(tc.ToolName, tc.OriginalBytes, tc.CompressedBytes)
+			g.sessionCollector.RecordCompression(tc.ToolName, tc.OriginalTokens, tc.CompressedTokens)
 		}
 	}
 
@@ -849,13 +1007,8 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 	}
 
 	// Auth fallback context: provider-scoped subscription -> API key.
+	// IdentifyAndGetAdapter centralizes all provider detection logic; no overrides needed here.
 	provider, _ := adapters.IdentifyAndGetAdapter(g.registry, r.URL.Path, r.Header)
-	// In this forwarding path, anthropic-version is definitive.
-	if r.Header.Get("anthropic-version") != "" {
-		provider = adapters.ProviderAnthropic
-	} else if provider == adapters.ProviderUnknown && strings.HasPrefix(strings.TrimSpace(r.Header.Get("x-api-key")), "sk-ant-") {
-		provider = adapters.ProviderAnthropic
-	}
 
 	// Use provider-specific auth handler for fallback logic
 	authHandler := g.authRegistry.GetOrDefault(provider)
@@ -982,24 +1135,13 @@ func (g *Gateway) isBedrockRequest(path string) bool {
 
 // isStreamingRequest checks if the request has "stream": true.
 func (g *Gateway) isStreamingRequest(body []byte) bool {
-	if !bytes.Contains(body, []byte(`"stream"`)) {
-		return false
-	}
-	var req struct {
-		Stream bool `json:"stream"`
-	}
-	_ = json.Unmarshal(body, &req)
-	return req.Stream
+	return gjson.GetBytes(body, "stream").Bool()
 }
 
 // setStreamFlag sets or clears the "stream" field in a request body.
+// Uses sjson to preserve field ordering for KV-cache prefix matching.
 func setStreamFlag(body []byte, stream bool) []byte {
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return body
-	}
-	req["stream"] = stream
-	result, err := json.Marshal(req)
+	result, err := sjson.SetBytes(body, "stream", stream)
 	if err != nil {
 		return body
 	}
@@ -1038,9 +1180,25 @@ func extractErrorType(body []byte) string {
 
 // countMessages is defined in handler_telemetry.go (uses gjson for efficiency).
 
+// protectedHeaders is the set of security headers that must never be overwritten
+// by upstream response headers. These are set by the gateway's security middleware
+// and must not be replaced by potentially attacker-controlled upstream values.
+var protectedHeaders = map[string]bool{
+	"X-Content-Type-Options":    true,
+	"X-Frame-Options":           true,
+	"Content-Security-Policy":   true,
+	"Strict-Transport-Security": true,
+	"X-Xss-Protection":          true,
+}
+
 // copyHeaders copies HTTP headers from source to destination.
+// Headers listed in protectedHeaders are never copied from upstream to prevent
+// upstream responses from weakening gateway-set security policies.
 func copyHeaders(w http.ResponseWriter, src http.Header) {
 	for k, v := range src {
+		if protectedHeaders[k] {
+			continue
+		}
 		w.Header()[k] = v
 	}
 }

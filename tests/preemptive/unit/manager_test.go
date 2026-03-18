@@ -1,6 +1,7 @@
 package preemptive_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -66,7 +67,7 @@ func TestManager_Disabled(t *testing.T) {
 	headers := http.Header{}
 	body := []byte(`{"messages": [{"role": "user", "content": "Hello"}], "model": "claude-sonnet-4-5"}`)
 
-	modifiedBody, isCompaction, _, respHeaders, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+	modifiedBody, isCompaction, _, respHeaders, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 
 	// Should be a pass-through
@@ -90,7 +91,7 @@ func TestManager_ProcessRequest_NormalRequest(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	modifiedBody, isCompaction, _, _, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+	modifiedBody, isCompaction, _, _, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 
 	assert.False(t, isCompaction)
@@ -117,7 +118,7 @@ func TestManager_ProcessRequest_DetectsCompaction(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	_, isCompaction, _, _, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+	_, isCompaction, _, _, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 
 	assert.True(t, isCompaction)
@@ -139,7 +140,7 @@ func TestManager_ProcessRequest_HeaderCompaction(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	_, isCompaction, _, _, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+	_, isCompaction, _, _, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 
 	assert.True(t, isCompaction)
@@ -153,7 +154,7 @@ func TestManager_InvalidJSON(t *testing.T) {
 	headers := http.Header{}
 	body := []byte(`not valid json`)
 
-	modifiedBody, isCompaction, _, _, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+	modifiedBody, isCompaction, _, _, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 	// Should handle gracefully - pass through
 	assert.NoError(t, err)
 	assert.False(t, isCompaction)
@@ -172,7 +173,7 @@ func TestManager_EmptyMessages(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	modifiedBody, isCompaction, _, _, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+	modifiedBody, isCompaction, _, _, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 
 	// Should handle empty messages gracefully
@@ -203,7 +204,7 @@ func TestManager_ModelExtraction(t *testing.T) {
 			"model": "` + model + `"
 		}`)
 
-		_, isCompaction, _, _, err := manager.ProcessRequest(headers, body, model, "anthropic")
+		_, isCompaction, _, _, err := manager.ProcessRequest(context.Background(), headers, body, model, "anthropic")
 		require.NoError(t, err, "Failed for model: %s", model)
 		assert.False(t, isCompaction)
 	}
@@ -227,7 +228,7 @@ func TestManager_ToolUseCompaction(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	_, isCompaction, _, _, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+	_, isCompaction, _, _, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 
 	assert.True(t, isCompaction)
@@ -250,7 +251,7 @@ func TestManager_SystemPromptCompaction(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	_, isCompaction, _, _, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+	_, isCompaction, _, _, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 
 	assert.True(t, isCompaction)
@@ -278,7 +279,7 @@ func TestManager_EndToEndFlow(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	_, isCompaction1, _, _, err := manager.ProcessRequest(headers, body1, "claude-sonnet-4-5", "anthropic")
+	_, isCompaction1, _, _, err := manager.ProcessRequest(context.Background(), headers, body1, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 	assert.False(t, isCompaction1)
 
@@ -294,7 +295,7 @@ func TestManager_EndToEndFlow(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	_, isCompaction2, _, _, err := manager.ProcessRequest(headers, body2, "claude-sonnet-4-5", "anthropic")
+	_, isCompaction2, _, _, err := manager.ProcessRequest(context.Background(), headers, body2, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 	assert.False(t, isCompaction2)
 
@@ -308,7 +309,7 @@ func TestManager_EndToEndFlow(t *testing.T) {
 		"model": "claude-sonnet-4-5"
 	}`)
 
-	_, isCompaction3, _, _, err := manager.ProcessRequest(headers, body3, "claude-sonnet-4-5", "anthropic")
+	_, isCompaction3, _, _, err := manager.ProcessRequest(context.Background(), headers, body3, "claude-sonnet-4-5", "anthropic")
 	require.NoError(t, err)
 	assert.True(t, isCompaction3)
 }
@@ -332,7 +333,7 @@ func TestManager_ConcurrentRequests(t *testing.T) {
 				"model": "claude-sonnet-4-5"
 			}`)
 
-			_, _, _, _, err := manager.ProcessRequest(headers, body, "claude-sonnet-4-5", "anthropic")
+			_, _, _, _, err := manager.ProcessRequest(context.Background(), headers, body, "claude-sonnet-4-5", "anthropic")
 			assert.NoError(t, err)
 			done <- true
 		}(i)

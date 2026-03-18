@@ -22,14 +22,34 @@ import (
 
 	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/config"
+	phantom_tools "github.com/compresr/context-gateway/internal/phantom_tools"
 	"github.com/compresr/context-gateway/internal/pipes"
 	tooldiscovery "github.com/compresr/context-gateway/internal/pipes/tool_discovery"
-	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 )
 
 // =============================================================================
 // HELPERS
 // =============================================================================
+
+// countEffectiveToolsInBody counts tools in the JSON body where description != "[deferred]".
+// Stubs have description="[deferred]" and preserve tools[] length for KV-cache stability,
+// but are not visible to the LLM. This helper counts only full (non-stub) tools.
+func countEffectiveToolsInBody(body []byte) int64 {
+	count := int64(0)
+	gjson.GetBytes(body, "tools").ForEach(func(_, v gjson.Result) bool {
+		// Anthropic format: top-level description
+		desc := v.Get("description").String()
+		// OpenAI Chat format: function.description
+		if desc == "" {
+			desc = v.Get("function.description").String()
+		}
+		if desc != "[deferred]" {
+			count++
+		}
+		return true
+	})
+	return count
+}
 
 // anthropicBodyWithToolResultsAndTools builds an Anthropic request with tool
 // results in messages AND N tool definitions.
@@ -133,9 +153,7 @@ func TestPipeArchitecture_ToolOutputAndDiscovery_Independent(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:     true,
 				Strategy:    "relevance",
-				MinTools:    2,
-				MaxTools:    3,
-				TargetRatio: 0.3,
+				TokenThreshold: 1,
 			},
 		},
 	}
@@ -147,10 +165,12 @@ func TestPipeArchitecture_ToolOutputAndDiscovery_Independent(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, json.Valid(tdResult), "tool_discovery result must be valid JSON")
 
-	// Tool discovery should have modified tools
-	tdTools := gjson.GetBytes(tdResult, "tools")
-	assert.Less(t, tdTools.Get("#").Int(), originalToolCount,
-		"tool_discovery should filter tools")
+	// Tool discovery should have reduced the number of effective (non-stub) tools.
+	// Stubs (description="[deferred]") preserve the tools[] array length for KV-cache
+	// stability, so total len may equal originalToolCount. Count only effective tools.
+	effectiveCount := countEffectiveToolsInBody(tdResult)
+	assert.Less(t, effectiveCount, originalToolCount,
+		"tool_discovery should filter tools (effective count should decrease)")
 
 	// Tool discovery should NOT have modified messages (compare parsed, not raw bytes,
 	// since sjson may normalize whitespace around the replaced tools[] area)
@@ -260,9 +280,7 @@ func TestPipeArchitecture_ExpandContext_AfterBothPipes(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:     true,
 				Strategy:    "relevance",
-				MinTools:    1,
-				MaxTools:    3,
-				TargetRatio: 0.3,
+				TokenThreshold: 1,
 			},
 		},
 	}
@@ -273,11 +291,16 @@ func TestPipeArchitecture_ExpandContext_AfterBothPipes(t *testing.T) {
 	tdResult, err := tdPipe.Process(tdCtx)
 	require.NoError(t, err)
 
-	filteredCount := gjson.GetBytes(tdResult, "tools.#").Int()
-	assert.LessOrEqual(t, filteredCount, int64(3),
-		"tool_discovery should keep at most 3 tools")
-	assert.Greater(t, filteredCount, int64(0),
-		"tool_discovery should keep at least 1 tool")
+	// Stubs preserve the tools[] array length for KV-cache stability.
+	// Use effective count (non-stub tools) to verify filtering worked.
+	effectiveFiltered := countEffectiveToolsInBody(tdResult)
+	assert.LessOrEqual(t, effectiveFiltered, int64(3),
+		"tool_discovery should keep at most 3 effective tools")
+	assert.Greater(t, effectiveFiltered, int64(0),
+		"tool_discovery should keep at least 1 effective tool")
+
+	// Total tools count (stubs + effective) equals original since stubs remain.
+	totalAfterTD := gjson.GetBytes(tdResult, "tools.#").Int()
 
 	// Step 2: Simulate tool_output (messages only — no tools change)
 	toResult, err := sjson.SetBytes(original, "messages.0.content", "compressed query")
@@ -288,22 +311,25 @@ func TestPipeArchitecture_ExpandContext_AfterBothPipes(t *testing.T) {
 	require.True(t, json.Valid(merged))
 
 	mergedToolCount := gjson.GetBytes(merged, "tools.#").Int()
-	assert.Equal(t, filteredCount, mergedToolCount,
-		"merged body should have the filtered tool count")
+	assert.Equal(t, totalAfterTD, mergedToolCount,
+		"merged body should have the same tool count as after tool_discovery")
 
 	// Step 4: Inject expand_context
-	final, err := tooloutput.InjectExpandContextTool(merged, nil, "anthropic")
+	final, err := phantom_tools.InjectAll(merged, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 	require.True(t, json.Valid(final))
 
 	finalToolCount := gjson.GetBytes(final, "tools.#").Int()
-	assert.Equal(t, mergedToolCount+1, finalToolCount,
-		"expand_context should add exactly 1 tool to the filtered set")
+	assert.Equal(t, mergedToolCount+2, finalToolCount,
+		"InjectAll should add expand_context and gateway_search_tools (2 tools) to the set")
 
-	// Verify expand_context is the last tool
+	// Verify expand_context is second-to-last, gateway_search_tools is last
+	expandToolName := gjson.GetBytes(final, fmt.Sprintf("tools.%d.name", finalToolCount-2)).String()
+	assert.Equal(t, "expand_context", expandToolName,
+		"expand_context should be second-to-last tool")
 	lastToolName := gjson.GetBytes(final, fmt.Sprintf("tools.%d.name", finalToolCount-1)).String()
-	assert.Equal(t, "expand_context", lastToolName,
-		"expand_context should be the last tool")
+	assert.Equal(t, "gateway_search_tools", lastToolName,
+		"gateway_search_tools should be the last tool")
 }
 
 // =============================================================================
@@ -350,12 +376,12 @@ func TestPerf_InjectExpandContext_Latency(t *testing.T) {
 	require.Equal(t, int64(40), gjson.GetBytes(body, "tools.#").Int())
 
 	// Warm up
-	_, _ = tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	_, _ = phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 
 	const iterations = 1000
 	start := time.Now()
 	for i := 0; i < iterations; i++ {
-		result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+		result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err)
 		_ = result
 	}
@@ -379,7 +405,7 @@ func TestPerf_ToolSearch_Replace_Latency(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: "tool-search",
-				MinTools: 1,
+				TokenThreshold: 1,
 			},
 		},
 	}
@@ -479,9 +505,7 @@ func TestStress_InjectAndMerge_Pipeline(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:     true,
 				Strategy:    "relevance",
-				MinTools:    2,
-				MaxTools:    5,
-				TargetRatio: 0.25,
+				TokenThreshold: 1,
 			},
 		},
 	}
@@ -504,7 +528,7 @@ func TestStress_InjectAndMerge_Pipeline(t *testing.T) {
 		require.True(t, json.Valid(merged))
 
 		// Step 4: Inject expand_context
-		final, err := tooloutput.InjectExpandContextTool(merged, nil, "anthropic")
+		final, err := phantom_tools.InjectAll(merged, adapters.Provider("anthropic"))
 		require.NoError(t, err)
 		require.True(t, json.Valid(final))
 
@@ -523,10 +547,13 @@ func TestStress_InjectAndMerge_Pipeline(t *testing.T) {
 
 	// Verify the final result has the expected structure
 	finalToolCount := gjson.GetBytes(baseline, "tools.#").Int()
-	assert.Greater(t, finalToolCount, int64(1), "should have filtered tools + expand_context")
+	assert.Greater(t, finalToolCount, int64(2), "should have filtered tools + expand_context + gateway_search_tools")
 
+	// expand_context is second-to-last, gateway_search_tools is last
+	expandTool := gjson.GetBytes(baseline, fmt.Sprintf("tools.%d.name", finalToolCount-2)).String()
+	assert.Equal(t, "expand_context", expandTool, "second-to-last tool should be expand_context")
 	lastTool := gjson.GetBytes(baseline, fmt.Sprintf("tools.%d.name", finalToolCount-1)).String()
-	assert.Equal(t, "expand_context", lastTool, "last tool should be expand_context")
+	assert.Equal(t, "gateway_search_tools", lastTool, "last tool should be gateway_search_tools")
 
 	assert.Equal(t, "compressed: read the file contents",
 		gjson.GetBytes(baseline, "messages.0.content").String(),
@@ -551,7 +578,7 @@ func TestEdge_EmptyMessages_WithTools(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: "tool-search",
-				MinTools: 1,
+				TokenThreshold: 1,
 			},
 		},
 	}
@@ -566,16 +593,18 @@ func TestEdge_EmptyMessages_WithTools(t *testing.T) {
 	assert.Equal(t, "[]", gjson.GetBytes(tdResult, "messages").Raw,
 		"messages should remain empty")
 
-	// Tools should be replaced with search tool
-	assert.Equal(t, int64(1), gjson.GetBytes(tdResult, "tools.#").Int())
-	assert.Equal(t, "gateway_search_tools", gjson.GetBytes(tdResult, "tools.0.name").String())
+	// With tool-search strategy: original tools become stubs (description="[deferred]").
+	// The pipe no longer injects gateway_search_tools via single injection path design.
+	// Total count = N_original (all stubs).
+	totalTools := gjson.GetBytes(tdResult, "tools.#").Int()
+	assert.Equal(t, int64(10), totalTools, "10 stubs = 10 tools")
 
 	// Merge with a simulated tool_output (nothing to compress in empty messages)
 	merged := mergeParallelResults(body, body, nil, tdResult, nil)
 	require.True(t, json.Valid(merged))
 
 	// expand_context injection should also work
-	final, err := tooloutput.InjectExpandContextTool(merged, nil, "anthropic")
+	final, err := phantom_tools.InjectAll(merged, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 	require.True(t, json.Valid(final))
 }
@@ -594,9 +623,7 @@ func TestEdge_NoTools_WithMessages(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:     true,
 				Strategy:    "relevance",
-				MinTools:    5,
-				MaxTools:    25,
-				TargetRatio: 0.8,
+				TokenThreshold: 1,
 			},
 		},
 	}
@@ -609,13 +636,13 @@ func TestEdge_NoTools_WithMessages(t *testing.T) {
 		"tool_discovery should return body unchanged when no tools exist")
 
 	// expand_context injection should create a tools array
-	final, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	final, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 	require.True(t, json.Valid(final))
 
 	assert.True(t, gjson.GetBytes(final, "tools").Exists(),
 		"InjectExpandContextTool should create tools array")
-	assert.Equal(t, int64(1), gjson.GetBytes(final, "tools.#").Int())
+	assert.Equal(t, int64(2), gjson.GetBytes(final, "tools.#").Int())
 	assert.Equal(t, "expand_context", gjson.GetBytes(final, "tools.0.name").String())
 
 	// Messages should be preserved
@@ -623,8 +650,8 @@ func TestEdge_NoTools_WithMessages(t *testing.T) {
 		gjson.GetBytes(final, "messages.0.content").String())
 }
 
-// TestEdge_SingleTool_BelowMinThreshold verifies that a single tool with
-// min_tools=5 passes through unchanged.
+// TestEdge_SingleTool_BelowMinThreshold verifies that a single tool passes
+// through unchanged when below the token threshold.
 func TestEdge_SingleTool_BelowMinThreshold(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[{"role":"user","content":"test"}],"tools":[{"name":"only_tool","description":"The only tool","input_schema":{"type":"object"}}]}`)
 	require.True(t, json.Valid(body))
@@ -634,9 +661,7 @@ func TestEdge_SingleTool_BelowMinThreshold(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:     true,
 				Strategy:    "relevance",
-				MinTools:    5,
-				MaxTools:    25,
-				TargetRatio: 0.8,
+				TokenThreshold: 1,
 			},
 		},
 	}
@@ -647,9 +672,9 @@ func TestEdge_SingleTool_BelowMinThreshold(t *testing.T) {
 	result, err := pipe.Process(ctx)
 	require.NoError(t, err)
 
-	// Body should be unchanged (1 tool < min_tools=5)
+	// Body should be unchanged (1 tool < token threshold)
 	assert.Equal(t, body, result,
-		"single tool below min_tools threshold should pass through unchanged")
+		"single tool below token threshold should pass through unchanged")
 	assert.False(t, ctx.ToolsFiltered,
 		"ToolsFiltered should be false when below threshold")
 	assert.Equal(t, int64(1), gjson.GetBytes(result, "tools.#").Int())

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40" fill="none">
+  <!-- Icon: two overlapping compression arrows -->
+  <rect x="2" y="2" width="36" height="36" rx="9" fill="url(#grad)"/>
+  <g fill="#fff" opacity="0.95">
+    <!-- Down-left arrow -->
+    <polygon points="21,11 21,19 13,19 13,21 23,21 23,11" />
+    <!-- Up-right arrow -->
+    <polygon points="19,29 19,21 27,21 27,19 17,19 17,29" />
+  </g>
+  <!-- Wordmark -->
+  <text x="48" y="28" font-family="'Inter', system-ui, -apple-system, sans-serif" font-size="22" font-weight="800" letter-spacing="-0.04em" fill="#22c55e">compresr</text>
+  <defs>
+    <linearGradient id="grad" x1="2" y1="2" x2="38" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#16a34a"/>
+      <stop offset="100%" stop-color="#22c55e"/>
+    </linearGradient>
+  </defs>
+</svg>

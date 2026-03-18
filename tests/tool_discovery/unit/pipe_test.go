@@ -17,7 +17,7 @@ import (
 // =============================================================================
 
 func TestPipe_Name(t *testing.T) {
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, 25, 0.8, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 25, nil))
 	assert.Equal(t, "tool_discovery", pipe.Name())
 }
 
@@ -33,7 +33,7 @@ func TestPipe_Strategy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pipe := tooldiscovery.New(testConfig(tt.strategy, 5, 25, 0.8, nil))
+			pipe := tooldiscovery.New(testConfig(tt.strategy, 25, nil))
 			assert.Equal(t, tt.strategy, pipe.Strategy())
 		})
 	}
@@ -41,12 +41,12 @@ func TestPipe_Strategy(t *testing.T) {
 
 func TestPipe_Enabled(t *testing.T) {
 	t.Run("enabled", func(t *testing.T) {
-		pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, 25, 0.8, nil))
+		pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 25, nil))
 		assert.True(t, pipe.Enabled())
 	})
 
 	t.Run("disabled", func(t *testing.T) {
-		cfg := testConfig(config.StrategyRelevance, 5, 25, 0.8, nil)
+		cfg := testConfig(config.StrategyRelevance, 25, nil)
 		cfg.Pipes.ToolDiscovery.Enabled = false
 		pipe := tooldiscovery.New(cfg)
 		assert.False(t, pipe.Enabled())
@@ -58,7 +58,7 @@ func TestPipe_Enabled(t *testing.T) {
 // =============================================================================
 
 func TestPipe_Process_Disabled(t *testing.T) {
-	cfg := testConfig(config.StrategyRelevance, 5, 25, 0.8, nil)
+	cfg := testConfig(config.StrategyRelevance, 25, nil)
 	cfg.Pipes.ToolDiscovery.Enabled = false
 	pipe := tooldiscovery.New(cfg)
 
@@ -73,7 +73,7 @@ func TestPipe_Process_Disabled(t *testing.T) {
 }
 
 func TestPipe_Process_Passthrough(t *testing.T) {
-	pipe := tooldiscovery.New(testConfig(config.StrategyPassthrough, 5, 25, 0.8, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyPassthrough, 25, nil))
 
 	body := openAIRequestWithTools(10)
 	ctx := newOpenAIPipeContext(body)
@@ -89,9 +89,9 @@ func TestPipe_Process_Passthrough(t *testing.T) {
 // BELOW MIN THRESHOLD - NO FILTERING
 // =============================================================================
 
-func TestPipe_Process_BelowMinTools(t *testing.T) {
-	// MinTools=5, so 3 tools should not be filtered
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, 25, 0.8, nil))
+func TestPipe_Process_BelowTokenThreshold(t *testing.T) {
+	// TokenThreshold=99999: 3 small tools are well below threshold → no filtering
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, nil, 99999))
 
 	body := openAIRequestWithTools(3)
 	ctx := newOpenAIPipeContext(body)
@@ -101,11 +101,12 @@ func TestPipe_Process_BelowMinTools(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, body, result)
 	assert.False(t, ctx.ToolsFiltered)
+	assert.Equal(t, "below_token_threshold", ctx.ToolDiscoverySkipReason)
 }
 
 func TestPipe_Process_ExactlyMinTools(t *testing.T) {
-	// MinTools=5, so exactly 5 tools should not be filtered (<=)
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, 25, 0.8, nil))
+	// TokenThreshold large enough to hold all 5 tools → all fit in budget → skip
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 25, nil))
 
 	body := openAIRequestWithTools(5)
 	ctx := newOpenAIPipeContext(body)
@@ -122,8 +123,8 @@ func TestPipe_Process_ExactlyMinTools(t *testing.T) {
 // =============================================================================
 
 func TestPipe_Process_FiltersTools_OpenAI(t *testing.T) {
-	// MaxTools=3, MinTools=2, TargetRatio=0.5 → keep 50% of 10 = 5, capped at 3
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 3, 0.5, nil))
+	// TokenThreshold=3*25=75 → keep 3 of 10; deferred tools become stubs preserving array length
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 3, nil))
 
 	body := openAIRequestWithToolsAndQuery(10, "read the file contents")
 	ctx := newOpenAIPipeContext(body)
@@ -137,13 +138,17 @@ func TestPipe_Process_FiltersTools_OpenAI(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &req))
 
 	tools := req["tools"].([]any)
-	assert.LessOrEqual(t, len(tools), 3)
-	assert.Greater(t, len(tools), 0)
+	// Total array length is preserved (stubs keep the array stable for KV-cache).
+	assert.Equal(t, 10, len(tools))
+	// But only ≤3 tools have full definitions visible to the LLM.
+	effective := countEffectiveTools(tools)
+	assert.LessOrEqual(t, effective, 3)
+	assert.Greater(t, effective, 0)
 }
 
 func TestPipe_Process_FiltersTools_Anthropic(t *testing.T) {
-	// MaxTools=3, MinTools=2, TargetRatio=0.5
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 3, 0.5, nil))
+	// TokenThreshold=3*25=75 → keep 3 of 10; deferred tools become stubs preserving array length
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 3, nil))
 
 	body := anthropicRequestWithToolsAndQuery(10, "search for code patterns")
 	ctx := newAnthropicPipeContext(body)
@@ -157,12 +162,14 @@ func TestPipe_Process_FiltersTools_Anthropic(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &req))
 
 	tools := req["tools"].([]any)
-	assert.LessOrEqual(t, len(tools), 3)
-	assert.Greater(t, len(tools), 0)
+	assert.Equal(t, 10, len(tools))
+	effective := countEffectiveTools(tools)
+	assert.LessOrEqual(t, effective, 3)
+	assert.Greater(t, effective, 0)
 }
 
 func TestPipe_Process_Relevance_DoesNotInjectSearchTool(t *testing.T) {
-	cfg := testConfig(config.StrategyRelevance, 1, 2, 0.3, nil)
+	cfg := testConfig(config.StrategyRelevance, 2, nil)
 	cfg.Pipes.ToolDiscovery.EnableSearchFallback = true // Should be ignored for relevance
 	pipe := tooldiscovery.New(cfg)
 
@@ -182,7 +189,7 @@ func TestPipe_Process_Relevance_DoesNotInjectSearchTool(t *testing.T) {
 
 func TestPipe_Process_CompresrStrategy_IsUnknown(t *testing.T) {
 	// "compresr" is no longer a valid tool discovery strategy
-	cfg := testConfig("compresr", 1, 10, 0.8, []string{"run_tests"})
+	cfg := testConfig("compresr", 10, []string{"run_tests"})
 	pipe := tooldiscovery.New(cfg)
 
 	body := openAIRequestWithToolsAndQuery(6, "search for code")
@@ -199,7 +206,9 @@ func TestPipe_Process_CompresrStrategy_IsUnknown(t *testing.T) {
 }
 
 func TestPipe_Process_ToolSearch_ReplacesWithSearchToolOnly(t *testing.T) {
-	cfg := testConfig(config.StrategyToolSearch, 1, 10, 0.8, []string{"run_tests"})
+	// tool_search: all original tools become stubs.
+	// gateway_search_tools is injected unconditionally by phantom_tools.InjectAll in handler.go — NOT by the pipe.
+	cfg := testConfig(config.StrategyToolSearch, 10, []string{"run_tests"})
 	pipe := tooldiscovery.New(cfg)
 
 	body := openAIRequestWithToolsAndQuery(6, "search for code")
@@ -213,10 +222,16 @@ func TestPipe_Process_ToolSearch_ReplacesWithSearchToolOnly(t *testing.T) {
 	var req map[string]any
 	require.NoError(t, json.Unmarshal(result, &req))
 	tools := req["tools"].([]any)
-	require.Len(t, tools, 1)
-	names := extractToolNames(tools)
-	require.Len(t, names, 1)
-	assert.Equal(t, "gateway_search_tools", names[0])
+	// 6 stubs only — gateway_search_tools is NOT injected by the pipe
+	require.Len(t, tools, 6)
+	// All 6 tools are stubs: OpenAI stubs have parameters injected by buildDeferredStubChat
+	for i := 0; i < 6; i++ {
+		tool := tools[i].(map[string]any)
+		fn, ok := tool["function"].(map[string]any)
+		require.True(t, ok, "tool[%d] must be OpenAI format (has 'function' key)", i)
+		_, hasParams := fn["parameters"]
+		assert.True(t, hasParams, "tool[%d] should be a stub (must have 'parameters' injected by buildDeferredStubChat)", i)
+	}
 }
 
 // =============================================================================
@@ -224,8 +239,8 @@ func TestPipe_Process_ToolSearch_ReplacesWithSearchToolOnly(t *testing.T) {
 // =============================================================================
 
 func TestPipe_Process_RecentlyUsedToolsScoreHigher(t *testing.T) {
-	// MaxTools=2, keep only 2 of 6 tools (int(6*0.4)=2)
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, 2, 0.4, nil))
+	// TokenThreshold=2*25=50 → keep 2 of 6 tools
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, nil))
 
 	// Request with tool results for "read_file" in conversation history
 	body := []byte(`{
@@ -258,11 +273,13 @@ func TestPipe_Process_RecentlyUsedToolsScoreHigher(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &req))
 
 	tools := req["tools"].([]any)
-	require.Len(t, tools, 2)
+	// Total array length preserved (stubs); only 2 have full definitions.
+	assert.Equal(t, 6, len(tools))
+	assert.Equal(t, 2, countEffectiveTools(tools))
 
-	// read_file should be in the kept tools (it was recently used)
-	toolNames := extractToolNames(tools)
-	assert.Contains(t, toolNames, "read_file")
+	// read_file should be in the kept (non-deferred) tools (it was recently used)
+	keptNames := effectiveToolNames(tools)
+	assert.Contains(t, keptNames, "read_file")
 }
 
 // =============================================================================
@@ -270,8 +287,8 @@ func TestPipe_Process_RecentlyUsedToolsScoreHigher(t *testing.T) {
 // =============================================================================
 
 func TestPipe_Process_KeywordMatchScoring(t *testing.T) {
-	// MaxTools=2, keep only 2 of 6
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, 2, 0.3, nil))
+	// TokenThreshold=2*25=50 → keep 2 of 6
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, nil))
 
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -298,10 +315,10 @@ func TestPipe_Process_KeywordMatchScoring(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &req))
 
 	tools := req["tools"].([]any)
-	toolNames := extractToolNames(tools)
+	keptNames := effectiveToolNames(tools)
 
 	// search_code and read_file should score higher due to keyword overlap
-	assert.Contains(t, toolNames, "search_code")
+	assert.Contains(t, keptNames, "search_code")
 }
 
 // =============================================================================
@@ -309,9 +326,9 @@ func TestPipe_Process_KeywordMatchScoring(t *testing.T) {
 // =============================================================================
 
 func TestPipe_Process_AlwaysKeepList(t *testing.T) {
-	// MaxTools=2, but always_keep includes "run_tests"
+	// TokenThreshold=2*25=50 → keep 2, but always_keep includes "run_tests"
 	alwaysKeep := []string{"run_tests"}
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, 2, 0.3, alwaysKeep))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, alwaysKeep))
 
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -338,38 +355,19 @@ func TestPipe_Process_AlwaysKeepList(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &req))
 
 	tools := req["tools"].([]any)
-	toolNames := extractToolNames(tools)
+	keptNames := effectiveToolNames(tools)
 
-	// run_tests should be kept because it's in always_keep
-	assert.Contains(t, toolNames, "run_tests")
+	// run_tests should be kept (non-deferred) because it's in always_keep
+	assert.Contains(t, keptNames, "run_tests")
 }
 
 // =============================================================================
 // KEEP COUNT CALCULATION
 // =============================================================================
 
-func TestPipe_Process_TargetRatioDeterminesCount(t *testing.T) {
-	// 10 tools, target_ratio=0.6 → keep 6, capped at MaxTools=8
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 8, 0.6, nil))
-
-	body := openAIRequestWithToolsAndQuery(10, "test query")
-	ctx := newOpenAIPipeContext(body)
-
-	result, err := pipe.Process(ctx)
-
-	require.NoError(t, err)
-	assert.True(t, ctx.ToolsFiltered)
-
-	var req map[string]any
-	require.NoError(t, json.Unmarshal(result, &req))
-
-	tools := req["tools"].([]any)
-	assert.Equal(t, 6, len(tools))
-}
-
 func TestPipe_Process_MaxToolsCapsCount(t *testing.T) {
-	// 20 tools, target_ratio=0.8 → keep 16, but MaxTools=5 caps it
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 5, 0.8, nil))
+	// 20 tools, TokenThreshold=5*25=125 → keeps 5
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, nil))
 
 	body := openAIRequestWithToolsAndQuery(20, "test query")
 	ctx := newOpenAIPipeContext(body)
@@ -383,12 +381,14 @@ func TestPipe_Process_MaxToolsCapsCount(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &req))
 
 	tools := req["tools"].([]any)
-	assert.Equal(t, 5, len(tools))
+	// 20 total (stubs preserve array length), 5 effective
+	assert.Equal(t, 20, len(tools))
+	assert.Equal(t, 5, countEffectiveTools(tools))
 }
 
 func TestPipe_Process_MinToolsFloor(t *testing.T) {
-	// 10 tools, target_ratio=0.1 → keep 1, but MinTools=3 floors it
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 3, 25, 0.1, nil))
+	// TokenThreshold=5*25=125 → keeps 5 of 10
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, nil))
 
 	body := openAIRequestWithToolsAndQuery(10, "test query")
 	ctx := newOpenAIPipeContext(body)
@@ -402,7 +402,9 @@ func TestPipe_Process_MinToolsFloor(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &req))
 
 	tools := req["tools"].([]any)
-	assert.Equal(t, 3, len(tools))
+	// 10 total (stubs preserve array length), 5 effective
+	assert.Equal(t, 10, len(tools))
+	assert.Equal(t, 5, countEffectiveTools(tools))
 }
 
 // =============================================================================
@@ -410,7 +412,7 @@ func TestPipe_Process_MinToolsFloor(t *testing.T) {
 // =============================================================================
 
 func TestPipe_Process_NoAdapter(t *testing.T) {
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 5, 0.5, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, nil))
 
 	body := openAIRequestWithTools(10)
 	ctx := &pipes.PipeContext{
@@ -425,7 +427,7 @@ func TestPipe_Process_NoAdapter(t *testing.T) {
 }
 
 func TestPipe_Process_EmptyBody(t *testing.T) {
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 5, 0.5, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 5, nil))
 
 	ctx := newOpenAIPipeContext(nil)
 
@@ -437,7 +439,7 @@ func TestPipe_Process_EmptyBody(t *testing.T) {
 
 func TestPipe_Process_NoQuery(t *testing.T) {
 	// When no user query exists, should still work (using only recently-used and always-keep signals)
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 1, 3, 0.3, nil))
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 3, nil))
 
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -461,12 +463,14 @@ func TestPipe_Process_NoQuery(t *testing.T) {
 	var req map[string]any
 	require.NoError(t, json.Unmarshal(result, &req))
 	tools := req["tools"].([]any)
-	assert.LessOrEqual(t, len(tools), 3)
+	// Total array length preserved; effective count is fewer than all 6 (filtering occurred)
+	assert.Equal(t, 6, len(tools))
+	assert.Less(t, countEffectiveTools(tools), 6)
 }
 
 func TestPipe_Process_KeepCountExceedsTotalSkips(t *testing.T) {
-	// target_ratio=1.0 would keep all tools, so no filtering should happen
-	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 2, 100, 1.0, nil))
+	// TokenThreshold=100*25=2500 > total tokens (10*25=250), so no filtering should happen
+	pipe := tooldiscovery.New(testConfig(config.StrategyRelevance, 100, nil))
 
 	body := openAIRequestWithToolsAndQuery(10, "test query")
 	ctx := newOpenAIPipeContext(body)
@@ -533,16 +537,38 @@ func TestToolDiscoveryConfig_Validate_UnknownStrategy(t *testing.T) {
 // HELPERS
 // =============================================================================
 
-func testConfig(strategy string, minTools, maxTools int, targetRatio float64, alwaysKeep []string) *config.Config {
+// testConfig creates a test pipe config.
+// tokenThreshold controls how many tools are kept via token budget.
+// When keepCount > 0, tokenThreshold is computed as keepCount * testToolTokens.
+// When tokenThreshold is provided directly as 3rd variadic arg, it overrides keepCount.
+// Default tokenThreshold=1 (keeps exactly 1 tool) unless keepCount is specified.
+//
+// testToolTokens is an estimate of the token cost per tool in unit tests.
+// Each test tool JSON is ~100 bytes → ~25 estimated tokens.
+const testToolTokens = 25
+
+func testConfig(strategy string, keepCount int, alwaysKeep []string, opts ...int) *config.Config {
+	// opts[0] = explicit tokenThreshold (overrides keepCount-based calculation)
+	threshold := 0
+	if len(opts) > 0 && opts[0] > 0 {
+		threshold = opts[0]
+	} else if keepCount > 0 {
+		// Budget = keepCount tools worth of tokens.
+		// The loop admits tool i if budget >= toolTokens (for i > 0).
+		// To admit exactly keepCount tools: budget after (keepCount-1) admits >= toolTokens.
+		// Simplification: budget = keepCount * testToolTokens covers keepCount tools.
+		threshold = keepCount * testToolTokens
+	}
+	if threshold <= 0 {
+		threshold = 1 // always trigger, keep only 1 tool
+	}
 	return &config.Config{
 		Pipes: config.PipesConfig{
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
-				Enabled:     true,
-				Strategy:    strategy,
-				MinTools:    minTools,
-				MaxTools:    maxTools,
-				TargetRatio: targetRatio,
-				AlwaysKeep:  alwaysKeep,
+				Enabled:        true,
+				Strategy:       strategy,
+				AlwaysKeep:     alwaysKeep,
+				TokenThreshold: threshold,
 			},
 		},
 	}
@@ -665,6 +691,60 @@ func extractToolNames(tools []any) []string {
 		// Try Anthropic format
 		if name, ok := tool["name"].(string); ok {
 			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// isOpenAIStub returns true when fn is an OpenAI-format stub function object.
+// buildDeferredStubChat always injects parameters:{type:object,properties:{}};
+// test tools from openAIRequestWithToolsAndQuery never have a parameters field.
+func isOpenAIStub(fn map[string]any) bool {
+	_, hasParams := fn["parameters"]
+	return hasParams
+}
+
+// countEffectiveTools returns the number of tools with full definitions (not stubs).
+// OpenAI stubs are detected by the injected parameters field (buildDeferredStubChat).
+// Anthropic stubs use description=adapters.DeferredStubDescription.
+func countEffectiveTools(tools []any) int {
+	count := 0
+	for _, t := range tools {
+		tool := t.(map[string]any)
+		if fn, ok := tool["function"].(map[string]any); ok {
+			// OpenAI format: stubs have parameters injected; original test tools don't
+			if !isOpenAIStub(fn) {
+				count++
+			}
+		} else {
+			// Anthropic format: stubs use DeferredStubDescription
+			desc, _ := tool["description"].(string)
+			if desc != adapters.DeferredStubDescription {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// effectiveToolNames returns names of non-deferred (fully-defined) tools.
+func effectiveToolNames(tools []any) []string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		tool := t.(map[string]any)
+		if fn, ok := tool["function"].(map[string]any); ok {
+			// OpenAI format: stubs have parameters injected
+			if !isOpenAIStub(fn) {
+				name, _ := fn["name"].(string)
+				names = append(names, name)
+			}
+		} else {
+			// Anthropic format: stubs use DeferredStubDescription
+			desc, _ := tool["description"].(string)
+			name, _ := tool["name"].(string)
+			if desc != adapters.DeferredStubDescription {
+				names = append(names, name)
+			}
 		}
 	}
 	return names

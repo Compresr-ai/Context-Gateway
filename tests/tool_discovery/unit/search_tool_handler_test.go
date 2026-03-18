@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,20 @@ import (
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/gateway"
 )
+
+// extractToolContent extracts the tool result text content from an Anthropic-format tool result message.
+// Anthropic adapter returns: [{"role":"user","content":[{"type":"tool_result","tool_use_id":"...","content":"TEXT"}]}]
+func extractToolContent(t *testing.T, result *gateway.PhantomToolResult) string {
+	t.Helper()
+	require.Len(t, result.ToolResults, 1)
+	blocks, ok := result.ToolResults[0]["content"].([]any)
+	require.True(t, ok, "expected content blocks")
+	require.Len(t, blocks, 1)
+	block, ok := blocks[0].(map[string]any)
+	require.True(t, ok)
+	text, _ := block["content"].(string)
+	return text
+}
 
 func TestSearchToolHandler_APINonMeaningfulFallbackKeepsAllTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,16 +46,15 @@ func TestSearchToolHandler_APINonMeaningfulFallbackKeepsAllTools(t *testing.T) {
 		Strategy:    config.StrategyToolSearch,
 		APIEndpoint: server.URL,
 	})
-	h.SetRequestContext("session-1", deferred)
+	h.SetRequestContext(context.Background(), "session-1", deferred, gateway.CapturedAuth{})
 
 	result := h.HandleCalls([]gateway.PhantomToolCall{{
 		ToolUseID: "call_1",
 		ToolName:  "gateway_search_tools",
 		Input:     map[string]any{"query": "file"},
-	}}, false)
+	}}, adapters.NewAnthropicAdapter(), nil)
 	require.NotNil(t, result)
-	require.Len(t, result.ToolResults, 1)
-	content, _ := result.ToolResults[0]["content"].(string)
+	content := extractToolContent(t, result)
 	// After API returns non-meaningful selection, falls back to local regex
 	// "file" matches "read_file" via regex
 	assert.Contains(t, content, "read_file")
@@ -74,16 +88,15 @@ func TestSearchToolHandler_APIMeaningfulSelection(t *testing.T) {
 		Strategy:    config.StrategyToolSearch,
 		APIEndpoint: server.URL,
 	})
-	h.SetRequestContext("session-1", deferred)
+	h.SetRequestContext(context.Background(), "session-1", deferred, gateway.CapturedAuth{})
 
 	result := h.HandleCalls([]gateway.PhantomToolCall{{
 		ToolUseID: "call_1",
 		ToolName:  "gateway_search_tools",
 		Input:     map[string]any{"query": "lookup"},
-	}}, false)
+	}}, adapters.NewAnthropicAdapter(), nil)
 	require.NotNil(t, result)
-	require.Len(t, result.ToolResults, 1)
-	content, _ := result.ToolResults[0]["content"].(string)
+	content := extractToolContent(t, result)
 	assert.NotContains(t, content, "read_file")
 	assert.Contains(t, content, "search_code")
 
@@ -100,16 +113,15 @@ func TestSearchToolHandler_APIEmptyQueryFallbackNoResults(t *testing.T) {
 		Strategy:    config.StrategyToolSearch,
 		APIEndpoint: "https://example.com/v1/tool-discovery/search",
 	})
-	h.SetRequestContext("session-1", deferred)
+	h.SetRequestContext(context.Background(), "session-1", deferred, gateway.CapturedAuth{})
 
 	result := h.HandleCalls([]gateway.PhantomToolCall{{
 		ToolUseID: "call_1",
 		ToolName:  "gateway_search_tools",
 		Input:     map[string]any{"query": "   "},
-	}}, false)
+	}}, adapters.NewAnthropicAdapter(), nil)
 	require.NotNil(t, result)
-	require.Len(t, result.ToolResults, 1)
-	content, _ := result.ToolResults[0]["content"].(string)
+	content := extractToolContent(t, result)
 	// Empty query: API returns non-meaningful, local regex also returns nothing
 	assert.Contains(t, content, "No tools found")
 
@@ -134,18 +146,17 @@ func TestSearchToolHandler_AlreadyExpandedToolsFiltered(t *testing.T) {
 	h := gateway.NewSearchToolHandler("gateway_search_tools", 5, sessionStore, gateway.SearchToolHandlerOptions{
 		Strategy: config.StrategyRelevance, // Use local search
 	})
-	h.SetRequestContext("session-1", deferred)
+	h.SetRequestContext(context.Background(), "session-1", deferred, gateway.CapturedAuth{})
 
-	// Query matches both tools
+	// Query matches search_code (read_file is already expanded so must not re-appear)
 	result := h.HandleCalls([]gateway.PhantomToolCall{{
 		ToolUseID: "call_1",
 		ToolName:  "gateway_search_tools",
-		Input:     map[string]any{"query": "read|search"},
-	}}, false)
+		Input:     map[string]any{"query": "search"},
+	}}, adapters.NewAnthropicAdapter(), nil)
 
 	require.NotNil(t, result)
-	require.Len(t, result.ToolResults, 1)
-	content, _ := result.ToolResults[0]["content"].(string)
+	content := extractToolContent(t, result)
 
 	// read_file was already expanded - should not appear in results
 	assert.NotContains(t, content, "read_file")
@@ -171,19 +182,18 @@ func TestSearchToolHandler_AllToolsAlreadyExpanded(t *testing.T) {
 	h := gateway.NewSearchToolHandler("gateway_search_tools", 5, sessionStore, gateway.SearchToolHandlerOptions{
 		Strategy: config.StrategyRelevance,
 	})
-	h.SetRequestContext("session-1", deferred)
+	h.SetRequestContext(context.Background(), "session-1", deferred, gateway.CapturedAuth{})
 
 	result := h.HandleCalls([]gateway.PhantomToolCall{{
 		ToolUseID: "call_1",
 		ToolName:  "gateway_search_tools",
-		Input:     map[string]any{"query": "read|search"},
-	}}, false)
+		Input:     map[string]any{"query": "search"},
+	}}, adapters.NewAnthropicAdapter(), nil)
 
 	require.NotNil(t, result)
-	require.Len(t, result.ToolResults, 1)
-	content, _ := result.ToolResults[0]["content"].(string)
+	content := extractToolContent(t, result)
 
-	// Should indicate no additional tools found
+	// Should indicate no additional tools found (search_code matched but already expanded)
 	assert.Contains(t, content, "No additional tools found")
 	assert.Contains(t, content, "already available")
 

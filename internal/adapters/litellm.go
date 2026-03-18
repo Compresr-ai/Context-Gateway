@@ -3,8 +3,16 @@ package adapters
 
 // LiteLLMAdapter handles LiteLLM proxy API format requests.
 // LiteLLM exposes an OpenAI-compatible API, so this adapter embeds OpenAIAdapter
-// and delegates all methods. Unlike Ollama, LiteLLM returns standard OpenAI usage
-// format (prompt_tokens/completion_tokens), so no custom usage parsing is needed.
+// and delegates all methods.
+//
+// Usage note: when LiteLLM fronts an Anthropic backend, responses may include
+// Anthropic-style cache fields (cache_creation_input_tokens, cache_read_input_tokens)
+// alongside standard OpenAI usage fields. OpenAIAdapter.ExtractUsage handles both
+// formats, so no custom usage parsing is needed in this adapter.
+// LiteLLMAdapter embeds both BaseAdapter and *OpenAIAdapter, which creates ambiguous
+// selectors for methods implemented on both. Any method that exists on both embedded
+// types MUST be explicitly delegated below (e.g. Name, Provider, ExtractAssistantIntent,
+// ExtractTurnSignal). Do not remove those delegation stubs without resolving the ambiguity.
 type LiteLLMAdapter struct {
 	BaseAdapter
 	*OpenAIAdapter
@@ -31,44 +39,14 @@ func (a *LiteLLMAdapter) Provider() Provider {
 	return a.BaseAdapter.Provider()
 }
 
-// ExtractUsage extracts token usage from LiteLLM API response.
-// LiteLLM returns standard OpenAI format, so we delegate directly.
-func (a *LiteLLMAdapter) ExtractUsage(responseBody []byte) UsageInfo {
-	return a.OpenAIAdapter.ExtractUsage(responseBody)
-}
-
-// =============================================================================
-// PARSED REQUEST ADAPTER - Delegate to OpenAI
-// =============================================================================
-
-// ParseRequest parses the request body once for reuse.
-func (a *LiteLLMAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
-	return a.OpenAIAdapter.ParseRequest(body)
-}
-
-// ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
-func (a *LiteLLMAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
-	return a.OpenAIAdapter.ExtractToolDiscoveryFromParsed(parsed, opts)
-}
-
-// ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
-func (a *LiteLLMAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) string {
-	return a.OpenAIAdapter.ExtractUserQueryFromParsed(parsed)
-}
-
-// ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
-func (a *LiteLLMAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
-	return a.OpenAIAdapter.ExtractToolOutputFromParsed(parsed)
-}
-
-// ApplyToolDiscoveryToParsed filters tools and returns modified body.
-func (a *LiteLLMAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
-	return a.OpenAIAdapter.ApplyToolDiscoveryToParsed(parsed, results)
-}
-
 // ExtractAssistantIntent delegates to OpenAI (resolves ambiguity from dual embedding).
 func (a *LiteLLMAdapter) ExtractAssistantIntent(body []byte) string {
 	return a.OpenAIAdapter.ExtractAssistantIntent(body)
+}
+
+// ExtractTurnSignal delegates to OpenAI (resolves ambiguity from dual embedding).
+func (a *LiteLLMAdapter) ExtractTurnSignal(responseBody []byte, streamStopReason string) TurnSignal {
+	return a.OpenAIAdapter.ExtractTurnSignal(responseBody, streamStopReason)
 }
 
 // Ensure LiteLLMAdapter implements Adapter and ParsedRequestAdapter

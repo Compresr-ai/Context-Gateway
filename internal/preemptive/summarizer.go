@@ -13,57 +13,64 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/external"
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/tokenizer"
 )
 
 // Summarizer generates conversation summaries.
 type Summarizer struct {
-	config           SummarizerConfig
-	capturedAuth     string // Auth token captured from incoming requests
-	authHeaderIsXAPI bool   // true if captured from x-api-key header (use x-api-key), false = use Authorization: Bearer
-	capturedEndpoint string // Upstream endpoint captured from incoming requests
-	authMutex        sync.RWMutex
+	config       SummarizerConfig
+	capturedAuth authtypes.CapturedAuth // Auth + endpoint captured from incoming requests
+	authMutex    sync.RWMutex
+
+	// pre-created client for StrategyCompresr to avoid per-call allocation and
+	// connection pool churn. Nil for other strategies.
+	compresrClient *compresr.Client
+
+	// bedrockClient is the cached HTTP client with SigV4 signing for Bedrock.
+	// Initialized once in NewSummarizer to avoid per-call transport creation.
+	bedrockClient *http.Client
 }
 
 // NewSummarizer creates a new summarizer.
 func NewSummarizer(cfg SummarizerConfig) *Summarizer {
-	return &Summarizer{config: cfg}
+	s := &Summarizer{config: cfg}
+	// Pre-create the Compresr client once so all summarizeViaAPI calls share the same
+	// connection pool (Go's http.Transport is designed to be reused across requests).
+	if cfg.Strategy == StrategyCompresr && cfg.Compresr != nil {
+		s.compresrClient = compresr.NewClient(cfg.CompresrBaseURL, cfg.Compresr.APIKey, compresr.WithTimeout(cfg.Compresr.Timeout))
+	}
+	if cfg.Provider == "bedrock" {
+		if client, err := s.buildBedrockHTTPClient(); err == nil {
+			s.bedrockClient = client
+		}
+		// If construction fails here, callAPI will retry and surface the error.
+	}
+	return s
 }
 
-// SetAuthValue stores an auth token captured from incoming requests.
+// SetAuth stores auth captured from an incoming request.
 // Used when no API key is configured (e.g., Max/Pro subscription users).
-// isFromXAPIKeyHeader indicates if token came from x-api-key header (vs Authorization: Bearer).
-func (s *Summarizer) SetAuthValue(token string, isFromXAPIKeyHeader bool) {
-	if token == "" {
+func (s *Summarizer) SetAuth(auth authtypes.CapturedAuth) {
+	if !auth.HasAuth() {
 		return
 	}
 	s.authMutex.Lock()
 	defer s.authMutex.Unlock()
-	s.capturedAuth = token
-	s.authHeaderIsXAPI = isFromXAPIKeyHeader
+	s.capturedAuth = auth
 }
 
-// SetEndpoint stores the upstream endpoint URL captured from incoming requests.
-func (s *Summarizer) SetEndpoint(endpoint string) {
-	if endpoint == "" {
-		return
-	}
-	s.authMutex.Lock()
-	defer s.authMutex.Unlock()
-	s.capturedEndpoint = endpoint
-}
-
-// getAuthValue returns the best available auth token and whether to use x-api-key header.
-func (s *Summarizer) getAuthValue() (string, bool) {
+// getAuthValue returns the best available CapturedAuth.
+func (s *Summarizer) getAuthValue() authtypes.CapturedAuth {
 	// Priority 1: Configured API key (always use x-api-key)
 	if s.config.ProviderKey != "" {
-		return s.config.ProviderKey, true
+		return authtypes.CapturedAuth{Token: s.config.ProviderKey, IsXAPIKey: true}
 	}
 	// Priority 2: Captured from request - mirror original header format
 	s.authMutex.RLock()
 	defer s.authMutex.RUnlock()
-	return s.capturedAuth, s.authHeaderIsXAPI
+	return s.capturedAuth
 }
 
 // getEndpoint returns the endpoint URL to use for API calls.
@@ -72,7 +79,7 @@ func (s *Summarizer) getEndpoint() string {
 	// because OAuth tokens are only valid for the endpoint they were issued for
 	if s.config.ProviderKey == "" {
 		s.authMutex.RLock()
-		captured := s.capturedEndpoint
+		captured := s.capturedAuth.Endpoint
 		s.authMutex.RUnlock()
 		if captured != "" {
 			return captured
@@ -85,8 +92,8 @@ func (s *Summarizer) getEndpoint() string {
 	// Captured from request (fallback for API key users too)
 	s.authMutex.RLock()
 	defer s.authMutex.RUnlock()
-	if s.capturedEndpoint != "" {
-		return s.capturedEndpoint
+	if s.capturedAuth.Endpoint != "" {
+		return s.capturedAuth.Endpoint
 	}
 	// Fallback
 	return "https://api.anthropic.com/v1/messages"
@@ -103,9 +110,7 @@ type SummarizeInput struct {
 
 	// Per-job auth credentials for session isolation
 	// When set, these override global captured auth to prevent cross-session leakage
-	AuthValue     string // Auth token for this specific job
-	AuthIsXAPIKey bool   // true = use x-api-key header
-	AuthEndpoint  string // Endpoint for this specific job
+	Auth authtypes.CapturedAuth
 }
 
 // SummarizeOutput contains the result.
@@ -200,10 +205,10 @@ func (s *Summarizer) summarizeViaAPI(ctx context.Context, input SummarizeInput) 
 	// Convert messages to Compresr format
 	historyMessages := make([]compresr.HistoryMessage, 0, total)
 	for _, msg := range input.Messages {
-		// Use interface{} for Content to handle both string and array (Anthropic content blocks)
+		// Use any for Content to handle both string and array (Anthropic content blocks)
 		var parsedMsg struct {
-			Role    string      `json:"role"`
-			Content interface{} `json:"content"`
+			Role    string `json:"role"`
+			Content any    `json:"content"`
 		}
 		if err := json.Unmarshal(msg, &parsedMsg); err != nil {
 			return nil, fmt.Errorf("failed to parse message: %w", err)
@@ -216,9 +221,12 @@ func (s *Summarizer) summarizeViaAPI(ctx context.Context, input SummarizeInput) 
 		})
 	}
 
-	// Call Compresr API — use CompresrBaseURL (e.g., "https://api.compresr.ai"), NOT the endpoint path.
-	// The client appends "/api/compress/history/" internally.
-	client := compresr.NewClient(s.config.CompresrBaseURL, s.config.Compresr.AuthParam, compresr.WithTimeout(s.config.Compresr.Timeout))
+	// Reuse the pre-created client (created in NewSummarizer) to share the connection pool.
+	// Fall back to creating a new one only if the pre-created client is unexpectedly nil.
+	client := s.compresrClient
+	if client == nil {
+		client = compresr.NewClient(s.config.CompresrBaseURL, s.config.Compresr.APIKey, compresr.WithTimeout(s.config.Compresr.Timeout))
+	}
 	response, err := client.CompressHistory(compresr.CompressHistoryParams{
 		Messages:   historyMessages,
 		KeepRecent: keepRecent,
@@ -339,40 +347,52 @@ func (s *Summarizer) findCutoffByTokens(messages []json.RawMessage, keepTokens i
 func (s *Summarizer) callAPI(ctx context.Context, systemPrompt, userContent string, input SummarizeInput) (*external.CallLLMResult, error) {
 	log.Debug().Str("model", s.config.Model).Str("provider", s.config.Provider).Int("max_tokens", s.config.MaxTokens).Msg("Calling summarization API")
 
-	// Prefer per-job auth over global captured auth for session isolation
-	endpoint := input.AuthEndpoint
+	// Prefer per-job auth endpoint over global captured endpoint for session isolation
+	endpoint := input.Auth.Endpoint
 	if endpoint == "" {
 		endpoint = s.getEndpoint()
 	}
 
-	// Determine auth token: configured API key > per-job > global captured
+	// Determine auth: configured API key > per-job > global captured.
 	// Configured API key takes precedence because it's provider-specific (e.g., Gemini key
 	// for Gemini summarizer). Per-job auth from request headers may be for a different
 	// provider (e.g., Anthropic key) and must not override the configured key.
-	apiKey := ""
+	var auth authtypes.CapturedAuth
 	keySource := ""
 	if s.config.ProviderKey != "" {
-		apiKey = s.config.ProviderKey
+		auth = authtypes.CapturedAuth{Token: s.config.ProviderKey, IsXAPIKey: true}
 		keySource = "config.ProviderKey"
-	} else if input.AuthValue != "" {
-		apiKey = input.AuthValue
-		keySource = "input.AuthValue"
+	} else if input.Auth.HasAuth() {
+		auth = input.Auth
+		keySource = "input.Auth"
 	} else {
-		apiKey, _ = s.getAuthValue()
+		auth = s.getAuthValue()
 		keySource = "captured auth"
+	}
+
+	// Route the token to the correct field:
+	//   ProviderKey → x-api-key header (API users)
+	//   BearerAuth  → Authorization: Bearer header (subscription users)
+	var providerKey, bearerAuth string
+	if auth.IsXAPIKey {
+		providerKey = auth.Token
+	} else {
+		bearerAuth = auth.Token
 	}
 
 	log.Debug().
 		Str("provider", s.config.Provider).
 		Str("key_source", keySource).
-		Int("key_len", len(apiKey)).
+		Int("provider_key_len", len(providerKey)).
+		Int("bearer_auth_len", len(bearerAuth)).
 		Str("endpoint", endpoint).
 		Msg("Summarizer API key resolved")
 
 	params := external.CallLLMParams{
 		Provider:     s.config.Provider,
 		Endpoint:     endpoint,
-		ProviderKey:  apiKey,
+		ProviderKey:  providerKey,
+		BearerAuth:   bearerAuth,
 		Model:        s.config.Model,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userContent,
@@ -380,20 +400,30 @@ func (s *Summarizer) callAPI(ctx context.Context, systemPrompt, userContent stri
 		Timeout:      s.config.Timeout,
 	}
 
-	// For Bedrock, use a signing HTTP client
+	// OAuth tokens (Claude Code Max/Pro) require the anthropic-beta header to work
+	if bearerAuth != "" && auth.BetaHeader != "" {
+		params.ExtraHeaders = map[string]string{"anthropic-beta": auth.BetaHeader}
+	}
+
+	// For Bedrock, use the cached signing HTTP client.
 	if s.config.Provider == "bedrock" {
-		client, err := s.getBedrockHTTPClient()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create Bedrock HTTP client: %w", err)
+		if s.bedrockClient != nil {
+			params.HTTPClient = s.bedrockClient
+		} else {
+			client, err := s.buildBedrockHTTPClient()
+			if err != nil {
+				return nil, fmt.Errorf("failed to create Bedrock HTTP client: %w", err)
+			}
+			params.HTTPClient = client
 		}
-		params.HTTPClient = client
 	}
 
 	return external.CallLLM(ctx, params)
 }
 
-// getBedrockHTTPClient returns an HTTP client with SigV4 signing for Bedrock.
-func (s *Summarizer) getBedrockHTTPClient() (*http.Client, error) {
+// buildBedrockHTTPClient constructs an HTTP client with SigV4 signing for Bedrock.
+// Called once at construction time; the result is cached in s.bedrockClient.
+func (s *Summarizer) buildBedrockHTTPClient() (*http.Client, error) {
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
 		region = os.Getenv("AWS_DEFAULT_REGION")

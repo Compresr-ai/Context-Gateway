@@ -27,6 +27,9 @@ import (
 // runAgentCommand is the main entry point for the agent launcher.
 // It replaces start_agent.sh with native Go.
 func runAgentCommand(args []string) {
+	// Load .env files from standard locations (for COMPRESR_API_KEY, etc.)
+	loadEnvFiles()
+
 	// Start update check in background immediately so the network request
 	// runs in parallel with flag parsing and port discovery.
 	showUpdateNotification := CheckForUpdatesAsync()
@@ -38,7 +41,6 @@ func runAgentCommand(args []string) {
 		debugFlag       bool
 		portFlag        string
 		proxyMode       string
-		logDir          string
 		listFlag        bool
 		resetAPIKeyFlag bool
 		agentArg        string
@@ -134,9 +136,6 @@ parseLoop:
 			i++
 		}
 	}
-
-	// Load .env files
-	loadEnvFiles()
 
 	// Handle --stop flag - stop a running background gateway
 	if stopFlag {
@@ -274,18 +273,37 @@ parseLoop:
 
 	// Check if this is first run (no Compresr API key set)
 	var firstRun bool
+	var gatewayStatus *compresr.GatewayStatus
 	if !isCompresrAPIKeySet() {
 		if !runCompresrOnboarding() {
 			// User cancelled onboarding
 			os.Exit(0)
 		}
 		firstRun = true
+	} else {
+		// API key is set - validate it early before showing agent menu
+		var ok bool
+		gatewayStatus, ok = validateCompresrAPIKeyEarly()
+		if !ok {
+			os.Exit(0)
+		}
 	}
+
+	// Pre-start gateway so the dashboard is live while the user selects an agent.
+	// Skipped when user explicitly chose a config (-c menu), is in daemon mode,
+	// or when proxy is disabled.
+	var previewGW *gateway.Gateway
+	previewBrowserOpened := false
+	if proxyMode != "skip" && !showConfigMenu && !daemonFlag {
+		previewGW, previewBrowserOpened = startPreviewGateway(gatewayPort, debugFlag)
+	}
+
+	// Step 2: Show dashboard URL and account info (gateway is live above)
+	showPreSessionDashboard(gatewayStatus)
 
 	var ac *AgentConfig
 	var configData []byte
 	var configSource string
-	var createdNewConfig bool
 
 mainSelectionLoop:
 	for {
@@ -371,9 +389,7 @@ mainSelectionLoop:
 			}
 			if firstRunItems[idx].Value == "configure" {
 				configFlag = runConfigCreationWizard(agentArg, ac)
-				if configFlag != "" && configFlag != "__back__" {
-					createdNewConfig = true
-				} else {
+				if configFlag == "__back__" || configFlag == "" {
 					configFlag = ""
 				}
 			}
@@ -453,7 +469,6 @@ mainSelectionLoop:
 					if configFlag == "" {
 						os.Exit(0)
 					}
-					createdNewConfig = true
 				} else {
 					configFlag = configs[idx]
 				}
@@ -478,12 +493,6 @@ mainSelectionLoop:
 		}
 	}
 
-	if !createdNewConfig {
-		if !setupAnthropicAPIKey(ac) {
-			os.Exit(1)
-		}
-	}
-
 	// Export agent environment variables
 	exportAgentEnv(ac)
 
@@ -498,12 +507,6 @@ mainSelectionLoop:
 	var sessionDir string
 	var statusBar *tui.StatusBar
 	if proxyMode != "skip" && configData != nil && !isBackgroundParent {
-		// gatewayPort was already found early (before agent config loading)
-		// Verify it's still available (unlikely to change but be safe)
-		if isPortInUse(gatewayPort) {
-			_, _ = os.Stderr.WriteString("Error: port " + strconv.Itoa(gatewayPort) + " is no longer available\n")
-			os.Exit(1)
-		}
 
 		// Parse config early to check telemetry_enabled before setting env vars
 		earlyConfig, earlyErr := config.LoadFromBytes(configData)
@@ -543,11 +546,7 @@ mainSelectionLoop:
 			// Daemon mode: reuse session directory from parent process
 			sessionDir = sessionDirFlag
 		} else {
-			logsBase := logDir
-			if logsBase == "" {
-				logsBase = "logs"
-			}
-			sessionDir = prepareSessionPath(logsBase, sessionNameFlag)
+			sessionDir = prepareSessionPath("logs", agentArg, sessionNameFlag)
 		}
 
 		// Export session log paths for this agent (paths may not exist yet - lazy creation)
@@ -557,8 +556,12 @@ mainSelectionLoop:
 			_ = os.Setenv("SESSION_TELEMETRY_LOG", filepath.Join(sessionDir, "telemetry.jsonl"))
 			_ = os.Setenv("SESSION_COMPRESSION_LOG", filepath.Join(sessionDir, "tool_output_compression.jsonl"))
 			_ = os.Setenv("SESSION_TOOL_DISCOVERY_LOG", filepath.Join(sessionDir, "tool_discovery.jsonl"))
+			_ = os.Setenv("SESSION_TASK_OUTPUT_LOG", filepath.Join(sessionDir, "task_output"))
 			_ = os.Setenv("SESSION_COMPACTION_LOG", filepath.Join(sessionDir, "history_compaction.jsonl"))
 			_ = os.Setenv("SESSION_TRAJECTORY_LOG", filepath.Join(sessionDir, "trajectory.json"))
+			_ = os.Setenv("SESSION_TOOLS_LOG", filepath.Join(sessionDir, "session_tools.json"))
+			_ = os.Setenv("SESSION_STATS_LOG", filepath.Join(sessionDir, "session_stats.json"))
+			_ = os.Setenv("SESSION_EXPAND_CALLS_LOG", filepath.Join(sessionDir, "expand_context_calls.jsonl"))
 		}
 		_ = os.Setenv("SESSION_GATEWAY_LOG", filepath.Join(sessionDir, "gateway.log"))
 
@@ -621,14 +624,34 @@ mainSelectionLoop:
 		cfg.Monitoring.LogOutput = gatewayLogOutput
 		cfg.Monitoring.LogToStdout = false
 
-		// Check if the dashboard is already open before we start (to avoid re-opening the browser)
-		dashboardAlreadyOpen := isDashboardRunning(config.DefaultDashboardPort)
+		// Shutdown preview gateway now — kept alive until this point so the dashboard
+		// stays accessible during agent selection and session name entry.
+		// The port is freed immediately after Shutdown returns.
+		if previewGW != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = previewGW.Shutdown(ctx)
+			cancel()
+			previewGW = nil
+		}
+
+		// Verify port is still available (preview just freed it; another process could have grabbed it)
+		if isPortInUse(gatewayPort) {
+			_, _ = os.Stderr.WriteString("Error: port " + strconv.Itoa(gatewayPort) + " is no longer available\n")
+			os.Exit(1)
+		}
+
+		// Avoid re-opening the browser if the preview gateway already opened it
+		dashboardAlreadyOpen := previewBrowserOpened || isDashboardRunning(config.DefaultDashboardPort)
 
 		gw = gateway.New(cfg, configSource)
+		gw.SetVersion(Version)
 
-		// Configure lazy session creation (directory created on first LLM request)
+		// Configure lazy session creation (directory created on first LLM request).
+		// Pass the agent name so the session is pre-registered in the dashboard
+		// before any LLM requests arrive (needed for agents like Codex that wait
+		// for user input before making their first request).
 		if sessionDir != "" {
-			gw.SetLazySession(sessionDir, lazyConfigData)
+			gw.SetLazySession(sessionDir, lazyConfigData, ac.Agent.Name)
 		}
 
 		// Attach embedded React dashboard SPA
@@ -677,10 +700,16 @@ mainSelectionLoop:
 			registryName = ac.Agent.Name
 		}
 		dashboard.Register(gatewayPort, registryName, sessionDir)
-		defer dashboard.Deregister(gatewayPort)
+		defer func() {
+			dashboard.Deregister(gatewayPort)
+			// Close the browser tab only when this was the last running gateway instance.
+			if dashboard.ActiveCount() == 0 {
+				closeDashboardBrowserTab(config.DefaultDashboardPort)
+			}
+		}()
 
-		// Open dashboard in browser only if it wasn't already open
-		if !dashboardAlreadyOpen {
+		// Open dashboard in browser — skip in dev-frontend mode (Vite opens its own URL instead)
+		if !dashboardAlreadyOpen && os.Getenv("CONTEXT_GATEWAY_DEV_FRONTEND") == "" {
 			openBrowser(fmt.Sprintf("http://localhost:%d/dashboard/#/monitor", config.DefaultDashboardPort))
 		}
 
@@ -933,6 +962,70 @@ mainSelectionLoop:
 	}
 }
 
+// startPreviewGateway starts a minimal gateway with the fast_setup config so the
+// dashboard is live and browsable before the user selects an agent.
+// Returns the running gateway and whether the browser was opened.
+// Returns nil, false if the preview could not start.
+func startPreviewGateway(gatewayPort int, debugFlag bool) (*gateway.Gateway, bool) {
+	data, _, err := resolveConfig("fast_setup")
+	if err != nil {
+		return nil, false
+	}
+
+	cfg, err := config.LoadFromBytes(data)
+	if err != nil {
+		return nil, false
+	}
+
+	cfg.Server.Port = gatewayPort
+
+	// Preview gateway is ephemeral — disable ALL file-based monitoring so it
+	// never creates session directories or log files on disk.
+	// The dashboard is decoupled: it opens to monitor running gateways, not to
+	// start a session. Session directories must only appear when an agent runs.
+	cfg.Monitoring.LogToStdout = false
+	cfg.Monitoring.LogOutput = os.DevNull
+	cfg.Monitoring.TelemetryEnabled = false
+	cfg.Monitoring.TelemetryPath = ""
+	cfg.Monitoring.CompressionLogPath = ""
+	cfg.Monitoring.ToolDiscoveryLogPath = ""
+	cfg.Monitoring.TrajectoryEnabled = false
+	cfg.Monitoring.TrajectoryPath = ""
+
+	// Silence zerolog during preview so nothing leaks to the terminal.
+	// The real startup block resets this with the session log file.
+	if devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
+		setupLogging(debugFlag, devNull)
+		stdlog.SetOutput(devNull)
+		// devNull intentionally not closed here — zerolog holds a reference;
+		// setupLogging in the real startup block replaces the writer.
+	}
+
+	gw := gateway.New(cfg, "fast_setup")
+	gw.SetVersion(Version)
+	if dashFS, err := getDashboardFS(); err == nil {
+		gw.SetDashboardFS(dashFS)
+	}
+
+	go func() { _ = gw.Start() }()
+
+	if !waitForGateway(gatewayPort, 10*time.Second) {
+		// Preview failed to start — shut down cleanly and give up
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = gw.Shutdown(ctx)
+		cancel()
+		return nil, false
+	}
+
+	browserOpened := false
+	if os.Getenv("CONTEXT_GATEWAY_DEV_FRONTEND") == "" {
+		openBrowser(fmt.Sprintf("http://localhost:%d/dashboard/#/monitor", config.DefaultDashboardPort))
+		browserOpened = true
+	}
+
+	return gw, browserOpened
+}
+
 // showGatewayStatusBar displays the usage/balance status bar at startup
 // and sets the terminal title with persistent status info.
 func showGatewayStatusBar(port int, session string, costSource tui.CostSource) *tui.StatusBar {
@@ -1007,9 +1100,7 @@ func runPostSessionUpdate(gw *gateway.Gateway) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
-	// Use auth captured from the session's requests
-	authToken, authIsXAPIKey, authEndpoint := collector.GetAuth()
-	result, err := updater.Update(ctx, collector, authToken, authIsXAPIKey, authEndpoint)
+	result, err := updater.Update(ctx, collector, collector.GetAuth())
 	if err != nil {
 		printWarn(fmt.Sprintf("Post-session update failed: %v", err))
 		return
@@ -1020,4 +1111,73 @@ func runPostSessionUpdate(gw *gateway.Gateway) {
 	} else {
 		printInfo(fmt.Sprintf("CLAUDE.md: %s", result.Description))
 	}
+}
+
+// validateCompresrAPIKeyEarly validates the Compresr API key early in startup,
+// before agent selection. This uses only the environment variable.
+// Returns the gateway status (if available) and whether to continue startup.
+func validateCompresrAPIKeyEarly() (*compresr.GatewayStatus, bool) {
+	apiKey := os.Getenv("COMPRESR_API_KEY")
+	if apiKey == "" {
+		return nil, true // No key set, will be handled during onboarding
+	}
+
+	// Validate the API key by calling the status endpoint
+	fmt.Printf("  %s⏳ Validating API key...%s", tui.ColorDim, tui.ColorReset)
+
+	baseURL := os.Getenv("COMPRESR_BASE_URL")
+	if baseURL == "" {
+		baseURL = config.DefaultCompresrAPIBaseURL
+	}
+
+	client := compresr.NewClient(baseURL, apiKey)
+	status, err := client.GetGatewayStatus()
+
+	if err == nil {
+		fmt.Printf("\r\033[2K  %s✓ API key valid%s\n", tui.ColorGreen, tui.ColorReset)
+		return status, true
+	}
+
+	// Network / transient error: warn and continue — the key may be fine and
+	// the Compresr API is temporarily unreachable.
+	if !strings.Contains(err.Error(), "invalid API key") {
+		fmt.Printf("\r\033[2K") // clear the "Validating" spinner line
+		printWarn(fmt.Sprintf("Could not reach Compresr API: %v", err))
+		printInfo("Compression features may be unavailable this session.")
+		fmt.Println()
+		return nil, true
+	}
+
+	// Invalid / expired key: run the blocking re-auth flow (OAuth or paste).
+	fmt.Printf("\r\033[2K") // clear the "Validating" spinner line
+	if !runCompresrReauth() {
+		return nil, false
+	}
+
+	// Re-validate with whatever key is now active (may be empty if user skipped).
+	newKey := os.Getenv("COMPRESR_API_KEY")
+	if newKey == "" {
+		return nil, true
+	}
+	newClient := compresr.NewClient(baseURL, newKey)
+	newStatus, _ := newClient.GetGatewayStatus()
+	return newStatus, true
+}
+
+// showPreSessionDashboard prints step 2: account info and the upcoming dashboard URL.
+// status may be nil if the API was unreachable or the key was skipped.
+func showPreSessionDashboard(status *compresr.GatewayStatus) {
+	dashURL := fmt.Sprintf("http://localhost:%d/dashboard/", config.DefaultDashboardPort)
+	fmt.Printf("  %s%s%s\n", tui.ColorCyan, dashURL, tui.ColorReset)
+
+	if status != nil {
+		if status.MonthlyBudgetUSD > 0 {
+			fmt.Printf("  Credits:  %.2f remaining  (%.2f used this month / %.2f budget)\n",
+				status.CreditsRemainingUSD, status.CreditsUsedThisMonth, status.MonthlyBudgetUSD)
+		} else {
+			fmt.Printf("  Credits:  %.2f remaining  (%.2f used this month)\n",
+				status.CreditsRemainingUSD, status.CreditsUsedThisMonth)
+		}
+	}
+	fmt.Println()
 }

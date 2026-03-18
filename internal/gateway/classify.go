@@ -1,15 +1,4 @@
-// classify.go provides unified user message classification for the gateway.
-//
-// DESIGN: Instead of 6+ separate functions each trying to extract "user intent"
-// from request bodies, this file provides a single classification computed once
-// per request at the top of handleProxy. The result is carried through
-// PipelineContext to all consumers.
-//
-// This fixes bugs where different extraction functions disagreed:
-//   - Bug A: System-injected content leaking into compression context
-//   - Bug B: Unstable session IDs from injected XML tags
-//   - Bug C: Array content blocks missed in trajectory extraction
-//   - Bug D: Human text lost when tool_result blocks coexist
+// classify.go provides unified user message classification, computed once per request.
 package gateway
 
 import (
@@ -20,27 +9,20 @@ import (
 )
 
 // MessageClassification is the single source of truth for user message analysis.
-// Computed once per request at the top of handleProxy, then carried through
-// PipelineContext to all consumers.
 type MessageClassification struct {
-	// IsNewUserTurn is true when a human initiated this request (not a tool loop).
-	// False when the preceding assistant used tools and this message is the automated response.
+	// IsNewUserTurn is true when a human initiated this request (not a tool response loop).
 	IsNewUserTurn bool
 
 	// CleanUserPrompt is the human-typed text with injected tags stripped.
-	// Used for trajectory recording, prompt history, and compression context.
 	CleanUserPrompt string
 
-	// RawLastUserContent is ALL text from the last user message, unfiltered.
-	// Used for /savings command detection where exact content matching is needed.
+	// RawLastUserContent is all text from the last user message, unfiltered.
 	RawLastUserContent string
 
 	// FirstUserCleanContent is the first user message with injected tags stripped.
-	// Used for stable session ID hashing (immune to mid-conversation tag changes).
 	FirstUserCleanContent string
 
-	// IsMainAgent is true when the request is from the main Claude Code agent
-	// (not a subagent). Determined by checking for "You are Claude Code" in system prompt.
+	// IsMainAgent is true when the request is from the main Claude Code agent (not a subagent).
 	IsMainAgent bool
 
 	// HasToolResults is true when the last user message contains tool_result blocks.

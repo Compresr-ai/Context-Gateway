@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
+	"github.com/compresr/context-gateway/internal/tokenizer"
 )
 
 // SessionEvent represents a single high-level event observed during the session.
@@ -34,9 +37,7 @@ type SessionCollector struct {
 	compactionCount int
 
 	// Captured auth for post-session LLM call
-	authToken     string
-	authIsXAPIKey bool
-	authEndpoint  string
+	auth authtypes.CapturedAuth
 }
 
 // NewSessionCollector creates a new collector.
@@ -78,15 +79,15 @@ func (c *SessionCollector) RecordToolCalls(toolNames []string) {
 }
 
 // RecordCompression records a compression event.
-func (c *SessionCollector) RecordCompression(toolName string, originalBytes, compressedBytes int) {
+func (c *SessionCollector) RecordCompression(toolName string, originalTokens, compressedTokens int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	ratio := float64(compressedBytes) / float64(max(originalBytes, 1))
+	ratio := tokenizer.CompressionRatio(originalTokens, compressedTokens)
 	c.events = append(c.events, SessionEvent{
 		Timestamp: time.Now(),
 		Type:      "compression",
-		Summary:   fmt.Sprintf("Compressed %s: %d→%d bytes (%.0f%%)", toolName, originalBytes, compressedBytes, ratio*100),
+		Summary:   fmt.Sprintf("Compressed %s: %d→%d tokens (%.0f%% saved)", toolName, originalTokens, compressedTokens, ratio*100),
 	})
 }
 
@@ -172,22 +173,18 @@ func (c *SessionCollector) HasEvents() bool {
 }
 
 // CaptureAuth stores auth credentials from incoming requests for use in post-session LLM calls.
-func (c *SessionCollector) CaptureAuth(token string, isXAPIKey bool, endpoint string) {
-	if token == "" {
+func (c *SessionCollector) CaptureAuth(auth authtypes.CapturedAuth) {
+	if !auth.HasAuth() {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.authToken = token
-	c.authIsXAPIKey = isXAPIKey
-	if endpoint != "" {
-		c.authEndpoint = endpoint
-	}
+	c.auth = auth
 }
 
 // GetAuth returns the captured auth credentials.
-func (c *SessionCollector) GetAuth() (token string, isXAPIKey bool, endpoint string) {
+func (c *SessionCollector) GetAuth() authtypes.CapturedAuth {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.authToken, c.authIsXAPIKey, c.authEndpoint
+	return c.auth
 }

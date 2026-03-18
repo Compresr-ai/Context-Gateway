@@ -1,8 +1,4 @@
 // Hub manages WebSocket connections for real-time dashboard updates.
-//
-// DESIGN: Fan-out broadcaster. When session state changes, the hub serializes
-// the full session list once and writes it to all connected clients.
-// Uses the coder/websocket package already in go.mod.
 package dashboard
 
 import (
@@ -130,7 +126,7 @@ func (h *Hub) ClientCount() int {
 }
 
 // BroadcastEvent sends a typed event (e.g., "config_updated") to all connected clients.
-func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
+func (h *Hub) BroadcastEvent(eventType string, payload any) {
 	msg := wsMessage{
 		Type:      eventType,
 		Timestamp: time.Now().Format(time.RFC3339),
@@ -166,8 +162,8 @@ func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
 
 // wsMessage is the JSON envelope sent over WebSocket.
 type wsMessage struct {
-	Type      string      `json:"type"`
-	Timestamp string      `json:"timestamp"`
-	Sessions  []Session   `json:"sessions,omitempty"`
-	Payload   interface{} `json:"payload,omitempty"`
+	Type      string    `json:"type"`
+	Timestamp string    `json:"timestamp"`
+	Sessions  []Session `json:"sessions,omitempty"`
+	Payload   any       `json:"payload,omitempty"`
 }

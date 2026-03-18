@@ -341,8 +341,20 @@ func resolveConfig(userConfig string) ([]byte, string, error) {
 		return data, path, nil
 	}
 
-	// Fall back to embedded config
+	// Fall back to embedded config — materialize to user config dir so the
+	// global config file exists on disk and dashboard changes persist across restarts.
 	if data, err := getEmbeddedConfig(name); err == nil {
+		if homeDir != "" {
+			userConfigDir := filepath.Join(homeDir, ".config", "context-gateway", "configs")
+			if mkErr := os.MkdirAll(userConfigDir, 0750); mkErr == nil {
+				persistPath := filepath.Join(userConfigDir, name+".yaml")
+				// #nosec G306 G703 -- config file, not secret; path constructed from validated inputs
+				if wErr := os.WriteFile(persistPath, data, 0644); wErr == nil {
+					return data, persistPath, nil
+				}
+			}
+		}
+		// Materialization failed — return as embedded (dashboard changes won't persist)
 		return data, "(embedded) " + name + ".yaml", nil
 	}
 
@@ -502,44 +514,56 @@ func listAvailableConfigsPrint() {
 	}
 }
 
+// sanitizeName replaces characters that are not filesystem-safe with underscores.
+func sanitizeName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, s)
+}
+
 // prepareSessionPath computes a session directory path without creating it.
 // The actual directory is created lazily on first LLM request via ensureSessionDir().
 // This prevents empty session folders when the gateway starts but receives no traffic.
-// If customName is non-empty, it is used as the session directory name instead of
-// the auto-generated "session_N_timestamp" format.
-func prepareSessionPath(baseDir string, customName string) string {
+//
+// Auto-generated format: <agent>_<N>_<YYYYMMDD_HHMMSS>  (e.g. claude_code_3_20240315_143022)
+// If customName is non-empty it is used as-is (sanitized) without an agent prefix.
+func prepareSessionPath(baseDir string, agentName string, customName string) string {
 	_ = os.MkdirAll(baseDir, 0750)
 
 	if customName != "" {
-		// Sanitize: replace spaces/special chars with underscores, keep it filesystem-safe
-		safe := strings.Map(func(r rune) rune {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-				return r
-			}
-			return '_'
-		}, customName)
-		return filepath.Join(baseDir, safe)
+		return filepath.Join(baseDir, sanitizeName(customName))
 	}
 
+	prefix := sanitizeName(agentName)
+	if prefix == "" {
+		prefix = "session"
+	}
 	now := time.Now().Format("20060102_150405")
 
-	// Find next session number
+	// Find the highest session number already used for this agent prefix.
 	sessionNum := 1
 	entries, err := os.ReadDir(baseDir)
 	if err == nil {
+		needle := prefix + "_"
 		for _, e := range entries {
-			if e.IsDir() && strings.HasPrefix(e.Name(), "session_") {
-				parts := strings.SplitN(e.Name(), "_", 3)
-				if len(parts) >= 2 {
-					if n, err := strconv.Atoi(parts[1]); err == nil && n >= sessionNum {
-						sessionNum = n + 1
-					}
+			if !e.IsDir() || !strings.HasPrefix(e.Name(), needle) {
+				continue
+			}
+			// Name is "<prefix>_<N>_<date>" — parse the part right after the prefix.
+			rest := e.Name()[len(needle):]
+			parts := strings.SplitN(rest, "_", 2)
+			if len(parts) >= 1 {
+				if n, err := strconv.Atoi(parts[0]); err == nil && n >= sessionNum {
+					sessionNum = n + 1
 				}
 			}
 		}
 	}
 
-	return filepath.Join(baseDir, fmt.Sprintf("session_%d_%s", sessionNum, now))
+	return filepath.Join(baseDir, fmt.Sprintf("%s_%d_%s", prefix, sessionNum, now))
 }
 
 // exportAgentEnv sets environment variables defined in the agent config.

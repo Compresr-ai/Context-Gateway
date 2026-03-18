@@ -102,24 +102,28 @@ func TestTracker_AllSessions(t *testing.T) {
 	assert.True(t, ids["session2"])
 }
 
-func TestTracker_SessionCapFallbackToGlobalCap(t *testing.T) {
+func TestTracker_SessionCapEnforcedPerSession(t *testing.T) {
 	tracker := costcontrol.NewTracker(costcontrol.CostControlConfig{
 		Enabled:    true,
-		SessionCap: 0.005, // Legacy wizard behavior: interpreted as aggregate cap
+		SessionCap: 0.005,
 		GlobalCap:  0,
 	})
 
 	// Each request costs ~$0.0035 on haiku.
 	tracker.RecordUsage("s1", "claude-haiku-4-5", 1000, 500, 0, 0)
 	result1 := tracker.CheckBudget("s1")
-	assert.True(t, result1.Allowed)
-	assert.Equal(t, 0.0, result1.Cap, "session cap should be normalized away")
-	assert.InDelta(t, 0.005, result1.GlobalCap, 0.000001)
+	assert.True(t, result1.Allowed, "first request under session cap")
+	assert.InDelta(t, 0.005, result1.Cap, 0.000001, "session cap should be preserved")
+	assert.Equal(t, 0.0, result1.GlobalCap, "global cap should remain 0")
 
-	tracker.RecordUsage("s2", "claude-haiku-4-5", 1000, 500, 0, 0)
-	result2 := tracker.CheckBudget("s2")
-	assert.False(t, result2.Allowed, "aggregate cap should block across sessions")
-	assert.Greater(t, result2.GlobalCost, result2.GlobalCap)
+	// Second request on same session pushes it over the per-session cap
+	tracker.RecordUsage("s1", "claude-haiku-4-5", 1000, 500, 0, 0)
+	result2 := tracker.CheckBudget("s1")
+	assert.False(t, result2.Allowed, "session cap should block this session")
+
+	// Different session should still be allowed (per-session, not global)
+	result3 := tracker.CheckBudget("s2")
+	assert.True(t, result3.Allowed, "different session should not be blocked by s1's cap")
 }
 
 func TestTracker_GlobalCapBlocks(t *testing.T) {

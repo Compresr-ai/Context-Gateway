@@ -91,7 +91,7 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
 					Endpoint:  "/api/compress/history/",
-					AuthParam: "cmp_test-key",
+					APIKey: "cmp_test-key",
 					Model:     "hcc_espresso_v1",
 					Timeout:   60 * time.Second,
 				},
@@ -113,7 +113,7 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
 					Endpoint:  "",
-					AuthParam: "cmp_test-key",
+					APIKey: "cmp_test-key",
 					Model:     "hcc_espresso_v1",
 					Timeout:   60 * time.Second,
 				},
@@ -127,7 +127,7 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
 					Endpoint:  "/api/compress/history/",
-					AuthParam: "",
+					APIKey: "",
 					Model:     "hcc_espresso_v1",
 					Timeout:   60 * time.Second,
 				},
@@ -141,7 +141,7 @@ func TestSummarizerConfig_Validation(t *testing.T) {
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
 					Endpoint:  "/api/compress/history/",
-					AuthParam: "cmp_test-key",
+					APIKey: "cmp_test-key",
 					Model:     "",
 					Timeout:   60 * time.Second,
 				},
@@ -199,7 +199,7 @@ func TestSummarizer_CreationWithAPIStrategy(t *testing.T) {
 		Strategy: preemptive.StrategyCompresr,
 		Compresr: &preemptive.CompresrConfig{
 			Endpoint:  "/api/compress/history/",
-			AuthParam: "cmp_test-key",
+			APIKey: "cmp_test-key",
 			Model:     "hcc_espresso_v1",
 			Timeout:   60 * time.Second,
 		},

@@ -26,17 +26,14 @@ func saveConfig(state *ConfigState) string {
 		state.CompactCompresrModel,
 		state.ToolDiscoveryEnabled,
 		state.ToolDiscoveryStrategy,
-		state.ToolDiscoveryMinTools,
-		state.ToolDiscoveryMaxTools,
-		state.ToolDiscoveryTargetRatio,
-		state.ToolDiscoverySearchFallback,
+		state.ToolDiscoveryTokenThreshold,
 		state.ToolDiscoveryModel,
 		state.ToolOutputEnabled,
 		state.ToolOutputStrategy,
 		state.ToolOutputProvider.Name,
 		state.ToolOutputModel,
 		state.ToolOutputAPIKey,
-		state.ToolOutputMinBytes,
+		state.ToolOutputMinTokens,
 		state.ToolOutputTargetRatio,
 		state.TelemetryEnabled,
 	)
@@ -62,7 +59,7 @@ func saveConfig(state *ConfigState) string {
 
 	fmt.Printf("\n%s✓%s Config saved: %s\n", tui.ColorGreen, tui.ColorReset, configPath)
 	if state.CostCap > 0 {
-		fmt.Printf("  %sDashboard will be available at http://localhost:18080/dashboard/%s\n", tui.ColorCyan, tui.ColorReset)
+		fmt.Printf("  %sDashboard will be available at http://localhost:%d/dashboard/%s\n", tui.ColorCyan, config.DefaultDashboardPort, tui.ColorReset)
 	}
 	return state.Name
 }
@@ -77,17 +74,14 @@ func generateCustomConfigYAML(
 	compactCompresrModel string,
 	toolDiscoveryEnabled bool,
 	toolDiscoveryStrategy string,
-	toolDiscoveryMinTools int,
-	toolDiscoveryMaxTools int,
-	toolDiscoveryTargetRatio float64,
-	toolDiscoverySearchFallback bool,
+	toolDiscoveryTokenThreshold int,
 	toolDiscoveryModel string,
 	toolOutputEnabled bool,
 	toolOutputStrategy string,
 	toolOutputProvider string,
 	toolOutputModel string,
 	toolOutputAPIKey string,
-	toolOutputMinBytes int,
+	toolOutputMinTokens int,
 	toolOutputTargetRatio float64,
 	telemetryEnabled bool,
 ) string {
@@ -123,7 +117,7 @@ func generateCustomConfigYAML(
 
 	if toolOutputStrategy == pipes.StrategyCompresr {
 		toolOutputEndpoint = fmt.Sprintf("${COMPRESR_BASE_URL:-%s}/v1/tool-output/compress", config.DefaultCompresrAPIBaseURL)
-		toolOutputAPIKey = "${COMPRESR_API_KEY:-}" // #nosec G101 -- env var reference, not a credential
+		// api_key is inherited from the top-level compresr section — no inline key needed
 	} else {
 		switch effectiveToolOutputProvider {
 		case "anthropic":
@@ -158,7 +152,6 @@ func generateCustomConfigYAML(
     token_estimate_ratio: 4
     compresr:
       endpoint: "/api/compress/history/"
-      api_key: "${COMPRESR_API_KEY:-}"
       model: "%s"
       timeout: 60s`, preemptive.StrategyCompresr, compactCompresrModel)
 	} else {
@@ -174,7 +167,8 @@ func generateCustomConfigYAML(
 	// Build tool_output section based on strategy
 	var toolOutputSection string
 	if toolOutputStrategy == pipes.StrategyCompresr {
-		// Compresr strategy: use Compresr API endpoint, no provider field
+		// Compresr strategy: use Compresr API endpoint, no provider field.
+		// api_key is inherited from the top-level compresr section.
 		toolOutputSection = fmt.Sprintf(`  tool_output:
     enabled: %t
     strategy: "%s"
@@ -182,13 +176,12 @@ func generateCustomConfigYAML(
     include_expand_hint: true
     compresr:
       endpoint: "%s"
-      api_key: "%s"
       model: "%s"
       timeout: 30s
-    min_bytes: %d
-    target_compression_ratio: %.2f`,
-			toolOutputEnabled, toolOutputStrategy, toolOutputEndpoint, toolOutputAPIKey, toolOutputModel,
-			toolOutputMinBytes, toolOutputTargetRatio)
+    min_tokens: %d
+    target_compression_ratio: %.2f  # 0.1 = least aggressive (remove 10%%), 0.9 = most aggressive (remove 90%%)`,
+			toolOutputEnabled, toolOutputStrategy, toolOutputEndpoint, toolOutputModel,
+			toolOutputMinTokens, toolOutputTargetRatio)
 	} else {
 		// External provider strategy: reference provider from providers section, no api field
 		toolOutputSection = fmt.Sprintf(`  tool_output:
@@ -197,10 +190,10 @@ func generateCustomConfigYAML(
     provider: "%s"
     enable_expand_context: true
     include_expand_hint: true
-    min_bytes: %d
-    target_compression_ratio: %.2f`,
+    min_tokens: %d
+    target_compression_ratio: %.2f  # 0.1 = least aggressive (remove 10%%), 0.9 = most aggressive (remove 90%%)`,
 			toolOutputEnabled, toolOutputStrategy, effectiveToolOutputProvider,
-			toolOutputMinBytes, toolOutputTargetRatio)
+			toolOutputMinTokens, toolOutputTargetRatio)
 	}
 
 	return fmt.Sprintf(`# =============================================================================
@@ -221,8 +214,11 @@ server:
   write_timeout: 1000s
 
 urls:
-  gateway: "http://localhost:${GATEWAY_PORT:-18081}"
   compresr: "${COMPRESR_BASE_URL:-%s}"
+
+# Compresr credentials — defined once here, inherited by all pipes.
+compresr:
+  api_key: "${COMPRESR_API_KEY:-}"
 
 %s
 
@@ -251,13 +247,9 @@ pipes:
     strategy: "%s"
     compresr:
       endpoint: "${COMPRESR_BASE_URL:-%s}/api/compress/tool-discovery/"
-      api_key: "${COMPRESR_API_KEY:-}"
       model: "%s"
       timeout: 10s
-    min_tools: %d
-    max_tools: %d
-    target_ratio: %.2f
-    enable_search_fallback: %t
+    token_threshold: %d
 
 store:
   type: "memory"
@@ -279,10 +271,12 @@ monitoring:
   telemetry_path: "${SESSION_TELEMETRY_LOG:-logs/telemetry.jsonl}"
   compression_log_path: "${SESSION_COMPRESSION_LOG:-logs/tool_output_compression.jsonl}"
   tool_discovery_log_path: "${SESSION_TOOL_DISCOVERY_LOG:-logs/tool_discovery.jsonl}"
-`, name, name, config.DefaultCompresrAPIBaseURL, providersSection, triggerThreshold, summarizerSection, costCapEnabled, costCap,
+  task_output_log_path: "${SESSION_TASK_OUTPUT_LOG:-logs/task_output}"
+`, name, name, config.DefaultCompresrAPIBaseURL,
+		providersSection, triggerThreshold, summarizerSection, costCapEnabled, costCap,
 		toolOutputSection,
-		toolDiscoveryEnabled, toolDiscoveryStrategy, config.DefaultCompresrAPIBaseURL, toolDiscoveryModel, toolDiscoveryMinTools, toolDiscoveryMaxTools,
-		toolDiscoveryTargetRatio, toolDiscoverySearchFallback, slackEnabled, telemetryEnabled)
+		toolDiscoveryEnabled, toolDiscoveryStrategy, config.DefaultCompresrAPIBaseURL, toolDiscoveryModel,
+		toolDiscoveryTokenThreshold, slackEnabled, telemetryEnabled)
 }
 
 // getProviderKeyURL returns the URL where users can get API keys for a provider.

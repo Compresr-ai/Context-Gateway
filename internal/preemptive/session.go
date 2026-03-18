@@ -5,6 +5,7 @@
 package preemptive
 
 import (
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,23 +36,48 @@ type Session struct {
 	SummaryCompletedAt  *time.Time `json:"summary_completed_at,omitempty"`
 	SummaryUsedAt       *time.Time `json:"summary_used_at,omitempty"`
 	CompactionUseCount  int        `json:"compaction_use_count"`
+
+	// element is this session's node in SessionManager.sessionOrder (insertion-order list).
+	// Used for O(1) eviction. Not serialized.
+	element *list.Element
 }
 
 // SessionManager manages conversation sessions.
 type SessionManager struct {
-	sessions map[string]*Session
-	mu       sync.RWMutex
-	config   SessionConfig
+	sessions     map[string]*Session
+	sessionOrder *list.List // insertion-order list for O(1) LRU eviction
+	mu           sync.RWMutex
+	config       SessionConfig
+	stopChan     chan struct{}  // closed by Close() to stop the cleanup goroutine
+	wg           sync.WaitGroup // waits for cleanup goroutine to exit
+	maxSessions  int            // Maximum number of sessions to keep in memory
 }
 
 // NewSessionManager creates a new session manager.
 func NewSessionManager(cfg SessionConfig) *SessionManager {
+	const defaultMaxSessions = 500 // Limit RAM growth: ~20KB per session = ~10MB total
 	sm := &SessionManager{
-		sessions: make(map[string]*Session),
-		config:   cfg,
+		sessions:     make(map[string]*Session),
+		sessionOrder: list.New(),
+		config:       cfg,
+		stopChan:     make(chan struct{}),
+		maxSessions:  defaultMaxSessions,
 	}
+	sm.wg.Add(1)
 	go sm.cleanup()
 	return sm
+}
+
+// Close stops the background cleanup goroutine and waits for it to exit.
+// Should be called when the SessionManager is no longer needed (e.g., on gateway shutdown).
+func (sm *SessionManager) Close() {
+	select {
+	case <-sm.stopChan:
+		// Already closed
+	default:
+		close(sm.stopChan)
+	}
+	sm.wg.Wait()
 }
 
 // GenerateSessionID creates a stable session ID from conversation messages.
@@ -68,7 +94,7 @@ func (sm *SessionManager) GenerateSessionID(messages []json.RawMessage) string {
 
 	// Find the FIRST user message - this is the task identifier that never changes
 	for _, msg := range messages {
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		if err := json.Unmarshal(msg, &parsed); err != nil {
 			continue
 		}
@@ -105,7 +131,7 @@ func (sm *SessionManager) GenerateSessionIDLegacy(messages []json.RawMessage) st
 
 	h := sha256.New()
 	for i := 0; i < count; i++ {
-		var msg map[string]interface{}
+		var msg map[string]any
 		if err := json.Unmarshal(messages[i], &msg); err != nil {
 			h.Write(messages[i])
 		} else {
@@ -125,7 +151,15 @@ func (sm *SessionManager) GetOrCreateSession(sessionID, model string, maxTokens 
 
 	if s, ok := sm.sessions[sessionID]; ok {
 		s.LastUpdated = time.Now()
+		if s.element != nil {
+			sm.sessionOrder.MoveToBack(s.element)
+		}
 		return s
+	}
+
+	// Enforce session limit: evict oldest session if at capacity
+	if len(sm.sessions) >= sm.maxSessions {
+		sm.evictOldestSessionLocked()
 	}
 
 	s := &Session{
@@ -136,8 +170,23 @@ func (sm *SessionManager) GetOrCreateSession(sessionID, model string, maxTokens 
 		MaxContextTokens: maxTokens,
 		Model:            model,
 	}
+	s.element = sm.sessionOrder.PushBack(sessionID)
 	sm.sessions[sessionID] = s
 	return s
+}
+
+// evictOldestSessionLocked removes the LRU session in O(1) via sessionOrder list (called with lock held).
+func (sm *SessionManager) evictOldestSessionLocked() {
+	front := sm.sessionOrder.Front()
+	if front == nil {
+		return
+	}
+	oldestID, _ := front.Value.(string)
+	sm.sessionOrder.Remove(front)
+	if s, ok := sm.sessions[oldestID]; ok {
+		s.element = nil
+	}
+	delete(sm.sessions, oldestID)
 }
 
 // Get retrieves a session by ID.
@@ -229,7 +278,7 @@ func (sm *SessionManager) resetSessionLocked(s *Session) {
 }
 
 // Stats returns session statistics.
-func (sm *SessionManager) Stats() map[string]interface{} {
+func (sm *SessionManager) Stats() map[string]any {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -238,15 +287,13 @@ func (sm *SessionManager) Stats() map[string]interface{} {
 		states[s.State]++
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"total_sessions": len(sm.sessions),
 		"by_state":       states,
 	}
 }
 
-// =============================================================================
 // FUZZY MATCHING - For subagents and edge cases
-// =============================================================================
 
 // FuzzyMatchResult contains the result of a fuzzy session match.
 type FuzzyMatchResult struct {
@@ -410,19 +457,7 @@ func absInt(x int) int {
 	return x
 }
 
-// =============================================================================
-// ADDITIONAL API METHODS (aliases and extensions)
-// =============================================================================
-
-// GetSession is an alias for Get.
-func (sm *SessionManager) GetSession(sessionID string) *Session {
-	return sm.Get(sessionID)
-}
-
-// UpdateSession is an alias for Update.
-func (sm *SessionManager) UpdateSession(sessionID string, fn func(*Session)) error {
-	return sm.Update(sessionID, fn)
-}
+// ADDITIONAL API METHODS
 
 // MarkSummaryUsed marks the session's summary as used and returns an error if not found.
 func (sm *SessionManager) MarkSummaryUsed(sessionID string) error {
@@ -444,15 +479,14 @@ func (sm *SessionManager) MarkSummaryUsed(sessionID string) error {
 	return nil
 }
 
-// ResetSession resets a session to idle state.
-func (sm *SessionManager) ResetSession(sessionID string) {
-	sm.Reset(sessionID)
-}
-
 // DeleteSession removes a session completely.
 func (sm *SessionManager) DeleteSession(sessionID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if s, ok := sm.sessions[sessionID]; ok && s.element != nil {
+		sm.sessionOrder.Remove(s.element)
+		s.element = nil
+	}
 	delete(sm.sessions, sessionID)
 }
 
@@ -497,18 +531,29 @@ func (sm *SessionManager) InvalidateSummaryIfNewMessages(sessionID string, messa
 }
 
 // cleanup periodically removes expired sessions.
+// OPTIMIZED: Runs every 10 minutes (was 5) to reduce CPU overhead.
 func (sm *SessionManager) cleanup() {
-	ticker := time.NewTicker(5 * time.Minute)
+	defer sm.wg.Done()
+	ticker := time.NewTicker(10 * time.Minute) // Reduced frequency from 5min to 10min
 	defer ticker.Stop()
 
-	for range ticker.C {
-		sm.mu.Lock()
-		now := time.Now()
-		for id, s := range sm.sessions {
-			if now.Sub(s.LastUpdated) > sm.config.SummaryTTL {
-				delete(sm.sessions, id)
+	for {
+		select {
+		case <-sm.stopChan:
+			return
+		case <-ticker.C:
+			sm.mu.Lock()
+			now := time.Now()
+			for id, s := range sm.sessions {
+				if now.Sub(s.LastUpdated) > sm.config.SummaryTTL {
+					if s.element != nil {
+						sm.sessionOrder.Remove(s.element)
+						s.element = nil
+					}
+					delete(sm.sessions, id)
+				}
 			}
+			sm.mu.Unlock()
 		}
-		sm.mu.Unlock()
 	}
 }

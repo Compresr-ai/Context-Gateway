@@ -9,9 +9,7 @@ import (
 	"golang.org/x/term"
 )
 
-// =============================================================================
 // WIZARD FORM - Single-page multi-field form
-// =============================================================================
 
 // FieldType represents the type of a wizard field.
 type FieldType int
@@ -38,7 +36,7 @@ type WizardField struct {
 
 // WizardResult contains all field values after wizard completion.
 type WizardResult struct {
-	Values map[string]interface{} // Field ID -> value
+	Values map[string]any // Field ID -> value
 }
 
 // RunWizard displays a single-page wizard form with all fields visible.
@@ -322,7 +320,7 @@ func RunWizard(title string, fields []WizardField) (*WizardResult, error) {
 			case ' ': // Space - submit form
 				// Build result
 				result := &WizardResult{
-					Values: make(map[string]interface{}),
+					Values: make(map[string]any),
 				}
 				for _, f := range activeFields {
 					switch f.Type {
@@ -348,7 +346,7 @@ func runWizardFallback(title string, fields []WizardField) (*WizardResult, error
 	fmt.Printf("%s%s%s\n\n", ColorDim, strings.Repeat("─", 50), ColorReset)
 
 	result := &WizardResult{
-		Values: make(map[string]interface{}),
+		Values: make(map[string]any),
 	}
 
 	reader := bufio.NewReader(os.Stdin)

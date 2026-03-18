@@ -389,7 +389,7 @@ func extractShadowIDFromOpenAIRequest(body []byte) string {
 	bodyStr := string(body)
 
 	// Try direct match first
-	idx := strings.Index(bodyStr, "<<<SHADOW:")
+	idx := strings.Index(bodyStr, "[REF:")
 	if idx == -1 {
 		idx = strings.Index(bodyStr, "SHADOW:")
 	}

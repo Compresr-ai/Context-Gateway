@@ -10,7 +10,6 @@ import (
 )
 
 // registry is the global phantom tool registry.
-// Tools register themselves via init() in their definition files.
 var registry = &Registry{
 	tools: make(map[string]*PhantomTool),
 	stubs: &StubBuilder{},
@@ -20,12 +19,11 @@ var registry = &Registry{
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]*PhantomTool
-	order []string // insertion order for deterministic iteration
+	order []string
 	stubs *StubBuilder
 }
 
 // Register adds a phantom tool to the global registry.
-// Typically called from init() in each tool's definition file.
 func Register(tool PhantomTool) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
@@ -71,7 +69,6 @@ func DetectFormat(body []byte, provider adapters.Provider) ProviderFormat {
 		return FormatGemini
 	}
 	if provider == adapters.ProviderOpenAI || provider == adapters.ProviderOllama || provider == adapters.ProviderLiteLLM || provider == adapters.ProviderMiniMax {
-		// Responses API: has "input" but no "messages"
 		hasInput := gjson.GetBytes(body, "input").Exists()
 		hasMessages := gjson.GetBytes(body, "messages").Exists()
 		if hasInput && !hasMessages {
@@ -79,13 +76,10 @@ func DetectFormat(body []byte, provider adapters.Provider) ProviderFormat {
 		}
 		return FormatOpenAIChat
 	}
-	// Anthropic, Bedrock, unknown -> Anthropic format
 	return FormatAnthropic
 }
 
 // InjectAll injects all registered phantom tools into the request body.
-// Uses sjson append with dedup checking to preserve KV-cache prefix.
-// Returns the modified body and any error.
 func InjectAll(body []byte, provider adapters.Provider) ([]byte, error) {
 	registry.mu.RLock()
 	defer registry.mu.RUnlock()
@@ -109,28 +103,7 @@ func InjectAll(body []byte, provider adapters.Provider) ([]byte, error) {
 	return body, nil
 }
 
-// InjectByName injects a specific phantom tool by name into the request body.
-// Returns the original body unchanged if the tool is not found.
-func InjectByName(body []byte, name string, provider adapters.Provider) ([]byte, error) {
-	registry.mu.RLock()
-	tool, exists := registry.tools[name]
-	registry.mu.RUnlock()
-
-	if !exists {
-		return body, nil
-	}
-
-	format := DetectFormat(body, provider)
-	toolJSON := tool.GetJSON(format)
-	if toolJSON == nil {
-		return body, nil
-	}
-
-	return InjectPhantomTool(body, tool.Name, toolJSON)
-}
-
 // BuildStub generates a minimal tool stub for the given tool name and provider.
-// Used when phantom tool calls appear in history and the tool must be in tools[].
 func BuildStub(toolName string, provider adapters.Provider, body []byte) []byte {
 	format := DetectFormat(body, provider)
 	return registry.stubs.BuildStub(toolName, format)

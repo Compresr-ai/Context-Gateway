@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,9 +57,10 @@ func (g *Gateway) buildUnifiedReportData() monitoring.UnifiedReportData {
 	return data
 }
 
-// getSavingsReport returns the best available savings report.
-// Prefers aggregator (log-based) but falls back to in-memory savings tracker
-// when the aggregator has no data (e.g., telemetry logging is disabled).
+// getSavingsReport returns the savings report from the LogAggregator.
+// The LogAggregator is the single source of truth for savings data — it parses
+// the authoritative JSONL telemetry files on disk. The SavingsTracker records
+// real-time events but is not used as a report source (BUG-011 fix).
 // sessionID: "all" for global, specific session name, or "" to default to current session.
 func (g *Gateway) getSavingsReport(sessionID string) monitoring.SavingsReport {
 	// Default to current session if no session specified and we have one
@@ -68,34 +71,12 @@ func (g *Gateway) getSavingsReport(sessionID string) monitoring.SavingsReport {
 	// "all" means global report (across all sessions)
 	useGlobal := sessionID == "" || sessionID == "all"
 
-	// Try aggregator first
+	// LogAggregator is the single source of truth — always use it.
 	if g.aggregator != nil {
-		var sr monitoring.SavingsReport
 		if useGlobal {
-			sr = g.aggregator.GetReport()
-		} else {
-			sr = g.aggregator.GetReportForSession(sessionID)
+			return g.aggregator.GetReport()
 		}
-		if hasSavingsData(sr) {
-			return sr
-		}
-	}
-
-	// Fallback to in-memory savings tracker.
-	// The savings tracker stores sessions under hash-based IDs (from ComputeSessionID)
-	// which differ from the folder-based currentSessionID. Use global report as fallback
-	// since all data in this gateway instance belongs to the current agent session.
-	if g.savings != nil {
-		if useGlobal {
-			return g.savings.GetReport()
-		}
-		sr := g.savings.GetReportForSession(sessionID)
-		if hasSavingsData(sr) {
-			return sr
-		}
-		// Session ID didn't match (hash vs folder ID mismatch) — fall back to global.
-		// This is correct because the gateway serves a single agent session.
-		return g.savings.GetReport()
+		return g.aggregator.GetReportForSession(sessionID)
 	}
 
 	return monitoring.SavingsReport{}
@@ -103,7 +84,8 @@ func (g *Gateway) getSavingsReport(sessionID string) monitoring.SavingsReport {
 
 func hasSavingsData(sr monitoring.SavingsReport) bool {
 	return sr.TotalRequests > 0 ||
-		// sr.TotalTokensSaved > 0 ||
+		sr.TokensSaved > 0 || // Tool output compression
+		sr.TotalTokensSaved > 0 ||
 		sr.CostSavedUSD > 0 ||
 		sr.CompressedCostUSD > 0 ||
 		sr.OriginalCostUSD > 0 ||
@@ -122,13 +104,16 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type sessionJSON struct {
-		ID           string  `json:"id"`
-		Cost         float64 `json:"cost"`
-		Cap          float64 `json:"cap"`
-		RequestCount int     `json:"request_count"`
-		Model        string  `json:"model"`
-		CreatedAt    string  `json:"created_at"`
-		LastUpdated  string  `json:"last_updated"`
+		ID           string   `json:"id"`
+		Cost         float64  `json:"cost"`
+		Cap          float64  `json:"cap"`
+		RequestCount int      `json:"request_count"`
+		Models       []string `json:"models"`
+		CreatedAt    string   `json:"created_at"`
+		LastUpdated  string   `json:"last_updated"`
+		AgentName    string   `json:"agent_name,omitempty"`
+		Active       bool     `json:"active,omitempty"`
+		GatewayPort  int      `json:"gateway_port,omitempty"`
 	}
 
 	type savingsJSON struct {
@@ -145,10 +130,14 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 		// Tool discovery stats
 		ToolDiscoveryRequests int     `json:"tool_discovery_requests,omitempty"`
 		OriginalToolCount     int     `json:"original_tool_count,omitempty"`
-		FilteredToolCount     int     `json:"filtered_tool_count,omitempty"`
+		KeptToolCount         int     `json:"filtered_tool_count,omitempty"`
 		ToolDiscoveryTokens   int     `json:"tool_discovery_tokens,omitempty"`
 		ToolDiscoveryCostUSD  float64 `json:"tool_discovery_cost_usd,omitempty"`
 		ToolDiscoveryPct      float64 `json:"tool_discovery_pct,omitempty"`
+		// Session activity counters
+		UserTurns          int `json:"user_turns,omitempty"`
+		CompactionTriggers int `json:"compaction_triggers,omitempty"`
+		ToolSearchCalls    int `json:"tool_search_calls,omitempty"`
 	}
 
 	type expandEntryJSON struct {
@@ -186,6 +175,7 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 	type gatewayStatsJSON struct {
 		Uptime             string `json:"uptime"`
 		TotalRequests      int64  `json:"total_requests"`
+		UserTurns          int64  `json:"user_turns"`
 		SuccessfulRequests int64  `json:"successful_requests"`
 		Compressions       int64  `json:"compressions"`
 		CacheHits          int64  `json:"cache_hits"`
@@ -200,10 +190,12 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 		GlobalCap     float64           `json:"global_cap"`
 		Enabled       bool              `json:"enabled"`
 		Savings       *savingsJSON      `json:"savings,omitempty"`
+		GlobalSavings *savingsJSON      `json:"global_savings,omitempty"`
 		Expand        *expandJSON       `json:"expand,omitempty"`
 		Search        *searchJSON       `json:"search,omitempty"`
 		Gateway       *gatewayStatsJSON `json:"gateway,omitempty"`
 		HiddenTabs    []string          `json:"hidden_tabs,omitempty"`
+		ActivePorts   []int             `json:"active_ports,omitempty"`
 	}
 
 	resp := dashboardResponse{
@@ -212,61 +204,166 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 	requestedSessionID := r.URL.Query().Get("session")
 
 	// Use global scope when no specific session is requested.
-	// Cost tracker session IDs and savings session IDs may use different schemes
-	// (hash-based vs folder-based), so global scope is the only consistently
-	// correct default and avoids apparent "jump to zero" behavior.
 	useGlobalScope := requestedSessionID == "" || requestedSessionID == "all"
 	scopedBilledSpend := 0.0
 
 	if g.costTracker != nil {
-		sessions := g.costTracker.AllSessions()
 		cfg := g.costTracker.Config()
 		resp.Enabled = cfg.Enabled
 		resp.SessionCap = cfg.SessionCap
 		resp.GlobalCap = cfg.GlobalCap
+	}
 
-		for _, s := range sessions {
-			resp.TotalCost += s.Cost
-			resp.TotalRequests += s.RequestCount
+	// Always build the session list from disk (aggregator) so the dropdown
+	// is stable regardless of which scope is selected.
+	var sr monitoring.SavingsReport
+	var allReport monitoring.SavingsReport
+	var sessionReports map[string]*monitoring.SavingsReport
+	var sessionMetas map[string]*monitoring.SessionMeta
 
-			// Only show the main agent session in the session list.
-			// Subagent sessions have different hash-based IDs and clutter the UI.
-			// Their costs are still included in TotalCost/TotalRequests above.
-			if g.mainConversationID != "" && s.ID != g.mainConversationID {
+	currentSessionID := g.getCurrentSessionID()
+
+	if g.aggregator != nil {
+		allReport, sessionReports, sessionMetas = g.aggregator.GetAllSessionsReport()
+
+		// Build session list from ALL on-disk sessions (always stable).
+		// Always include the active session even if empty (just started).
+		for sessionID, sessionReport := range sessionReports {
+			if sessionReport.TotalRequests == 0 && sessionReport.CompressedCostUSD == 0 && sessionID != currentSessionID {
 				continue
 			}
-			resp.Sessions = append(resp.Sessions, sessionJSON{
-				ID:           s.ID,
-				Cost:         s.Cost,
-				Cap:          s.Cap,
-				RequestCount: s.RequestCount,
-				Model:        s.Model,
-				CreatedAt:    s.CreatedAt.Format(time.RFC3339),
-				LastUpdated:  s.LastUpdated.Format(time.RFC3339),
-			})
-		}
-
-		if useGlobalScope {
-			scopedBilledSpend = resp.TotalCost
-		} else {
-			scopedBilledSpend = g.costTracker.GetSessionCost(requestedSessionID)
+			sj := sessionJSON{
+				ID:          sessionID,
+				GatewayPort: g.cfg().Server.Port,
+			}
+			if sessionID == currentSessionID {
+				sj.Active = true
+			}
+			if meta, ok := sessionMetas[sessionID]; ok {
+				sj.Models = meta.Models
+				if !meta.CreatedAt.IsZero() {
+					sj.CreatedAt = meta.CreatedAt.Format(time.RFC3339)
+				}
+				if !meta.LastTimestamp.IsZero() {
+					sj.LastUpdated = meta.LastTimestamp.Format(time.RFC3339)
+				}
+				// Use total cost/requests (all agents) for session card display.
+				sj.Cost = meta.AllRequestsCostUSD
+				sj.RequestCount = meta.AllRequestsCount
+			}
+			// If meta didn't have cost data, fall back to savings report.
+			if sj.Cost == 0 {
+				sj.Cost = sessionReport.CompressedCostUSD
+			}
+			if sj.RequestCount == 0 {
+				sj.RequestCount = sessionReport.TotalRequests
+			}
+			resp.Sessions = append(resp.Sessions, sj)
+			resp.TotalCost += sj.Cost
 		}
 	}
 
-	// Savings: use costTracker for authoritative spend, savings report for compression data.
-	savingsScope := requestedSessionID
+	// Sort sessions for stable ordering: active first, then newest-first by session ID.
+	// Session IDs embed a timestamp (e.g. session_21_20260313_230747), so lexicographic
+	// descending sort gives newest-first. This prevents random map-iteration reordering
+	// on each poll.
+	sort.Slice(resp.Sessions, func(i, j int) bool {
+		a, b := resp.Sessions[i], resp.Sessions[j]
+		if a.Active != b.Active {
+			return a.Active // active first
+		}
+		return a.ID > b.ID // newest-first (session IDs are timestamp-prefixed)
+	})
+
+	// Populate active ports and merge sessions from all running gateway instances.
+	// This allows a single dashboard view to show sessions from all running gateways.
+	ownPort := g.cfg().Server.Port
+	seenSessionIDs := make(map[string]bool, len(resp.Sessions))
+	for _, s := range resp.Sessions {
+		seenSessionIDs[s.ID] = true
+	}
+	for _, inst := range dashboard.DiscoverInstances() {
+		resp.ActivePorts = append(resp.ActivePorts, inst.Port)
+		if inst.Port == ownPort {
+			continue // already have our own sessions
+		}
+		// Fetch sessions from peer gateway.
+		peerURL := fmt.Sprintf("http://127.0.0.1:%d/api/dashboard", inst.Port)
+		peerResp, peerErr := g.peerHTTPClient.Get(peerURL)
+		if peerErr != nil {
+			continue
+		}
+		var peerData struct {
+			Sessions []sessionJSON `json:"sessions"`
+		}
+		if peerResp.StatusCode != http.StatusOK {
+			_ = peerResp.Body.Close()
+			continue
+		}
+		peerBody, _ := io.ReadAll(io.LimitReader(peerResp.Body, 1<<20))
+		_ = peerResp.Body.Close()
+		if json.Unmarshal(peerBody, &peerData) != nil {
+			continue
+		}
+		for _, ps := range peerData.Sessions {
+			if !seenSessionIDs[ps.ID] {
+				seenSessionIDs[ps.ID] = true
+				resp.Sessions = append(resp.Sessions, ps)
+				resp.TotalCost += ps.Cost
+			}
+		}
+	}
+
+	// When the aggregator has no disk data yet (e.g. fresh start or in tests),
+	// fall back to the cost tracker's in-memory total so the dashboard still
+	// shows cost data and the savings card is rendered.
+	if resp.TotalCost == 0 && g.costTracker != nil {
+		resp.TotalCost = g.costTracker.GetGlobalCost()
+	}
+
+	// Now scope the savings data based on the selected session.
 	if useGlobalScope {
-		savingsScope = "all"
+		sr = allReport
+		scopedBilledSpend = resp.TotalCost
+	} else {
+		// Specific session selected — use that session's report from disk.
+		if sessionReports != nil {
+			if sessReport, ok := sessionReports[requestedSessionID]; ok {
+				sr = *sessReport
+				// Prefer AllRequestsCostUSD from meta: it includes ALL requests (main
+				// agent + sub-agents) and is the true total cost shown on the session card.
+				// sessReport.CompressedCostUSD only accumulates IsMainAgent=true requests,
+				// so it drastically understates cost for sub-agent-heavy sessions.
+				if meta, ok := sessionMetas[requestedSessionID]; ok && meta.AllRequestsCostUSD > 0 {
+					scopedBilledSpend = meta.AllRequestsCostUSD
+				} else {
+					scopedBilledSpend = sessReport.CompressedCostUSD
+				}
+			}
+		}
+		// Fall back to aggregator's per-session cache if not found in all-sessions.
+		if !hasSavingsData(sr) {
+			sr = g.getSavingsReport(requestedSessionID)
+		}
+		// Always prefer the cost tracker's authoritative per-session spend — it tracks
+		// all requests (including non-compressed), not just compressed ones.
+		if g.costTracker != nil {
+			if sessionSpend := g.costTracker.GetSessionCost(requestedSessionID); sessionSpend > 0 {
+				scopedBilledSpend = sessionSpend
+			}
+		}
 	}
-	sr := g.getSavingsReport(savingsScope)
+
+	// Use savings report's request count (filtered to main agent only).
+	resp.TotalRequests = sr.TotalRequests
 
 	// Always show savings card when we have spend or savings data.
 	if hasSavingsData(sr) || scopedBilledSpend > 0 {
 		resp.Savings = &savingsJSON{
-			TotalRequests:      sr.TotalRequests,
-			CompressedRequests: sr.CompressedRequests,
-			// TokensSaved:           sr.TotalTokensSaved,
-			// TokenSavedPct:         sr.TotalSavedPct,
+			TotalRequests:         sr.TotalRequests,
+			CompressedRequests:    sr.CompressedRequests,
+			TokensSaved:           sr.TokensSaved, // Tool output compression only (not total)
+			TokenSavedPct:         sr.TotalSavedPct,
 			BilledSpendUSD:        scopedBilledSpend,
 			CostSavedUSD:          sr.CostSavedUSD,
 			CompressedCostUSD:     scopedBilledSpend,
@@ -274,23 +371,56 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 			CompressionRatio:      sr.AvgCompressionRatio,
 			ToolDiscoveryRequests: sr.ToolDiscoveryRequests,
 			OriginalToolCount:     sr.OriginalToolCount,
-			FilteredToolCount:     sr.FilteredToolCount,
+			KeptToolCount:         sr.KeptToolCount,
 			ToolDiscoveryTokens:   sr.ToolDiscoveryTokens,
 			ToolDiscoveryCostUSD:  sr.ToolDiscoveryCostUSD,
 			ToolDiscoveryPct:      sr.ToolDiscoveryPct,
+			UserTurns:             sr.UserTurns,
+			CompactionTriggers:    sr.CompactionTriggers,
+			ToolSearchCalls:       sr.ToolSearchCalls,
 		}
 	}
 
-	// Expand context log
+	// Always include global savings (for summary cards that don't change on session select).
+	if hasSavingsData(allReport) || resp.TotalCost > 0 {
+		resp.GlobalSavings = &savingsJSON{
+			TotalRequests:         allReport.TotalRequests,
+			CompressedRequests:    allReport.CompressedRequests,
+			TokensSaved:           allReport.TokensSaved, // Tool output compression only (not total)
+			TokenSavedPct:         allReport.TotalSavedPct,
+			BilledSpendUSD:        resp.TotalCost,
+			CostSavedUSD:          allReport.CostSavedUSD,
+			CompressedCostUSD:     resp.TotalCost,
+			OriginalCostUSD:       resp.TotalCost + allReport.CostSavedUSD,
+			CompressionRatio:      allReport.AvgCompressionRatio,
+			ToolDiscoveryRequests: allReport.ToolDiscoveryRequests,
+			OriginalToolCount:     allReport.OriginalToolCount,
+			KeptToolCount:         allReport.KeptToolCount,
+			ToolDiscoveryTokens:   allReport.ToolDiscoveryTokens,
+			ToolDiscoveryCostUSD:  allReport.ToolDiscoveryCostUSD,
+			ToolDiscoveryPct:      allReport.ToolDiscoveryPct,
+			UserTurns:             allReport.UserTurns,
+			CompactionTriggers:    allReport.CompactionTriggers,
+			ToolSearchCalls:       allReport.ToolSearchCalls,
+		}
+	}
+
+	// Expand context log — scoped to the selected session when applicable.
 	if g.expandLog != nil {
-		summary := g.expandLog.Summary()
+		var summary monitoring.ExpandSummary
+		var recent []monitoring.ExpandLogEntry
+		if useGlobalScope {
+			summary = g.expandLog.Summary()
+			recent = g.expandLog.Recent(20)
+		} else {
+			summary = g.expandLog.SummaryForSession(requestedSessionID)
+			recent = g.expandLog.RecentForSession(requestedSessionID, 20)
+		}
 		resp.Expand = &expandJSON{
 			Total:    summary.Total,
 			Found:    summary.Found,
 			NotFound: summary.NotFound,
 		}
-		// Include recent entries
-		recent := g.expandLog.Recent(20)
 		for _, e := range recent {
 			resp.Expand.Recent = append(resp.Expand.Recent, expandEntryJSON{
 				Timestamp:      e.Timestamp.Format(time.RFC3339),
@@ -303,14 +433,20 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Search tool log (gateway_search_tools calls)
+	// Search tool log — scoped to the selected session when applicable.
 	if g.searchLog != nil {
-		summary := g.searchLog.Summary()
+		var summary monitoring.SearchSummary
+		var recent []monitoring.SearchLogEntry
+		if useGlobalScope {
+			summary = g.searchLog.Summary()
+			recent = g.searchLog.Recent(20)
+		} else {
+			summary = g.searchLog.SummaryForSession(requestedSessionID)
+			recent = g.searchLog.RecentForSession(requestedSessionID, 20)
+		}
 		resp.Search = &searchJSON{
 			Total: summary.Total,
 		}
-		// Include recent entries
-		recent := g.searchLog.Recent(20)
 		for _, e := range recent {
 			resp.Search.Recent = append(resp.Search.Recent, searchEntryJSON{
 				Timestamp:     e.Timestamp.Format(time.RFC3339),
@@ -331,6 +467,7 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 		resp.Gateway = &gatewayStatsJSON{
 			Uptime:             time.Since(gatewayStartTime).Truncate(time.Second).String(),
 			TotalRequests:      stats["requests"],
+			UserTurns:          stats["user_turns"],
 			SuccessfulRequests: stats["successes"],
 			Compressions:       stats["compressions"],
 			CacheHits:          stats["cache_hits"],
@@ -339,7 +476,7 @@ func (g *Gateway) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Error().Err(err).Msg("Failed to encode cost stats response")
 	}
@@ -365,7 +502,7 @@ func (g *Gateway) handleSavingsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, report) // #nosec G705 -- plain text API output, not HTML
 }
@@ -389,7 +526,7 @@ func (g *Gateway) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
 
 	// Check if we have a Compresr client with an API key
 	if g.compresrClient == nil || !g.compresrClient.HasAPIKey() {
@@ -444,23 +581,23 @@ func (g *Gateway) returnBudgetExceededResponse(w http.ResponseWriter, provider s
 
 	var resp []byte
 	if provider == "anthropic" {
-		resp, _ = json.Marshal(map[string]interface{}{
+		resp, _ = json.Marshal(map[string]any{
 			"id":            "msg_budget_exceeded",
 			"type":          "message",
 			"role":          "assistant",
 			"model":         "budget-control",
 			"stop_reason":   "end_turn",
 			"stop_sequence": nil,
-			"content":       []map[string]interface{}{{"type": "text", "text": msg}},
-			"usage":         map[string]interface{}{"input_tokens": 0, "output_tokens": 0},
+			"content":       []map[string]any{{"type": "text", "text": msg}},
+			"usage":         map[string]any{"input_tokens": 0, "output_tokens": 0},
 		})
 	} else {
-		resp, _ = json.Marshal(map[string]interface{}{
+		resp, _ = json.Marshal(map[string]any{
 			"id":      "budget_exceeded",
 			"object":  "chat.completion",
 			"model":   "budget-control",
-			"choices": []map[string]interface{}{{"index": 0, "message": map[string]interface{}{"role": "assistant", "content": msg}, "finish_reason": "stop"}},
-			"usage":   map[string]interface{}{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+			"choices": []map[string]any{{"index": 0, "message": map[string]any{"role": "assistant", "content": msg}, "finish_reason": "stop"}},
+			"usage":   map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
 		})
 	}
 
@@ -472,6 +609,78 @@ func (g *Gateway) returnBudgetExceededResponse(w http.ResponseWriter, provider s
 	w.Header().Set("X-Global-Cap", fmt.Sprintf("%.4f", budget.GlobalCap))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
+}
+
+// handleDeleteSession deletes a session's log directory from disk.
+// DELETE /api/session?id=SESSION_ID — removes the session folder, all its logs, and prompt history.
+// The active session cannot be deleted.
+func (g *Gateway) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		g.writeError(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodDelete {
+		g.writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := r.URL.Query().Get("id")
+	if sessionID == "" {
+		g.writeError(w, "id required", http.StatusBadRequest)
+		return
+	}
+	// Trim and reject empty after trim (prevents whitespace-only IDs)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		g.writeError(w, "invalid session id", http.StatusBadRequest)
+		return
+	}
+	// Reject overly long IDs (DoS prevention)
+	if len(sessionID) > 128 {
+		g.writeError(w, "invalid session id", http.StatusBadRequest)
+		return
+	}
+	// Reject URL-encoded characters (prevents encoded path traversal)
+	if strings.Contains(sessionID, "%") {
+		g.writeError(w, "invalid session id", http.StatusBadRequest)
+		return
+	}
+	// Allowlist: only alphanumeric, underscore, hyphen
+	for _, c := range sessionID {
+		isAlphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !isAlphaNum && c != '_' && c != '-' {
+			g.writeError(w, "invalid session id", http.StatusBadRequest)
+			return
+		}
+	}
+	// Cannot delete the currently active session
+	if sessionID == g.getCurrentSessionID() {
+		g.writeError(w, "cannot delete active session", http.StatusConflict)
+		return
+	}
+	if g.aggregator == nil {
+		g.writeError(w, "aggregator not available", http.StatusServiceUnavailable)
+		return
+	}
+	sessionDir := g.aggregator.GetSessionDir(sessionID)
+	if err := os.RemoveAll(sessionDir); err != nil { // #nosec G703 G705 -- sessionDir is constructed from logsDir + validated sessionID
+		log.Error().Err(err).Str("session", sessionID).Msg("failed to delete session directory")
+		g.writeError(w, "delete failed", http.StatusInternalServerError)
+		return
+	}
+	// Purge the deleted session from all in-memory caches so totals are
+	// immediately accurate without waiting for the next background tick.
+	g.aggregator.InvalidateSession(sessionID)
+
+	// Delete all prompt history for this session
+	if g.promptHistory != nil {
+		if err := g.promptHistory.EraseBySession(r.Context(), sessionID); err != nil {
+			log.Warn().Err(err).Str("session", sessionID).Msg("failed to delete session prompts (non-fatal)")
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // handleErasePrompts deletes all prompt history records.
@@ -499,7 +708,49 @@ func (g *Gateway) handleErasePrompts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// handleDeletePrompt deletes a single prompt by ID.
+// Restricted to localhost. Only accepts DELETE method.
+// Expects: DELETE /api/prompts/{id}
+func (g *Gateway) handleDeletePrompt(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		g.writeError(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if r.Method != http.MethodDelete {
+		g.writeError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if g.promptHistory == nil {
+		g.writeError(w, "prompt history not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract ID from path: /api/prompts/{id}
+	path := strings.TrimPrefix(r.URL.Path, "/api/prompts/")
+	id, err := strconv.ParseInt(path, 10, 64)
+	if err != nil || id <= 0 {
+		g.writeError(w, "invalid prompt id", http.StatusBadRequest)
+		return
+	}
+
+	if err := g.promptHistory.DeleteByID(r.Context(), id); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			g.writeError(w, "prompt not found", http.StatusNotFound)
+			return
+		}
+		log.Error().Err(err).Int64("id", id).Msg("failed to delete prompt")
+		g.writeError(w, "delete failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
@@ -570,7 +821,7 @@ func (g *Gateway) handlePromptsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Error().Err(err).Msg("failed to encode prompts response")
 	}
@@ -619,22 +870,24 @@ func (g *Gateway) handleAggregatedMonitorAPI(w http.ResponseWriter, r *http.Requ
 		startedByPort[inst.Port] = inst.StartedAt.Format(time.RFC3339)
 	}
 
-	client := &http.Client{Timeout: 3 * time.Second}
-
 	entries := make([]monitorEntryJSON, 0, len(registryInstances))
 
 	for _, inst := range registryInstances {
 		port := inst.Port
 		url := fmt.Sprintf("http://127.0.0.1:%d/monitor/api/sessions", port)
 
-		resp, err := client.Get(url)
+		resp, err := g.monitorHTTPClient.Get(url)
 		if err != nil {
 			continue
 		}
 
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			continue
+		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
-		if err != nil || resp.StatusCode != http.StatusOK {
+		if err != nil {
 			continue
 		}
 
@@ -645,21 +898,23 @@ func (g *Gateway) handleAggregatedMonitorAPI(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 
-		// Merge all sessions for this port into one entry
+		// Merge all sessions for this port into one entry.
+		// Default to "active" because this port is in the registry (process is running).
+		// Status will be overridden below once we have real session data.
 		entry := monitorEntryJSON{
 			Name:      nameByPort[port],
 			Port:      port,
 			StartedAt: startedByPort[port],
-			Status:    "finished",
+			Status:    "active",
 		}
 
 		var latestActivity time.Time
 		var latestQueryTime time.Time
 		for _, s := range sr.Sessions {
-			entry.RequestCount += s.RequestCount
+			entry.RequestCount += s.MainAgentRequestCount
 			entry.TokensIn += s.TokensIn
 			entry.TokensOut += s.TokensOut
-			// entry.TokensSaved += s.TokensSaved
+			entry.TokensSaved += s.TokensSaved
 			entry.CostUSD += s.CostUSD
 			entry.CompressionCount += s.CompressionCount
 
@@ -685,9 +940,12 @@ func (g *Gateway) handleAggregatedMonitorAPI(w http.ResponseWriter, r *http.Requ
 			}
 		}
 
-		// If no sessions yet, show the instance as finished (no activity)
+		// If no sessions yet, the gateway is starting — skip this entry entirely.
+		// A "waiting_for_human" entry should only appear after at least one real
+		// request has been processed; showing it on startup creates a phantom session
+		// in the dashboard before any agent has connected.
 		if len(sr.Sessions) == 0 {
-			entry.Status = "finished"
+			continue
 		}
 
 		entries = append(entries, entry)
@@ -698,7 +956,7 @@ func (g *Gateway) handleAggregatedMonitorAPI(w http.ResponseWriter, r *http.Requ
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
 	if err := json.NewEncoder(w).Encode(monitorResponse{
 		Instances: entries,
 		Timestamp: time.Now().Format(time.RFC3339),
@@ -738,7 +996,7 @@ func (g *Gateway) handleRenameInstance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "renamed", "name": req.Name})
 }
 
@@ -760,6 +1018,18 @@ func (g *Gateway) handleInstanceConfigProxy(w http.ResponseWriter, r *http.Reque
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 {
 		g.writeError(w, "invalid port", http.StatusBadRequest)
+		return
+	}
+
+	// Validate port against known instances to prevent local port scanning.
+	allowedPorts := make(map[int]bool)
+	for _, inst := range dashboard.DiscoverInstances() {
+		allowedPorts[inst.Port] = true
+	}
+	// Also allow the gateway's own port.
+	allowedPorts[g.cfg().Server.Port] = true
+	if !allowedPorts[port] {
+		g.writeError(w, "port not found in active instances", http.StatusBadRequest)
 		return
 	}
 
@@ -804,7 +1074,7 @@ func (g *Gateway) handleInstanceConfigProxy(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:18080")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(respBody)
 }

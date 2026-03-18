@@ -64,9 +64,13 @@ func editCompact(state *ConfigState, agentName string) {
 			)
 		}
 
+		triggerDesc := fmt.Sprintf("%.0f", state.TriggerThreshold)
+		if state.TriggerThreshold <= 0 {
+			triggerDesc = "0 (disabled)"
+		}
 		items = append(items, tui.MenuItem{
 			Label:       "Trigger %",
-			Description: fmt.Sprintf("%.0f", state.TriggerThreshold),
+			Description: triggerDesc,
 			Value:       "edit_trigger",
 			Editable:    true,
 		})
@@ -83,10 +87,10 @@ func editCompact(state *ConfigState, agentName string) {
 				}
 				if item.Description != fmt.Sprintf("%.0f", state.TriggerThreshold) {
 					if v, parseErr := strconv.ParseFloat(desc, 64); parseErr == nil {
-						if v >= 1 && v <= 99 {
+						if v >= 0 && v <= 99 {
 							state.TriggerThreshold = v
 						} else {
-							fmt.Printf("%s⚠%s Trigger value must be between 1 and 99.\n", tui.ColorYellow, tui.ColorReset)
+							fmt.Printf("%s⚠%s Trigger value must be between 0 and 99 (0 = disabled).\n", tui.ColorYellow, tui.ColorReset)
 						}
 					} else {
 						fmt.Printf("%s⚠%s Invalid trigger value.\n", tui.ColorYellow, tui.ColorReset)

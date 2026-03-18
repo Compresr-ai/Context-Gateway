@@ -1,8 +1,4 @@
 // Package preemptive - config.go contains default configuration values.
-//
-// DESIGN: Centralized defaults for preemptive summarization configuration.
-// These are used when config file doesn't specify values.
-// This file contains ONLY data - no logic/helpers.
 package preemptive
 
 import "time"
@@ -21,9 +17,7 @@ var DefaultOpenClawPromptPatterns = []string{
 	"preserve all opaque identifiers exactly as written",
 }
 
-// =============================================================================
 // DEFAULT PROMPT PATTERNS (per provider)
-// =============================================================================
 
 // DefaultClaudeCodePromptPatterns are phrases that indicate a Claude Code /compact request.
 // These match the prompt that Claude Code sends when user runs /compact.
@@ -33,9 +27,7 @@ var DefaultClaudeCodePromptPatterns = []string{
 	"important: do not use any tools",
 }
 
-// =============================================================================
 // DEFAULT SYSTEM PROMPTS (per provider)
-// =============================================================================
 
 // DefaultClaudeSystemPrompt is the default summarization prompt for Anthropic Claude.
 // Inspired by precompact-hook's "witness at the threshold" approach.
@@ -63,9 +55,7 @@ Specific next actions when conversation resumes.
 
 Be specific. Be thorough. Capture what matters, not just what happened.`
 
-// =============================================================================
 // MODEL CONTEXT WINDOWS
-// =============================================================================
 
 // DefaultModelContextWindows contains known model context windows.
 // Key: model name, Value: context window configuration.
@@ -99,28 +89,24 @@ var DefaultUnknownModelContextWindow = ModelContextWindow{
 	EffectiveMax: 123904,
 }
 
-// =============================================================================
 // DEFAULT CONFIG
-// =============================================================================
 
 // DefaultConfig returns sensible defaults for preemptive summarization.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:            false,
-		TriggerThreshold:   80.0,
-		PendingJobTimeout:  90 * time.Second,
-		SyncTimeout:        2 * time.Minute,
-		TokenEstimateRatio: 4,
-		LogDir:             "logs",
+		Enabled:           false,
+		TriggerThreshold:  80.0,
+		PendingJobTimeout: 90 * time.Second,
+		SyncTimeout:       2 * time.Minute,
+		LogDir:            "logs",
 		Summarizer: SummarizerConfig{
-			Model:              "claude-haiku-4-5",
-			Endpoint:           "https://api.anthropic.com/v1/messages",
-			MaxTokens:          4096,
-			Timeout:            60 * time.Second,
-			KeepRecentTokens:   20000, // Keep ~20K tokens of recent context (token-based)
-			KeepRecentCount:    0,     // Disabled - using token-based instead
-			TokenEstimateRatio: 4,     // Bytes per token for estimation
-			SystemPrompt:       DefaultClaudeSystemPrompt,
+			Model:            "claude-haiku-4-5",
+			Endpoint:         "https://api.anthropic.com/v1/messages",
+			MaxTokens:        4096,
+			Timeout:          60 * time.Second,
+			KeepRecentTokens: 20000, // Keep ~20K tokens of recent context (token-based)
+			KeepRecentCount:  0,     // Disabled - using token-based instead
+			SystemPrompt:     DefaultClaudeSystemPrompt,
 		},
 		Session: SessionConfig{
 			SummaryTTL:       2 * time.Hour,

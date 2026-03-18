@@ -185,6 +185,36 @@ func TestLiteLLM_ExtractUsage_WithExtras(t *testing.T) {
 	assert.Equal(t, 140, usage.TotalTokens)
 }
 
+func TestLiteLLM_ExtractUsage_AnthropicCacheFields(t *testing.T) {
+	adapter := adapters.NewLiteLLMAdapter()
+
+	// When LiteLLM fronts an Anthropic backend, the response includes Anthropic-style
+	// cache fields alongside standard OpenAI usage fields. Verify all fields are extracted.
+	responseBody := []byte(`{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"model": "claude-3-5-sonnet-20241022",
+		"choices": [{"message": {"role": "assistant", "content": "Hello!"}}],
+		"usage": {
+			"prompt_tokens": 1200,
+			"completion_tokens": 150,
+			"total_tokens": 1350,
+			"prompt_tokens_details": {"cached_tokens": 800},
+			"cache_creation_input_tokens": 300,
+			"cache_read_input_tokens": 800
+		}
+	}`)
+
+	usage := adapter.ExtractUsage(responseBody)
+
+	// InputTokens = prompt_tokens - cached_tokens = 1200 - 800 = 400
+	assert.Equal(t, 400, usage.InputTokens)
+	assert.Equal(t, 150, usage.OutputTokens)
+	assert.Equal(t, 1350, usage.TotalTokens)
+	assert.Equal(t, 800, usage.CacheReadInputTokens)
+	assert.Equal(t, 300, usage.CacheCreationInputTokens)
+}
+
 // =============================================================================
 // MODEL EXTRACTION
 // =============================================================================
@@ -293,7 +323,12 @@ func TestLiteLLM_ApplyToolDiscovery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	assert.Len(t, tools, 2, "Should have filtered out write_file")
+	// With stub behavior, deferred tools remain as stubs with DeferredStubDescription.
+	// Total count stays at 3 (write_file becomes a stub, not removed).
+	assert.Len(t, tools, 3, "Deferred tools remain as stubs, total count unchanged")
+	// Verify write_file is now a stub with DeferredStubDescription
+	writeFileTool := tools[1].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, adapters.DeferredStubDescription, writeFileTool["description"], "write_file should be stubbed with DeferredStubDescription")
 }
 
 // =============================================================================

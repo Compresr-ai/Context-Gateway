@@ -28,27 +28,6 @@ const (
 )
 
 // =============================================================================
-// ANTHROPIC API KEY SETUP
-// =============================================================================
-
-// setupAnthropicAPIKey checks if the gateway needs an explicit API key.
-// The gateway captures auth from agent requests (OAuth capture), so an explicit
-// API key is only needed for the preemptive summarizer when using external_provider
-// strategy. All agents handle their own auth — the gateway just proxies it.
-// Returns true if setup was successful or skipped, false if user cancelled.
-func setupAnthropicAPIKey(ac *AgentConfig) bool {
-	// Already set — nothing to do
-	if os.Getenv("ANTHROPIC_API_KEY") != "" {
-		return true
-	}
-
-	// All agents delegate auth to the agent itself.
-	// The gateway captures the auth token from the agent's outgoing requests.
-	// No explicit API key prompt needed.
-	return true
-}
-
-// =============================================================================
 // COMPRESR API KEY ONBOARDING
 // =============================================================================
 
@@ -203,6 +182,58 @@ func manualAPIKeyFlow() string {
 	return apiKey
 }
 
+// runCompresrReauth re-authenticates a user whose API key is invalid or expired.
+// Unlike full onboarding it skips the welcome header and goes straight to the
+// OAuth / manual-paste flow. Returns true if startup should continue (even if
+// the user declines to enter a new key — compression is simply disabled).
+func runCompresrReauth() bool {
+	fmt.Println()
+	printHeader("Compresr Sign In Required")
+	fmt.Println()
+	fmt.Printf("  %sYour Compresr API key is invalid or has expired.%s\n", tui.ColorBold, tui.ColorReset)
+	fmt.Printf("  Please sign in to restore compression features.\n")
+	fmt.Println()
+
+	// Try OAuth first; fall back to manual copy-paste.
+	apiKey := tryOAuthFlow()
+	if apiKey == "" {
+		printInfo("Switching to manual setup...")
+		fmt.Println()
+		apiKey = manualAPIKeyFlow()
+	}
+
+	if apiKey == "" {
+		// User skipped — disable compression but allow startup.
+		_ = os.Unsetenv(compresrAPIKeyEnvVar)
+		fmt.Println()
+		printWarn("No API key entered. Compression will be disabled for this session.")
+		fmt.Println()
+		return true
+	}
+
+	// Validate the new key.
+	fmt.Println()
+	printStep("Validating API key...")
+	client := compresr.NewClient("", apiKey)
+	tier, err := client.ValidateAPIKey()
+	if err != nil {
+		printError(fmt.Sprintf("API key validation failed: %v", err))
+		_ = os.Unsetenv(compresrAPIKeyEnvVar)
+		printWarn("Compression will be disabled for this session.")
+		fmt.Println()
+		return true
+	}
+
+	// Persist and activate the new key.
+	persistCredential(compresrAPIKeyEnvVar, apiKey, ScopeGlobal)
+	_ = os.Setenv(compresrAPIKeyEnvVar, apiKey)
+
+	fmt.Println()
+	printSuccess(fmt.Sprintf("API key validated! (tier: %s)", tier))
+	fmt.Println()
+	return true
+}
+
 // resetCompresrAPIKey removes the existing API key and re-runs onboarding.
 func resetCompresrAPIKey() bool {
 	homeDir, err := os.UserHomeDir()
@@ -345,6 +376,42 @@ func openBrowser(url string) {
 		return
 	}
 	_ = cmd.Start()
+}
+
+// closeDashboardBrowserTab closes any browser tab whose URL contains the dashboard address.
+// Called when the last gateway instance shuts down. macOS-only (no-op on other platforms).
+func closeDashboardBrowserTab(port int) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	urlFragment := fmt.Sprintf("localhost:%d/dashboard/", port)
+	script := fmt.Sprintf(`
+set urlFrag to "%s"
+
+on tryClose(appName, urlFrag)
+	try
+		if application appName is running then
+			tell application appName
+				repeat with w in windows
+					set tabList to tabs of w
+					repeat with i from (count of tabList) to 1 by -1
+						set t to item i of tabList
+						if URL of t contains urlFrag then
+							close t
+						end if
+					end repeat
+				end repeat
+			end tell
+		end if
+	end try
+end tryClose
+
+tryClose("Google Chrome", urlFrag)
+tryClose("Brave Browser", urlFrag)
+tryClose("Microsoft Edge", urlFrag)
+tryClose("Safari", urlFrag)
+`, urlFragment)
+	_ = exec.Command("osascript", "-e", script).Run() // #nosec G204 -- fixed AppleScript, port is int
 }
 
 // installClaudeCodeHooks installs Slack notification hooks for Claude Code.

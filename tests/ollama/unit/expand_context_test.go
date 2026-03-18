@@ -149,7 +149,7 @@ func TestExpandContext_Ollama_Passthrough(t *testing.T) {
 
 	// In passthrough mode, the original content should be forwarded unchanged
 	assert.Contains(t, string(receivedBody), "CRITICAL ERROR")
-	assert.NotContains(t, string(receivedBody), "<<<SHADOW:")
+	assert.NotContains(t, string(receivedBody), "[REF:shadow_")
 }
 
 // TestExpandContext_Ollama_NoAuth tests that requests without auth headers still work (Ollama is local).
@@ -253,7 +253,7 @@ func TestExpandContext_Ollama_NativeUsage(t *testing.T) {
 func extractShadowIDFromRequest(body []byte) string {
 	bodyStr := string(body)
 
-	idx := strings.Index(bodyStr, "<<<SHADOW:")
+	idx := strings.Index(bodyStr, "[REF:")
 	if idx == -1 {
 		idx = strings.Index(bodyStr, "SHADOW:")
 	}

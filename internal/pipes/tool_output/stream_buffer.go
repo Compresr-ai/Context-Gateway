@@ -1,17 +1,4 @@
 // Stream buffer for phantom tool suppression (V2: E14/E15).
-//
-// DESIGN: When streaming responses, we must suppress expand_context tool calls
-// from being sent to the client. The challenge is that SSE chunks may split
-// the tool call across multiple chunks, so we need to buffer until we can
-// determine if the chunk contains expand_context.
-//
-// FLOW:
-//  1. Buffer incoming SSE chunks
-//  2. Parse tool_use events as they arrive
-//  3. If tool name is expand_context → suppress from client
-//  4. Otherwise → flush to client
-//
-// This ensures the client never sees the phantom expand_context tool.
 package tooloutput
 
 import (

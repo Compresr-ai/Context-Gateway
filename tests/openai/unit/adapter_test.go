@@ -181,8 +181,13 @@ func TestOpenAI_ApplyToolDiscovery_ResponsesAPI(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	require.Len(t, tools, 1)
+	// With stub behavior, deferred tools remain as stubs with DeferredStubDescription.
+	// Total count stays at 2 (write_file becomes a stub, not removed).
+	require.Len(t, tools, 2, "Deferred tools remain as stubs, total count unchanged")
+	// read_file (kept) retains its original description
 	assert.Equal(t, "read_file", tools[0].(map[string]any)["name"])
+	// write_file (deferred) becomes a stub with DeferredStubDescription
+	assert.Equal(t, adapters.DeferredStubDescription, tools[1].(map[string]any)["description"])
 }
 
 func TestOpenAI_ApplyToolDiscovery_ChatCompletions(t *testing.T) {
@@ -211,9 +216,15 @@ func TestOpenAI_ApplyToolDiscovery_ChatCompletions(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	require.Len(t, tools, 1)
-	fn := tools[0].(map[string]any)["function"].(map[string]any)
-	assert.Equal(t, "write_file", fn["name"])
+	// With stub behavior, deferred tools remain as stubs with DeferredStubDescription.
+	// Total count stays at 2 (read_file becomes a stub, not removed).
+	require.Len(t, tools, 2, "Deferred tools remain as stubs, total count unchanged")
+	// read_file (deferred) becomes a stub with DeferredStubDescription
+	readFn := tools[0].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, adapters.DeferredStubDescription, readFn["description"], "read_file should be stubbed with DeferredStubDescription")
+	// write_file (kept) retains its full definition
+	writeFn := tools[1].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, "write_file", writeFn["name"])
 }
 
 func TestOpenAI_ApplyToolDiscovery_Empty(t *testing.T) {

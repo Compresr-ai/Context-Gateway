@@ -1,24 +1,12 @@
-// Package tooloutput compresses tool outputs (e.g., file contents, API responses).
-//
-// STATUS: Disabled in current release. This package is retained for future use.
-// Enable tool_output compression via config: pipes.tool_output.enabled: true
-//
-// DESIGN:
-//   - KV-Cache Preservation - Same content → same hash → same compressed
-//   - Multi-Tool Batch - Compress ALL tools, not just last
-//   - Transparent Proxy - Client never sees expand_context
-//
-// FILES:
-//   - types.go:              Structs, constants, constructor
-//   - tool_output.go:        Main compression logic
-//   - tool_output_expand.go: expand_context loop handling
-//   - stream_buffer.go:      Stream buffering for phantom tool suppression
+// Package tooloutput compresses tool outputs and stores originals for expansion.
 package tooloutput
 
 import (
 	"sync"
 	"time"
 
+	"github.com/compresr/context-gateway/internal/adapters"
+	"github.com/compresr/context-gateway/internal/circuitbreaker"
 	"github.com/compresr/context-gateway/internal/compresr"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/pipes"
@@ -26,97 +14,87 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// V2 Configuration constants
 const (
-	// DefaultMinCompressSize is the minimum content size to consider for compression
-	DefaultMinCompressSize = 256
-
-	// DefaultMaxCompressSize is the maximum content size for compression (64KB)
-	DefaultMaxCompressSize = 65536
-
-	// DefaultLLMBuffer is extra TTL added before sending to LLM
+	// DefaultLLMBuffer is extra TTL added before sending to LLM.
 	DefaultLLMBuffer = 10 * time.Minute
 
-	// MaxExpandLoops prevents infinite expansion cycles (E10)
+	// MaxExpandLoops prevents infinite expansion cycles.
 	MaxExpandLoops = 5
 
-	// MaxConcurrentCompressions limits parallel compression API calls (C11)
+	// MaxConcurrentCompressions limits parallel compression API calls.
 	MaxConcurrentCompressions = 10
 
-	// MaxCompressionsPerSecond rate limit for compression API (C11)
+	// MaxCompressionsPerSecond is the rate limit for compression API calls.
 	MaxCompressionsPerSecond = 20
 
-	// RefusalThreshold is the fixed threshold above which compression is rejected.
-	// If compressed/original > 0.9, we reject the compression and use original content.
-	// This is separate from target_compression_ratio which is sent to the API.
-	RefusalThreshold = 0.9
+	// DefaultRefusalThreshold is the minimum token savings fraction required to accept compression.
+	DefaultRefusalThreshold = 0.05
 
-	// ExpandContextToolName is the phantom tool injected for expansion
+	// ExpandContextToolName is the phantom tool injected for expansion.
 	ExpandContextToolName = "expand_context"
 
-	// ShadowIDPrefix for shadow references
+	// ShadowIDPrefix is the prefix for shadow reference IDs.
 	ShadowIDPrefix = "shadow_"
 
-	// PrefixFormat for LLM-visible content (E24: unambiguous delimiter)
-	PrefixFormat = "<<<SHADOW:%s>>>\n%s"
+	// PrefixFormat is the LLM-visible format for compressed content with shadow ID.
+	// Uses [REF:id] format for brevity and readability.
+	PrefixFormat = "[REF:%s]\n%s"
 
-	// PrefixFormatWithHint includes usage instructions for expand_context
-	// Hint goes BEFORE compressed content so the LLM sees it first.
-	PrefixFormatWithHint = "[COMPRESSED — content below is a lossy summary with tokens removed. To see the full uncompressed content, you MUST call: expand_context(id=\"%s\")]\n<<<SHADOW:%s>>>\n%s"
+	// PrefixFormatWithHint includes expand_context usage hint before compressed content.
+	PrefixFormatWithHint = "[COMPRESSED — call expand_context(id=\"%s\") for full content]\n[REF:%s]\n%s"
 
-	// ShadowPrefixMarker is the prefix used to detect already-compressed content
-	ShadowPrefixMarker = "<<<SHADOW:"
+	// ShadowPrefixMarker is used to detect already-compressed content.
+	ShadowPrefixMarker = "[REF:"
 
 	// ExpandContextTextPrefix is the prefix for text-based expand_context patterns.
-	// LLM outputs <<<EXPAND:shadow_xxx>>> to request full content.
 	ExpandContextTextPrefix = "<<<EXPAND:"
 
 	// ExpandContextTextSuffix is the suffix for text-based expand_context patterns.
 	ExpandContextTextSuffix = ">>>"
 
-	// StructuredSeparator separates verbatim prefix from compressed tail
+	// StructuredSeparator separates verbatim prefix from compressed tail.
 	StructuredSeparator = "--- COMPRESSED SUMMARY (above is verbatim) ---"
 )
 
 // Pipe compresses tool outputs dynamically and stores raw data for retrieval.
-// V2: Compresses ALL tool outputs with dual-TTL caching for KV-cache preservation.
 type Pipe struct {
 	enabled                bool
 	strategy               string
-	fallbackStrategy       string  // Strategy to use when primary compression fails/times out
-	minBytes               int     // Below this size, no compression
-	maxBytes               int     // Above this, skip compression (V2)
-	targetCompressionRatio float64 // Target compression ratio sent to API (0-1 strength or >1 factor)
-	includeExpandHint      bool    // Add expand_context() hint to compressed output
-	enableExpandContext    bool    // Enable expand_context feature (tool injection, hint, expand loop)
-	bypassCostCheck        bool    // Skip automatic cost-based compression skip (for testing)
+	fallbackStrategy       string
+	minTokens              int
+	maxTokens              int
+	targetCompressionRatio float64
+	refusalThreshold       float64
+	includeExpandHint      bool
+	enableExpandContext    bool
+	bypassCostCheck        bool
 	store                  store.Store
 
-	// Compresr API client (used when strategy=compresr)
 	compresrClient *compresr.Client
 
-	// Compresr strategy config (strategy=compresr or strategy=external_provider)
 	compresrEndpoint      string
 	compresrKey           string
 	compresrModel         string
 	compresrTimeout       time.Duration
-	compresrQueryAgnostic bool // If true, don't send user query. If false, send query for relevance
+	compresrQueryAgnostic bool
 
-	// V2: Rate limiting (C11)
 	maxConcurrent int
 	maxPerSecond  int
 	semaphore     chan struct{}
 	rateLimiter   *RateLimiter
 
-	// V2: Metrics
 	mu      sync.RWMutex
 	metrics *Metrics
 
-	// Tools to skip compression for, as generic categories (e.g., "read", "edit")
 	skipCategories []string
+
+	// effectiveFormats is the resolved set of content formats eligible for compression.
+	effectiveFormats map[adapters.ContentFormat]bool
+
+	circuit *circuitbreaker.CircuitBreaker
 }
 
-// Metrics tracks compression statistics (V2)
+// Metrics tracks compression statistics.
 type Metrics struct {
 	CacheHits       int64
 	CacheMisses     int64
@@ -125,10 +103,10 @@ type Metrics struct {
 	ExpandRequests  int64
 	ExpandCacheMiss int64
 	RateLimited     int64
-	BytesSaved      int64
+	TokensSaved     int64
 }
 
-// RateLimiter implements token bucket rate limiting (C11)
+// RateLimiter implements token bucket rate limiting.
 type RateLimiter struct {
 	mu         sync.Mutex
 	tokens     float64
@@ -138,8 +116,13 @@ type RateLimiter struct {
 	closed     bool
 }
 
-// NewRateLimiter creates a rate limiter
+// NewRateLimiter creates a rate limiter.
+// A zero or negative rate would set refillRate=0 and permanently block all requests;
+// clamp to 1 as a safe minimum so the limiter always makes progress.
 func NewRateLimiter(maxPerSecond int) *RateLimiter {
+	if maxPerSecond <= 0 {
+		maxPerSecond = 1
+	}
 	return &RateLimiter{
 		tokens:     float64(maxPerSecond),
 		maxTokens:  float64(maxPerSecond),
@@ -187,7 +170,6 @@ func minFloat(a, b float64) float64 {
 }
 
 // New creates a new tool output compression pipe.
-// V2: Initializes rate limiting, metrics, and dual-TTL caching.
 func New(cfg *config.Config, st store.Store) *Pipe {
 	// Resolve provider settings (endpoint, api_key, model) from providers section
 	var compresrEndpoint, compresrKey, compresrModel string
@@ -210,41 +192,46 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 			compresrEndpoint = pipes.NormalizeEndpointURL(cfg.URLs.Compresr, cfg.Pipes.ToolOutput.Compresr.Endpoint)
 		}
 	}
-	if cfg.Pipes.ToolOutput.Compresr.AuthParam != "" {
-		compresrKey = cfg.Pipes.ToolOutput.Compresr.AuthParam
+	if cfg.Pipes.ToolOutput.Compresr.APIKey != "" {
+		compresrKey = cfg.Pipes.ToolOutput.Compresr.APIKey
 	}
 	if cfg.Pipes.ToolOutput.Compresr.Model != "" {
 		compresrModel = cfg.Pipes.ToolOutput.Compresr.Model
 	}
 
-	// Use config fields with sensible defaults
-	minBytes := cfg.Pipes.ToolOutput.MinBytes
-	if minBytes == 0 {
-		minBytes = 2048 // Default: 2KB (~512 tokens)
+	// Use config fields with sensible defaults (tokens, not bytes)
+	minTokens := cfg.Pipes.ToolOutput.MinTokens
+	if minTokens == 0 {
+		minTokens = config.DefaultMinTokens
 	}
 
-	maxBytes := cfg.Pipes.ToolOutput.MaxBytes
-	if maxBytes == 0 {
-		maxBytes = DefaultMaxCompressSize
+	maxTokens := cfg.Pipes.ToolOutput.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = config.DefaultMaxTokens
 	}
 
 	targetCompressionRatio := cfg.Pipes.ToolOutput.TargetCompressionRatio
-	// Note: targetCompressionRatio is sent to the API. 0 means "use API default".
-	// The refusal threshold (0.9) is fixed and separate - see RefusalThreshold constant.
+
+	refusalThreshold := cfg.Pipes.ToolOutput.RefusalThreshold
+	if refusalThreshold == 0 {
+		refusalThreshold = DefaultRefusalThreshold
+	}
 
 	fallbackStrategy := cfg.Pipes.ToolOutput.FallbackStrategy
 	if fallbackStrategy == "" {
-		fallbackStrategy = config.StrategyPassthrough // default: passthrough on error
+		fallbackStrategy = config.StrategyPassthrough
 	}
 
-	// V2: Rate limiting defaults
 	maxConcurrent := MaxConcurrentCompressions
 	maxPerSecond := MaxCompressionsPerSecond
 
-	// Store skip categories from config
-	skipCategories := cfg.Pipes.ToolOutput.SkipTools
+	skipCategories := cfg.Pipes.ToolOutput.SkipTools.Categories
 
-	// Compresr timeout default
+	effectiveFormats := adapters.BuildEffectiveFormats(
+		cfg.Pipes.ToolOutput.ContentFormats.Allowed,
+		cfg.Pipes.ToolOutput.ContentFormats.Forbidden,
+	)
+
 	compresrTimeout := cfg.Pipes.ToolOutput.Compresr.Timeout
 	if compresrTimeout == 0 {
 		compresrTimeout = 30 * time.Second
@@ -254,41 +241,37 @@ func New(cfg *config.Config, st store.Store) *Pipe {
 		enabled:                cfg.Pipes.ToolOutput.Enabled,
 		strategy:               cfg.Pipes.ToolOutput.Strategy,
 		fallbackStrategy:       fallbackStrategy,
-		minBytes:               minBytes,
-		maxBytes:               maxBytes,
+		minTokens:              minTokens,
+		maxTokens:              maxTokens,
 		targetCompressionRatio: targetCompressionRatio,
+		refusalThreshold:       refusalThreshold,
 		includeExpandHint:      cfg.Pipes.ToolOutput.IncludeExpandHint || cfg.Pipes.ToolOutput.EnableExpandContext,
 		enableExpandContext:    cfg.Pipes.ToolOutput.EnableExpandContext,
 		bypassCostCheck:        cfg.Pipes.ToolOutput.BypassCostCheck,
 		store:                  st,
 
-		// Compresr strategy config (used by both compresr and external_provider strategies)
 		compresrEndpoint:      compresrEndpoint,
 		compresrKey:           compresrKey,
 		compresrModel:         compresrModel,
 		compresrTimeout:       compresrTimeout,
 		compresrQueryAgnostic: cfg.Pipes.ToolOutput.Compresr.QueryAgnostic,
 
-		// V2: Rate limiting
-		maxConcurrent: maxConcurrent,
-		maxPerSecond:  maxPerSecond,
-		semaphore:     make(chan struct{}, maxConcurrent),
-		rateLimiter:   NewRateLimiter(maxPerSecond),
-		metrics:       &Metrics{},
-
-		// Skip tools (categories resolved per-request based on provider)
-		skipCategories: skipCategories,
+		maxConcurrent:    maxConcurrent,
+		maxPerSecond:     maxPerSecond,
+		semaphore:        make(chan struct{}, maxConcurrent),
+		rateLimiter:      NewRateLimiter(maxPerSecond),
+		metrics:          &Metrics{},
+		skipCategories:   skipCategories,
+		effectiveFormats: effectiveFormats,
+		circuit:          circuitbreaker.New(),
 	}
 
-	// Initialize Compresr client when strategy is 'compresr'
 	if cfg.Pipes.ToolOutput.Strategy == config.StrategyCompresr {
-		// Use Compresr base URL from config, or fall back to default
 		baseURL := cfg.URLs.Compresr
 		p.compresrClient = compresr.NewClient(baseURL, compresrKey, compresr.WithTimeout(compresrTimeout))
 		log.Info().Str("base_url", baseURL).Str("model", compresrModel).Dur("timeout", compresrTimeout).Msg("tool_output: initialized Compresr client for compresr strategy")
 	}
 
-	// Log warning if no API key configured (will rely on captured Bearer token from requests)
 	if p.compresrKey == "" && cfg.Pipes.ToolOutput.Strategy == config.StrategyExternalProvider {
 		log.Info().Msg("tool_output: no API key configured, will use captured Bearer token from incoming requests")
 	}
@@ -314,14 +297,14 @@ func (p *Pipe) Enabled() bool {
 	return p.enabled
 }
 
-// GetMetrics returns a copy of the current metrics (V2).
+// GetMetrics returns a copy of the current metrics.
 func (p *Pipe) GetMetrics() Metrics {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return *p.metrics
 }
 
-// Close releases resources held by the pipe (V2).
+// Close releases resources held by the pipe.
 func (p *Pipe) Close() {
 	if p.rateLimiter != nil {
 		p.rateLimiter.Close()
@@ -335,15 +318,15 @@ func (p *Pipe) IsQueryAgnostic() bool {
 	return p.compresrQueryAgnostic
 }
 
-// compressionTask holds data for parallel compression
+// compressionTask holds data for parallel compression.
 type compressionTask struct {
 	index        int
 	msg          message
 	toolName     string
 	shadowID     string
 	original     string
-	messageIndex int // Position in messages array (for sjson path)
-	blockIndex   int // Position within content blocks (for sjson path)
+	messageIndex int
+	blockIndex   int
 }
 
 // message is a minimal message struct for internal use
@@ -352,7 +335,7 @@ type message struct {
 	ToolCallID string
 }
 
-// compressionResult holds the result of a compression task
+// compressionResult holds the result of a compression task.
 type compressionResult struct {
 	index             int
 	shadowID          string
@@ -361,15 +344,14 @@ type compressionResult struct {
 	originalContent   string
 	compressedContent string
 	success           bool
-	usedFallback      bool // True if fallback strategy was applied
-	_                 bool // Reserved for future cache tracking
+	usedFallback      bool
 	err               error
-	messageIndex      int // Position in messages array (for sjson path)
-	blockIndex        int // Position within content blocks (for sjson path)
+	messageIndex      int
+	blockIndex        int
 }
 
-// ExpandContextCall represents an expand_context request from the LLM (V2)
+// ExpandContextCall represents an expand_context request from the LLM.
 type ExpandContextCall struct {
-	ToolUseID string // The tool_use block ID
-	ShadowID  string // The shadow reference to expand
+	ToolUseID string
+	ShadowID  string
 }

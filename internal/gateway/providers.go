@@ -1,7 +1,4 @@
 // Provider configuration - URL constants and detection rules.
-//
-// DESIGN: Centralized provider configuration for URL routing.
-// Add new providers by extending the Providers map.
 package gateway
 
 import (

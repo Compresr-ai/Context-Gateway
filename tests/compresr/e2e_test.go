@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/compresr/context-gateway/internal/compresr"
+	"github.com/compresr/context-gateway/internal/tokenizer"
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,9 @@ func init() {
 }
 
 func getCompresrKey(t *testing.T) string {
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
+	}
 	key := os.Getenv("COMPRESR_API_KEY")
 	if key == "" {
 		t.Skip("COMPRESR_API_KEY not set, skipping E2E test")
@@ -139,7 +143,7 @@ func main() {
 
 	t.Logf("Original size: %d bytes", len(toolOutput))
 	t.Logf("Compressed size: %d bytes", len(result.CompressedOutput))
-	t.Logf("Compression ratio: %.2f%%", float64(len(result.CompressedOutput))/float64(len(toolOutput))*100)
+	t.Logf("Compression ratio: %.2f%%", float64(tokenizer.CountTokens(result.CompressedOutput))/float64(tokenizer.CountTokens(toolOutput))*100)
 
 	assert.NotEmpty(t, result.CompressedOutput, "Should have compressed output")
 	// Compressed output should be smaller (unless fallback occurred)
@@ -191,7 +195,7 @@ func TestE2E_Compresr_ToolOutputCompression_LargeFile(t *testing.T) {
 	t.Logf("Original size: %d bytes", len(largeFile))
 	t.Logf("Compressed size: %d bytes", len(result.CompressedOutput))
 
-	compressionRatio := float64(len(result.CompressedOutput)) / float64(len(largeFile)) * 100
+	compressionRatio := float64(tokenizer.CountTokens(result.CompressedOutput)) / float64(tokenizer.CountTokens(largeFile)) * 100
 	t.Logf("Compression ratio: %.2f%%", compressionRatio)
 
 	assert.NotEmpty(t, result.CompressedOutput, "Should have compressed output")
@@ -550,7 +554,7 @@ func TestE2E_Compresr_ToolOutput_JSONStructured(t *testing.T) {
 
 	t.Logf("Original: %d bytes", len(grepOutput))
 	t.Logf("Compressed: %d bytes", len(result.CompressedOutput))
-	t.Logf("Ratio: %.2f%%", float64(len(result.CompressedOutput))/float64(len(grepOutput))*100)
+	t.Logf("Ratio: %.2f%%", float64(tokenizer.CountTokens(result.CompressedOutput))/float64(tokenizer.CountTokens(grepOutput))*100)
 
 	assert.NotEmpty(t, result.CompressedOutput, "Should return compressed output")
 	// Compressed output should mention HandleRequest since that's what user asked
@@ -682,7 +686,7 @@ func TestE2E_Compresr_ToolOutput_DirectoryListing(t *testing.T) {
 
 	t.Logf("Original: %d bytes", len(dirListing))
 	t.Logf("Compressed: %d bytes", len(result.CompressedOutput))
-	t.Logf("Ratio: %.2f%%", float64(len(result.CompressedOutput))/float64(len(dirListing))*100)
+	t.Logf("Ratio: %.2f%%", float64(tokenizer.CountTokens(result.CompressedOutput))/float64(tokenizer.CountTokens(dirListing))*100)
 
 	assert.NotEmpty(t, result.CompressedOutput, "Should return compressed output")
 	// Should mention auth since that's what user asked about
@@ -858,7 +862,7 @@ type Request%d struct {
 
 	t.Logf("Original: %d bytes (%.2f KB)", len(largeOutput), float64(len(largeOutput))/1024)
 	t.Logf("Compressed: %d bytes (%.2f KB)", len(result.CompressedOutput), float64(len(result.CompressedOutput))/1024)
-	ratio := float64(len(result.CompressedOutput)) / float64(len(largeOutput)) * 100
+	ratio := float64(tokenizer.CountTokens(result.CompressedOutput)) / float64(tokenizer.CountTokens(largeOutput)) * 100
 	t.Logf("Compression ratio: %.2f%%", ratio)
 
 	assert.NotEmpty(t, result.CompressedOutput, "Should return compressed output")
@@ -1035,7 +1039,7 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 		results[model.name] = len(result.CompressedOutput)
 		t.Logf("Model %s (query=%v): %d → %d bytes (%.2f%%)",
 			model.name, model.supportsQuery, len(codeContent), len(result.CompressedOutput),
-			float64(len(result.CompressedOutput))/float64(len(codeContent))*100)
+			float64(tokenizer.CountTokens(result.CompressedOutput))/float64(tokenizer.CountTokens(codeContent))*100)
 	}
 
 	assert.GreaterOrEqual(t, len(results), 1, "At least one model should work")
@@ -1288,7 +1292,7 @@ func TestE2E_Compresr_ToolOutput_RealWorldFiles(t *testing.T) {
 
 	t.Logf("package.json: %d → %d bytes (%.2f%%)",
 		len(packageJSON), len(result.CompressedOutput),
-		float64(len(result.CompressedOutput))/float64(len(packageJSON))*100)
+		float64(tokenizer.CountTokens(result.CompressedOutput))/float64(tokenizer.CountTokens(packageJSON))*100)
 	t.Logf("Compressed: %s", truncate(result.CompressedOutput, 300))
 
 	// Should mention vitest since that's the testing framework

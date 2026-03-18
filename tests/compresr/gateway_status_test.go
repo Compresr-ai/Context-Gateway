@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,9 +125,9 @@ func TestBackgroundRefresh_PopulatesCache(t *testing.T) {
 		},
 	}
 
-	callCount := 0
+	var callCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(mockResp)
 	}))
@@ -154,15 +155,15 @@ func TestBackgroundRefresh_PopulatesCache(t *testing.T) {
 	}
 
 	// Verify at least one API call was made
-	if callCount < 1 {
-		t.Errorf("expected at least 1 API call, got %d", callCount)
+	if callCount.Load() < 1 {
+		t.Errorf("expected at least 1 API call, got %d", callCount.Load())
 	}
 }
 
 func TestBackgroundRefresh_StopsOnStop(t *testing.T) {
-	callCount := 0
+	var callCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		mockResp := compresr.APIResponse[compresr.GatewayStatus]{
 			Success: true,
 			Data:    compresr.GatewayStatus{Tier: "test"},
@@ -177,14 +178,14 @@ func TestBackgroundRefresh_StopsOnStop(t *testing.T) {
 
 	// Wait for a few refreshes
 	time.Sleep(100 * time.Millisecond)
-	countAfterStart := callCount
+	countAfterStart := callCount.Load()
 
 	// Stop the refresh
 	client.StopBackgroundRefresh()
 
 	// Wait and verify no more calls
 	time.Sleep(100 * time.Millisecond)
-	countAfterStop := callCount
+	countAfterStop := callCount.Load()
 
 	// Should have stopped refreshing (allow for one extra in-flight call)
 	if countAfterStop > countAfterStart+1 {

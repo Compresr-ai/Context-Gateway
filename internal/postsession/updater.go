@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/external"
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 )
 
 // Config holds post-session updater configuration.
@@ -70,7 +71,7 @@ type UpdateResult struct {
 
 // Update analyzes the session and updates CLAUDE.md if needed.
 // Uses the provided collector's session log and auth credentials.
-func (u *Updater) Update(ctx context.Context, collector *SessionCollector, authToken string, authIsXAPIKey bool, authEndpoint string) (*UpdateResult, error) {
+func (u *Updater) Update(ctx context.Context, collector *SessionCollector, auth authtypes.CapturedAuth) (*UpdateResult, error) {
 	if !u.config.Enabled {
 		return &UpdateResult{Updated: false, Description: "post-session updates disabled"}, nil
 	}
@@ -98,15 +99,11 @@ func (u *Updater) Update(ctx context.Context, collector *SessionCollector, authT
 	userPrompt := BuildUserPrompt(sessionLog, currentContent)
 
 	// Resolve auth: config API key > captured auth
-	apiKey := u.config.APIKey
 	endpoint := u.config.Endpoint
 	provider := u.config.Provider
 
-	if apiKey == "" {
-		apiKey = authToken
-	}
 	if endpoint == "" {
-		endpoint = authEndpoint
+		endpoint = auth.Endpoint
 	}
 	if endpoint == "" {
 		endpoint = "https://api.anthropic.com/v1/messages"
@@ -115,12 +112,20 @@ func (u *Updater) Update(ctx context.Context, collector *SessionCollector, authT
 		provider = external.DetectProvider(endpoint)
 	}
 
-	// Determine auth header style
+	// Determine auth header style: config key takes precedence over captured auth
+	// Uses centralized CapturedAuth pattern: IsXAPIKey → ProviderKey, else → BearerAuth
 	var providerKey, bearerAuth string
-	if authIsXAPIKey || strings.HasPrefix(apiKey, "sk-ant-") {
-		providerKey = apiKey
+	var extraHeaders map[string]string
+	if u.config.APIKey != "" {
+		providerKey = u.config.APIKey
+	} else if auth.IsXAPIKey {
+		providerKey = auth.Token
 	} else {
-		bearerAuth = apiKey
+		bearerAuth = auth.Token
+		// OAuth tokens (Claude Code Max/Pro) require anthropic-beta header
+		if auth.BetaHeader != "" {
+			extraHeaders = map[string]string{"anthropic-beta": auth.BetaHeader}
+		}
 	}
 
 	log.Info().
@@ -135,6 +140,7 @@ func (u *Updater) Update(ctx context.Context, collector *SessionCollector, authT
 		Endpoint:     endpoint,
 		ProviderKey:  providerKey,
 		BearerAuth:   bearerAuth,
+		ExtraHeaders: extraHeaders,
 		Model:        u.config.Model,
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,

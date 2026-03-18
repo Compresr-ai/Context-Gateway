@@ -1,6 +1,13 @@
 // Package utils provides common utility functions.
 package utils
 
+import "strings"
+
+// ShellQuote safely wraps a single shell argument in single quotes.
+func ShellQuote(arg string) string {
+	return "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+}
+
 // MaskKey masks an API key for safe logging (shows first 8 and last 4 chars).
 // Use this to avoid logging sensitive credentials in plain text.
 func MaskKey(key string) string {

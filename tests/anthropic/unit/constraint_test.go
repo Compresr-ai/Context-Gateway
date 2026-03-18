@@ -53,7 +53,7 @@ func TestC1_KVCachePreservation(t *testing.T) {
 
 // TestC2_AllToolsCompressed verifies ALL tool outputs are compressed.
 // V2 changed from "last tool only" to "all tools" for KV-cache preservation.
-// Each tool output above minBytes threshold is processed independently.
+// Each tool output above minTokens threshold is processed independently.
 // This maximizes context reduction while preserving expandability.
 func TestC2_AllToolsCompressed(t *testing.T) {
 	content1 := strings.Repeat("tool output 1 ", 100)

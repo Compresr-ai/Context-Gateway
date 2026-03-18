@@ -11,10 +11,13 @@
 package store
 
 import (
+	"container/list"
 	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/compresr/context-gateway/internal/formats"
 )
 
 // V2: Default TTL values - re-exported from config for backward compatibility.
@@ -23,13 +26,22 @@ const (
 	DefaultCompressedTTL = 24 * time.Hour // Long TTL for compressed (KV-cache)
 
 	// MaxCompressedEntries is the maximum number of compressed cache entries.
-	// Prevents unbounded memory growth in long-running sessions.
-	// At ~2KB avg per entry, 10K entries ≈ 20MB.
-	MaxCompressedEntries = 10_000
+	// OPTIMIZED: Reduced from 10K to 2K to lower memory footprint.
+	// At ~2KB avg per entry, 2K entries ≈ 4MB (was 20MB).
+	MaxCompressedEntries = 2_000
 
 	// MaxOriginalEntries caps the original content map.
-	// Original content is larger (~5KB avg), so 5K entries ≈ 25MB.
-	MaxOriginalEntries = 5_000
+	// OPTIMIZED: Reduced from 5K to 1K to lower memory footprint.
+	// Original content is larger (~5KB avg), so 1K entries ≈ 5MB (was 25MB).
+	MaxOriginalEntries = 1_000
+
+	// MaxExpansionEntries caps the expansion records map.
+	// At ~1KB avg per entry, 1K entries ≈ 1MB.
+	MaxExpansionEntries = 1_000
+
+	// MaxFieldRefEntries caps the field reference map.
+	// At ~512B avg per entry, 1K entries ≈ 512KB.
+	MaxFieldRefEntries = 1_000
 )
 
 // Note: These match config.DefaultOriginalTTL and config.DefaultCompressedTTL.
@@ -46,6 +58,7 @@ type ExpansionRecord struct {
 
 // Store defines the interface for shadow context storage.
 // V2: Supports dual TTL for original (short) and compressed (long) content.
+// V3: Adds field-level compression refs for structured data expansion.
 type Store interface {
 	// Set stores original content with short TTL.
 	Set(key, value string) error
@@ -76,6 +89,19 @@ type Store interface {
 	// DeleteExpansion removes the expansion record.
 	DeleteExpansion(key string) error
 
+	// V3: Field-level compression refs (uses formats.FieldRef as canonical type)
+	// SetFieldRef stores a field reference for expansion.
+	SetFieldRef(ref *formats.FieldRef) error
+
+	// GetFieldRef retrieves a field reference by ID.
+	GetFieldRef(refID string) (*formats.FieldRef, bool)
+
+	// DeleteFieldRef removes a field reference.
+	DeleteFieldRef(refID string) error
+
+	// SetFieldRefs stores multiple field references at once.
+	SetFieldRefs(refs []*formats.FieldRef) error
+
 	// Close cleans up resources.
 	Close() error
 }
@@ -89,10 +115,16 @@ type CacheMetrics struct {
 
 // MemoryStore is a simple in-memory implementation of Store.
 // V2: Supports dual TTL for original and compressed content.
+// V3: Adds field-level compression refs for structured data.
 type MemoryStore struct {
 	data          map[string]entry
+	dataOrder     *list.List                // insertion order for O(1) eviction
 	compressed    map[string]entry          // Cache for compressed versions
+	compOrder     *list.List                // insertion order for O(1) eviction
 	expansions    map[string]expansionEntry // Cache for expansion records
+	expansOrder   *list.List                // insertion order for O(1) eviction
+	fieldRefs     map[string]fieldRefEntry  // V3: Field-level compression refs
+	fieldRefOrder *list.List                // insertion order for O(1) eviction
 	mu            sync.RWMutex
 	originalTTL   time.Duration // V2: Short TTL for original
 	compressedTTL time.Duration // V2: Long TTL for compressed
@@ -101,17 +133,21 @@ type MemoryStore struct {
 	wg            sync.WaitGroup // Waits for cleanup goroutine to exit
 
 	maxCompressed int          // Max entries in compressed cache (0 = unlimited)
+	maxExpansions int          // Max entries in expansions cache
+	maxFieldRefs  int          // Max entries in fieldRefs cache
 	Metrics       CacheMetrics // Observable cache statistics
 }
 
 type entry struct {
 	value     string
 	expiresAt time.Time
+	element   *list.Element // pointer into order list for O(1) MoveToBack/Remove
 }
 
 type expansionEntry struct {
 	record    *ExpansionRecord
 	expiresAt time.Time
+	element   *list.Element // pointer into order list for O(1) MoveToBack/Remove
 }
 
 // NewMemoryStore creates a new in-memory store with default TTLs.
@@ -124,12 +160,19 @@ func NewMemoryStore(ttl time.Duration) *MemoryStore {
 func NewMemoryStoreWithDualTTL(originalTTL, compressedTTL time.Duration) *MemoryStore {
 	s := &MemoryStore{
 		data:          make(map[string]entry),
+		dataOrder:     list.New(),
 		compressed:    make(map[string]entry),
+		compOrder:     list.New(),
 		expansions:    make(map[string]expansionEntry),
+		expansOrder:   list.New(),
+		fieldRefs:     make(map[string]fieldRefEntry),
+		fieldRefOrder: list.New(),
 		originalTTL:   originalTTL,
 		compressedTTL: compressedTTL,
 		stopChan:      make(chan struct{}),
 		maxCompressed: MaxCompressedEntries,
+		maxExpansions: MaxExpansionEntries,
+		maxFieldRefs:  MaxFieldRefEntries,
 	}
 
 	// Start cleanup goroutine
@@ -148,26 +191,20 @@ func (s *MemoryStore) Set(key, value string) error {
 		return nil
 	}
 
-	// Cap original entries to prevent unbounded growth
-	if len(s.data) >= MaxOriginalEntries {
-		// Evict oldest entry
-		var oldestKey string
-		var oldestTime time.Time
-		for k, e := range s.data {
-			if oldestKey == "" || e.expiresAt.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = e.expiresAt
-			}
-		}
-		if oldestKey != "" {
-			delete(s.data, oldestKey)
-		}
+	// If key exists: refresh TTL and move to back — no new list node needed.
+	if existing, ok := s.data[key]; ok {
+		s.dataOrder.MoveToBack(existing.element)
+		s.data[key] = entry{value: value, expiresAt: time.Now().Add(s.originalTTL), element: existing.element}
+		return nil
 	}
 
-	s.data[key] = entry{
-		value:     value,
-		expiresAt: time.Now().Add(s.originalTTL),
+	// Cap original entries to prevent unbounded growth — O(1) eviction via insertion order list.
+	if len(s.data) >= MaxOriginalEntries {
+		s.evictOldestData()
 	}
+
+	elem := s.dataOrder.PushBack(key)
+	s.data[key] = entry{value: value, expiresAt: time.Now().Add(s.originalTTL), element: elem}
 	return nil
 }
 
@@ -175,6 +212,11 @@ func (s *MemoryStore) Set(key, value string) error {
 func (s *MemoryStore) Get(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// enforce "no access after close" contract consistently with Set/Delete
+	if s.stopped {
+		return "", false
+	}
 
 	e, exists := s.data[key]
 	if !exists {
@@ -196,8 +238,14 @@ func (s *MemoryStore) Delete(key string) error {
 	if s.stopped {
 		return nil
 	}
-	delete(s.data, key)
-	delete(s.compressed, key)
+	if e, ok := s.data[key]; ok {
+		s.dataOrder.Remove(e.element)
+		delete(s.data, key)
+	}
+	if e, ok := s.compressed[key]; ok {
+		s.compOrder.Remove(e.element)
+		delete(s.compressed, key)
+	}
 	return nil
 }
 
@@ -210,17 +258,20 @@ func (s *MemoryStore) SetCompressed(key, compressed string) error {
 		return nil
 	}
 
-	// Evict oldest entries if at capacity (skip if updating existing key)
-	if s.maxCompressed > 0 && len(s.compressed) >= s.maxCompressed {
-		if _, exists := s.compressed[key]; !exists {
-			s.evictOldestCompressed()
-		}
+	// If key exists: refresh TTL and move to back — no new list node needed.
+	if existing, ok := s.compressed[key]; ok {
+		s.compOrder.MoveToBack(existing.element)
+		s.compressed[key] = entry{value: compressed, expiresAt: time.Now().Add(s.compressedTTL), element: existing.element}
+		return nil
 	}
 
-	s.compressed[key] = entry{
-		value:     compressed,
-		expiresAt: time.Now().Add(s.compressedTTL),
+	// Evict oldest entry if at capacity.
+	if s.maxCompressed > 0 && len(s.compressed) >= s.maxCompressed {
+		s.evictOldestCompressed()
 	}
+
+	elem := s.compOrder.PushBack(key)
+	s.compressed[key] = entry{value: compressed, expiresAt: time.Now().Add(s.compressedTTL), element: elem}
 	return nil
 }
 
@@ -252,7 +303,10 @@ func (s *MemoryStore) DeleteCompressed(key string) error {
 	if s.stopped {
 		return nil
 	}
-	delete(s.compressed, key)
+	if e, ok := s.compressed[key]; ok {
+		s.compOrder.Remove(e.element)
+		delete(s.compressed, key)
+	}
 	return nil
 }
 
@@ -265,10 +319,20 @@ func (s *MemoryStore) SetExpansion(key string, expansion *ExpansionRecord) error
 		return nil
 	}
 
-	s.expansions[key] = expansionEntry{
-		record:    expansion,
-		expiresAt: time.Now().Add(s.compressedTTL), // V2: Use long TTL for expansions
+	// If key exists: refresh and move to back — no new list node needed.
+	if existing, ok := s.expansions[key]; ok {
+		s.expansOrder.MoveToBack(existing.element)
+		s.expansions[key] = expansionEntry{record: expansion, expiresAt: time.Now().Add(s.compressedTTL), element: existing.element}
+		return nil
 	}
+
+	// Cap expansions entries to prevent unbounded growth.
+	if len(s.expansions) >= s.maxExpansions {
+		s.evictOldestExpansion()
+	}
+
+	elem := s.expansOrder.PushBack(key)
+	s.expansions[key] = expansionEntry{record: expansion, expiresAt: time.Now().Add(s.compressedTTL), element: elem}
 	return nil
 }
 
@@ -297,25 +361,63 @@ func (s *MemoryStore) DeleteExpansion(key string) error {
 	if s.stopped {
 		return nil
 	}
-	delete(s.expansions, key)
+	if e, ok := s.expansions[key]; ok {
+		s.expansOrder.Remove(e.element)
+		delete(s.expansions, key)
+	}
 	return nil
 }
 
-// evictOldestCompressed removes the entry with the earliest expiry (called with lock held).
-func (s *MemoryStore) evictOldestCompressed() {
-	var oldestKey string
-	var oldestTime time.Time
-	first := true
-	for k, e := range s.compressed {
-		if first || e.expiresAt.Before(oldestTime) {
-			oldestKey = k
-			oldestTime = e.expiresAt
-			first = false
+// evictOldestData removes the oldest data entry (called with lock held).
+func (s *MemoryStore) evictOldestData() {
+	for s.dataOrder.Len() > 0 {
+		front := s.dataOrder.Front()
+		k := front.Value.(string)
+		s.dataOrder.Remove(front)
+		if _, exists := s.data[k]; exists {
+			delete(s.data, k)
+			return
 		}
 	}
-	if oldestKey != "" {
-		delete(s.compressed, oldestKey)
-		s.Metrics.CompressedEvictions.Add(1)
+}
+
+// evictOldestCompressed removes the oldest-inserted entry — O(1) via insertion order list (called with lock held).
+func (s *MemoryStore) evictOldestCompressed() {
+	for s.compOrder.Len() > 0 {
+		front := s.compOrder.Front()
+		k := front.Value.(string)
+		s.compOrder.Remove(front)
+		if _, exists := s.compressed[k]; exists {
+			delete(s.compressed, k)
+			s.Metrics.CompressedEvictions.Add(1)
+			return
+		}
+	}
+}
+
+// evictOldestExpansion removes the oldest expansion entry (called with lock held).
+func (s *MemoryStore) evictOldestExpansion() {
+	for s.expansOrder.Len() > 0 {
+		front := s.expansOrder.Front()
+		k := front.Value.(string)
+		s.expansOrder.Remove(front)
+		if _, exists := s.expansions[k]; exists {
+			delete(s.expansions, k)
+			return
+		}
+	}
+}
+
+// evictOldestFieldRef removes the oldest field ref entry (called with lock held).
+func (s *MemoryStore) evictOldestFieldRef() {
+	for s.fieldRefOrder.Len() > 0 {
+		front := s.fieldRefOrder.Front()
+		k := front.Value.(string)
+		s.fieldRefOrder.Remove(front)
+		if _, exists := s.fieldRefs[k]; exists {
+			delete(s.fieldRefs, k)
+			return
+		}
 	}
 }
 
@@ -333,8 +435,13 @@ func (s *MemoryStore) Reset() {
 	defer s.mu.Unlock()
 
 	s.data = make(map[string]entry)
+	s.dataOrder.Init()
 	s.compressed = make(map[string]entry)
+	s.compOrder.Init()
 	s.expansions = make(map[string]expansionEntry)
+	s.expansOrder.Init()
+	s.fieldRefs = make(map[string]fieldRefEntry)
+	s.fieldRefOrder.Init()
 }
 
 // Close stops the cleanup goroutine and clears data.
@@ -353,15 +460,17 @@ func (s *MemoryStore) Close() error {
 	s.data = nil
 	s.compressed = nil
 	s.expansions = nil
+	s.fieldRefs = nil
 	s.mu.Unlock()
 
 	return nil
 }
 
 // cleanup periodically removes expired entries.
+// OPTIMIZED: Runs every 10 minutes (was 5) and processes in batches to reduce lock contention.
 func (s *MemoryStore) cleanup() {
 	defer s.wg.Done()
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(10 * time.Minute) // Reduced frequency from 5min to 10min
 	defer ticker.Stop()
 
 	for {
@@ -369,26 +478,75 @@ func (s *MemoryStore) cleanup() {
 		case <-s.stopChan:
 			return
 		case <-ticker.C:
-			s.mu.Lock()
-			if !s.stopped {
-				now := time.Now()
-				for key, e := range s.data {
-					if now.After(e.expiresAt) {
-						delete(s.data, key)
-					}
-				}
-				for key, e := range s.compressed {
-					if now.After(e.expiresAt) {
-						delete(s.compressed, key)
-					}
-				}
-				for key, e := range s.expansions {
-					if now.After(e.expiresAt) {
-						delete(s.expansions, key)
-					}
-				}
-			}
-			s.mu.Unlock()
+			// Process cleanup in smaller batches to reduce lock hold time
+			s.cleanupBatch()
+		}
+	}
+}
+
+// cleanupBatch performs a single cleanup pass with batched deletes.
+// Each map gets its own independent batch limit to avoid one map monopolising the budget.
+func (s *MemoryStore) cleanupBatch() {
+	const maxDeletesPerMap = 25 // 4 maps × 25 = 100 max deletes per cycle
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.stopped {
+		return
+	}
+
+	now := time.Now()
+	deleteCount := 0
+
+	// Cleanup original data
+	for key, e := range s.data {
+		if deleteCount >= maxDeletesPerMap {
+			break
+		}
+		if now.After(e.expiresAt) {
+			s.dataOrder.Remove(e.element)
+			delete(s.data, key)
+			deleteCount++
+		}
+	}
+
+	// Cleanup compressed data
+	deleteCount = 0
+	for key, e := range s.compressed {
+		if deleteCount >= maxDeletesPerMap {
+			break
+		}
+		if now.After(e.expiresAt) {
+			s.compOrder.Remove(e.element)
+			delete(s.compressed, key)
+			deleteCount++
+		}
+	}
+
+	// Cleanup expansions
+	deleteCount = 0
+	for key, e := range s.expansions {
+		if deleteCount >= maxDeletesPerMap {
+			break
+		}
+		if now.After(e.expiresAt) {
+			s.expansOrder.Remove(e.element)
+			delete(s.expansions, key)
+			deleteCount++
+		}
+	}
+
+	// Cleanup field refs
+	deleteCount = 0
+	for key, e := range s.fieldRefs {
+		if deleteCount >= maxDeletesPerMap {
+			break
+		}
+		if now.After(e.expiresAt) {
+			s.fieldRefOrder.Remove(e.element)
+			delete(s.fieldRefs, key)
+			deleteCount++
 		}
 	}
 }

@@ -58,7 +58,7 @@ func TestIntegration_ExpandContext_Injected_Anthropic(t *testing.T) {
 	// Verify: the response to the client should NOT contain expand_context
 	assert.NotContains(t, string(respBody), "expand_context",
 		"client response should not contain expand_context")
-	assert.NotContains(t, string(respBody), "<<<SHADOW:",
+	assert.NotContains(t, string(respBody), "[REF:",
 		"client response should not contain shadow markers")
 }
 
@@ -97,7 +97,7 @@ func TestIntegration_ExpandContext_Injected_OpenAI(t *testing.T) {
 	// Verify: the response to the client should NOT contain expand_context
 	assert.NotContains(t, string(respBody), "expand_context",
 		"client response should not contain expand_context")
-	assert.NotContains(t, string(respBody), "<<<SHADOW:",
+	assert.NotContains(t, string(respBody), "[REF:",
 		"client response should not contain shadow markers")
 }
 
@@ -141,8 +141,11 @@ func TestIntegration_ToolDiscovery_SearchTool_Anthropic(t *testing.T) {
 
 	assert.True(t, containsToolName(forwardedBody, "gateway_search_tools"),
 		"forwarded request should contain gateway_search_tools")
-	assert.Less(t, len(toolNames), 25,
-		"forwarded request should have fewer tools than original 25, got %d: %v", len(toolNames), toolNames)
+	// With stub behavior, deferred tools remain as stubs and gateway_search_tools is appended.
+	// Count only effective (non-deferred) tools — should be just gateway_search_tools = 1.
+	effectiveCount := countEffectiveToolNames(forwardedBody)
+	assert.Less(t, effectiveCount, 25,
+		"forwarded request should have fewer effective tools than original 25, got %d total tools: %v", len(toolNames), toolNames)
 
 	// Verify: the response is valid
 	assert.NotEmpty(t, respBody)
@@ -211,7 +214,7 @@ func TestIntegration_PhantomLoop_ExpandContext(t *testing.T) {
 	// Verify: client response contains text, no expand_context
 	assert.NotContains(t, string(respBody), "expand_context",
 		"client response should not contain expand_context")
-	assert.NotContains(t, string(respBody), "<<<SHADOW:",
+	assert.NotContains(t, string(respBody), "[REF:",
 		"client response should not contain shadow markers")
 
 	var response map[string]interface{}
@@ -340,17 +343,19 @@ func TestIntegration_ParallelPipes_BothActive(t *testing.T) {
 	forwardedBody := requests[0].Body
 	toolNames := extractToolNames(forwardedBody)
 
-	// Tool discovery should have filtered: fewer than 25 original tools
-	// It should include gateway_search_tools (from tool-search strategy)
-	assert.Less(t, len(toolNames), 25,
-		"tool_discovery should have filtered tools from 25 to fewer")
+	// Tool discovery should have filtered: fewer than 25 effective (non-stub) tools.
+	// Stubs preserve the tools[] array length for KV-cache stability.
+	// It should include gateway_search_tools (from tool-search strategy).
+	effectiveCountBoth := countEffectiveToolNames(forwardedBody)
+	assert.Less(t, effectiveCountBoth, 25,
+		"tool_discovery should have filtered effective tools from 25 to fewer")
 	assert.True(t, containsToolName(forwardedBody, "gateway_search_tools"),
 		"forwarded request should contain gateway_search_tools from tool_discovery pipe")
 
 	// Tool output compression: the tool result content should be modified
 	// (compressed with "simple" strategy). Check for shadow marker.
-	// With "simple" strategy and minBytes=100, a 1000+ byte output should be compressed.
-	hasCompression := bytes.Contains(forwardedBody, []byte("<<<SHADOW:"))
+	// With "simple" strategy and minTokens=25, a 1000+ byte output should be compressed.
+	hasCompression := bytes.Contains(forwardedBody, []byte("[REF:"))
 
 	// If compression happened, expand_context should be present in tools.
 	// Note: tool-search replaces all tools, so expand_context may be combined with
@@ -421,9 +426,9 @@ func extractShadowIDFromRequest(body []byte) string {
 	return ""
 }
 
-// parseShadowID extracts a shadow ID from content like "<<<SHADOW:shadow_abc123>>>\n..."
+// parseShadowID extracts a shadow ID from content like "[REF:shadow_abc123]\n..."
 func parseShadowID(content string) string {
-	const prefix = "<<<SHADOW:"
+	const prefix = "[REF:"
 	const suffix = ">>>"
 
 	idx := bytes.Index([]byte(content), []byte(prefix))
@@ -574,8 +579,11 @@ func TestIntegration_ToolDiscovery_SearchTool_OpenAI(t *testing.T) {
 
 	assert.True(t, containsToolName(forwardedBody, "gateway_search_tools"),
 		"forwarded request should contain gateway_search_tools")
-	assert.Less(t, len(toolNames), 25,
-		"forwarded request should have fewer tools than original 25, got %d: %v", len(toolNames), toolNames)
+	// With stub behavior, deferred tools remain as stubs and gateway_search_tools is appended.
+	// Count only effective (non-deferred) tools — should be just gateway_search_tools = 1.
+	effectiveCountOpenAI := countEffectiveToolNames(forwardedBody)
+	assert.Less(t, effectiveCountOpenAI, 25,
+		"forwarded request should have fewer effective tools than original 25, got %d total tools: %v", len(toolNames), toolNames)
 
 	// Verify: gateway_search_tools is in OpenAI format ({type:"function", function:{name:...}})
 	tools := extractTools(forwardedBody)

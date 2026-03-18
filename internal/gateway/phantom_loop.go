@@ -1,30 +1,14 @@
-// Phantom tool loop - generic handler for gateway-internal tools.
-//
-// DESIGN: Both expand_context and gateway_search_tools are "phantom tools" that:
-//   - Are injected by the gateway
-//   - Are intercepted by the gateway when the LLM calls them
-//   - Are never seen by the client
-//
-// This file provides a generic loop that:
-//  1. Forwards request to LLM
-//  2. Checks response for phantom tool calls
-//  3. If found: handles them, appends tool_result, re-forwards
-//  4. If not found: filters phantom tools from response, returns to client
-//
-// Phantom tool handlers implement PhantomToolHandler interface.
+// phantom_loop.go handles gateway-internal phantom tool calls intercepted from LLM responses.
 package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 
 	"github.com/compresr/context-gateway/internal/adapters"
 	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
@@ -35,9 +19,9 @@ const MaxPhantomLoops = 5
 
 // PhantomToolCall represents a detected phantom tool call.
 type PhantomToolCall struct {
-	ToolUseID string         // The tool_use block ID
-	ToolName  string         // The phantom tool name
-	Input     map[string]any // The input arguments
+	ToolUseID string
+	ToolName  string
+	Input     map[string]any
 }
 
 // PhantomToolResult contains the outcome of handling phantom tool calls.
@@ -51,23 +35,38 @@ type PhantomToolResult struct {
 // PhantomToolHandler handles a specific phantom tool.
 type PhantomToolHandler interface {
 	// Name returns the phantom tool name to detect.
+	// Handlers that intercept real (non-phantom) tool names should return ""
+	// so the phantom loop does not attempt to filter those names from the response.
 	Name() string
 
 	// HandleCalls processes the detected calls and returns results.
-	// Called when the LLM invokes this phantom tool.
-	HandleCalls(calls []PhantomToolCall, isAnthropic bool) *PhantomToolResult
+	// adapter is the provider adapter for building response messages.
+	// requestBody is the current request body (used for format detection).
+	HandleCalls(calls []PhantomToolCall, adapter adapters.Adapter, requestBody []byte) *PhantomToolResult
+}
 
-	// FilterFromResponse removes this phantom tool from the final response.
-	FilterFromResponse(response []byte) ([]byte, bool)
+// CatchAllPhantomToolHandler is an optional extension of PhantomToolHandler.
+// When a handler also implements this interface, the phantom loop calls ShouldHandle
+// to match tool calls by name dynamically rather than by a single fixed Name().
+// This enables handlers that intercept a variable set of tool names (e.g. any tool
+// in the deferred set) without registering each name individually.
+//
+// Name() on a CatchAllPhantomToolHandler should return "" — the phantom loop skips
+// FilterToolCallFromResponse for empty names, which is correct since catch-all handlers
+// intercept real client-visible tool names that must not be stripped from the response.
+type CatchAllPhantomToolHandler interface {
+	PhantomToolHandler
+	ShouldHandle(toolName string) bool
 }
 
 // PhantomLoopResult contains the result of running the phantom tool loop.
 type PhantomLoopResult struct {
-	ResponseBody   []byte
-	Response       *http.Response
-	ForwardLatency time.Duration
-	LoopCount      int
-	HandledCalls   map[string]int // tool_name -> count
+	ResponseBody     []byte
+	Response         *http.Response
+	ForwardLatency   time.Duration
+	LoopCount        int
+	HandledCalls     map[string]int     // tool_name -> count
+	AccumulatedUsage adapters.UsageInfo // Total usage across ALL loop iterations
 }
 
 // PhantomLoop runs the phantom tool handling loop.
@@ -85,15 +84,18 @@ func (p *PhantomLoop) Run(
 	ctx context.Context,
 	forwardFunc func(ctx context.Context, body []byte) (*http.Response, error),
 	body []byte,
-	provider adapters.Provider,
+	adapter adapters.Adapter,
 ) (*PhantomLoopResult, error) {
 	result := &PhantomLoopResult{
 		HandledCalls: make(map[string]int),
 	}
 	currentBody := body
-	isAnthropic := provider == adapters.ProviderAnthropic || provider == adapters.ProviderBedrock
 
 	for {
+		if ctx.Err() != nil {
+			log.Debug().Msg("phantom_loop: context cancelled, stopping loop")
+			break
+		}
 		// Forward to LLM
 		forwardStart := time.Now()
 		resp, err := forwardFunc(ctx, currentBody)
@@ -108,7 +110,10 @@ func (p *PhantomLoop) Run(
 				// Filter phantom tools from last response before returning
 				finalResponse := result.ResponseBody
 				for _, handler := range p.handlers {
-					if filtered, ok := handler.FilterFromResponse(finalResponse); ok {
+					if handler.Name() == "" {
+						continue // catch-all handler: intercepts real tool names, nothing to strip
+					}
+					if filtered, ok := adapter.FilterToolCallFromResponse(finalResponse, handler.Name()); ok {
 						finalResponse = filtered
 					}
 				}
@@ -118,9 +123,11 @@ func (p *PhantomLoop) Run(
 			return result, err
 		}
 
-		// Read response
-		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
-		_ = resp.Body.Close()
+		// Read response — use inner function so defer closes the body even on early return
+		responseBody, err := func() ([]byte, error) {
+			defer func() { _ = resp.Body.Close() }()
+			return io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
+		}()
 		if err != nil {
 			return result, err
 		}
@@ -128,8 +135,16 @@ func (p *PhantomLoop) Run(
 		result.ResponseBody = responseBody
 		result.Response = resp
 
+		// Accumulate usage from every iteration (including the final one)
+		iterUsage := adapter.ExtractUsage(responseBody)
+		result.AccumulatedUsage.InputTokens += iterUsage.InputTokens
+		result.AccumulatedUsage.OutputTokens += iterUsage.OutputTokens
+		result.AccumulatedUsage.CacheCreationInputTokens += iterUsage.CacheCreationInputTokens
+		result.AccumulatedUsage.CacheReadInputTokens += iterUsage.CacheReadInputTokens
+		result.AccumulatedUsage.TotalTokens += iterUsage.TotalTokens
+
 		// Check for phantom tool calls
-		allCalls := p.parsePhantomCalls(responseBody, provider)
+		allCalls := p.parsePhantomCalls(responseBody, adapter)
 		if len(allCalls) == 0 || result.LoopCount >= MaxPhantomLoops {
 			if result.LoopCount >= MaxPhantomLoops && len(allCalls) > 0 {
 				log.Warn().Int("max_loops", MaxPhantomLoops).Msg("phantom_loop: max loops reached")
@@ -138,7 +153,10 @@ func (p *PhantomLoop) Run(
 			// Filter all phantom tools from final response
 			finalResponse := responseBody
 			for _, handler := range p.handlers {
-				if filtered, ok := handler.FilterFromResponse(finalResponse); ok {
+				if handler.Name() == "" {
+					continue // catch-all handler: intercepts real tool names, nothing to strip
+				}
+				if filtered, ok := adapter.FilterToolCallFromResponse(finalResponse, handler.Name()); ok {
 					finalResponse = filtered
 				}
 			}
@@ -152,7 +170,12 @@ func (p *PhantomLoop) Run(
 		var requestModifiers []func([]byte) ([]byte, error)
 
 		for _, handler := range p.handlers {
-			calls := p.filterCallsByName(allCalls, handler.Name())
+			var calls []PhantomToolCall
+			if ca, ok := handler.(CatchAllPhantomToolHandler); ok {
+				calls = p.filterCallsByCatchAll(allCalls, ca)
+			} else {
+				calls = p.filterCallsByName(allCalls, handler.Name())
+			}
 			if len(calls) == 0 {
 				continue
 			}
@@ -163,7 +186,7 @@ func (p *PhantomLoop) Run(
 				Int("loop", result.LoopCount).
 				Msg("phantom_loop: handling calls")
 
-			handleResult := handler.HandleCalls(calls, isAnthropic)
+			handleResult := handler.HandleCalls(calls, adapter, currentBody)
 			result.HandledCalls[handler.Name()] += len(calls)
 
 			if handleResult.StopLoop {
@@ -178,7 +201,10 @@ func (p *PhantomLoop) Run(
 				}
 				// Filter remaining phantom tools from response
 				for _, h := range p.handlers {
-					if filtered, ok := h.FilterFromResponse(result.ResponseBody); ok {
+					if h.Name() == "" {
+						continue // catch-all handler: intercepts real tool names, nothing to strip
+					}
+					if filtered, ok := adapter.FilterToolCallFromResponse(result.ResponseBody, h.Name()); ok {
 						result.ResponseBody = filtered
 					}
 				}
@@ -197,7 +223,7 @@ func (p *PhantomLoop) Run(
 		}
 
 		// Append assistant response and tool results
-		currentBody, err = appendMessagesToRequest(currentBody, responseBody, allToolResults, isAnthropic)
+		currentBody, err = adapter.AppendMessages(currentBody, responseBody, allToolResults)
 		if err != nil {
 			log.Error().Err(err).Msg("phantom_loop: failed to append messages")
 			break
@@ -220,10 +246,17 @@ func (p *PhantomLoop) Run(
 	return result, nil
 }
 
-// parsePhantomCalls extracts all phantom tool calls from a response.
-func (p *PhantomLoop) parsePhantomCalls(responseBody []byte, provider adapters.Provider) []PhantomToolCall {
-	var response map[string]any
-	if err := json.Unmarshal(responseBody, &response); err != nil {
+// parsePhantomCalls extracts all phantom tool calls from a response using the adapter.
+func (p *PhantomLoop) parsePhantomCalls(responseBody []byte, adapter adapters.Adapter) []PhantomToolCall {
+	handlerNames := make(map[string]bool)
+	for _, h := range p.handlers {
+		if h.Name() != "" {
+			handlerNames[h.Name()] = true
+		}
+	}
+
+	rawCalls, err := adapter.ExtractToolCallsFromResponse(responseBody)
+	if err != nil {
 		preview := string(responseBody)
 		if len(preview) > 200 {
 			preview = preview[:200]
@@ -232,137 +265,20 @@ func (p *PhantomLoop) parsePhantomCalls(responseBody []byte, provider adapters.P
 			Err(err).
 			Str("body_preview", preview).
 			Int("body_len", len(responseBody)).
-			Msg("phantom_loop: failed to parse response JSON for phantom tool detection")
+			Msg("phantom_loop: failed to extract tool calls from response")
 		return nil
 	}
 
-	// Get handler names for lookup
-	handlerNames := make(map[string]bool)
-	for _, h := range p.handlers {
-		handlerNames[h.Name()] = true
-	}
-
-	var calls []PhantomToolCall
-
-	switch provider {
-	case adapters.ProviderAnthropic, adapters.ProviderBedrock:
-		content, ok := response["content"].([]any)
-		if !ok {
-			return nil
+	calls := make([]PhantomToolCall, 0, len(rawCalls))
+	for _, rc := range rawCalls {
+		if !handlerNames[rc.ToolName] && !p.matchesCatchAll(rc.ToolName) {
+			continue
 		}
-
-		for _, block := range content {
-			blockMap, ok := block.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			if blockMap["type"] != "tool_use" {
-				continue
-			}
-
-			name, _ := blockMap["name"].(string)
-			if !handlerNames[name] {
-				continue
-			}
-
-			toolUseID, _ := blockMap["id"].(string)
-			input, _ := blockMap["input"].(map[string]any)
-
-			calls = append(calls, PhantomToolCall{
-				ToolUseID: toolUseID,
-				ToolName:  name,
-				Input:     input,
-			})
-		}
-
-	case adapters.ProviderOpenAI, adapters.ProviderOllama, adapters.ProviderLiteLLM, adapters.ProviderMiniMax:
-		// OpenAI Responses API format: output[] with type:"function_call"
-		// Check this BEFORE Chat Completions since both use the OpenAI adapter.
-		if output, ok := response["output"].([]any); ok {
-			for _, item := range output {
-				itemMap, ok := item.(map[string]any)
-				if !ok {
-					continue
-				}
-
-				if itemMap["type"] != "function_call" {
-					continue
-				}
-
-				name, _ := itemMap["name"].(string)
-				if !handlerNames[name] {
-					continue
-				}
-
-				callID, _ := itemMap["call_id"].(string)
-				argsStr, _ := itemMap["arguments"].(string)
-
-				var input map[string]any
-				if err := json.Unmarshal([]byte(argsStr), &input); err != nil {
-					input = make(map[string]any)
-				}
-
-				calls = append(calls, PhantomToolCall{
-					ToolUseID: callID,
-					ToolName:  name,
-					Input:     input,
-				})
-			}
-			if len(calls) > 0 {
-				break
-			}
-		}
-		choices, ok := response["choices"].([]any)
-		if !ok || len(choices) == 0 {
-			return nil
-		}
-
-		choice, ok := choices[0].(map[string]any)
-		if !ok {
-			return nil
-		}
-
-		message, ok := choice["message"].(map[string]any)
-		if !ok {
-			return nil
-		}
-
-		toolCalls, ok := message["tool_calls"].([]any)
-		if !ok {
-			return nil
-		}
-
-		for _, tc := range toolCalls {
-			tcMap, ok := tc.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			function, ok := tcMap["function"].(map[string]any)
-			if !ok {
-				continue
-			}
-
-			name, _ := function["name"].(string)
-			if !handlerNames[name] {
-				continue
-			}
-
-			toolCallID, _ := tcMap["id"].(string)
-			argsStr, _ := function["arguments"].(string)
-
-			var input map[string]any
-			if err := json.Unmarshal([]byte(argsStr), &input); err != nil {
-				input = make(map[string]any)
-			}
-
-			calls = append(calls, PhantomToolCall{
-				ToolUseID: toolCallID,
-				ToolName:  name,
-				Input:     input,
-			})
-		}
+		calls = append(calls, PhantomToolCall{
+			ToolUseID: rc.ToolUseID,
+			ToolName:  rc.ToolName,
+			Input:     rc.Input,
+		})
 	}
 
 	// Also scan text content for <<<EXPAND:shadow_xxx>>> patterns (text-based expand_context)
@@ -391,121 +307,25 @@ func (p *PhantomLoop) filterCallsByName(calls []PhantomToolCall, name string) []
 	return filtered
 }
 
-// appendMessagesToRequest adds assistant response and tool results to the request.
-func appendMessagesToRequest(body []byte, assistantResponse []byte, toolResults []map[string]any, isAnthropic bool) ([]byte, error) {
-	// Detect Responses API format: has input[] but no messages[]
-	isResponses := gjson.GetBytes(body, "input").Exists() && !gjson.GetBytes(body, "messages").Exists()
-
-	if isResponses {
-		return appendMessagesToRequestResponses(body, assistantResponse, toolResults)
-	}
-
-	var request map[string]any
-	if err := json.Unmarshal(body, &request); err != nil {
-		return nil, err
-	}
-
-	messages, _ := request["messages"].([]any)
-	if messages == nil {
-		messages = []any{}
-	}
-
-	var response map[string]any
-	if err := json.Unmarshal(assistantResponse, &response); err != nil {
-		return nil, err
-	}
-
-	// Add assistant message
-	if isAnthropic {
-		if content, ok := response["content"].([]any); ok {
-			messages = append(messages, map[string]any{
-				"role":    "assistant",
-				"content": content,
-			})
-		}
-	} else {
-		if choices, ok := response["choices"].([]any); ok && len(choices) > 0 {
-			if choice, ok := choices[0].(map[string]any); ok {
-				if message, ok := choice["message"].(map[string]any); ok {
-					messages = append(messages, message)
-				}
+// matchesCatchAll returns true if any registered catch-all handler claims toolName.
+func (p *PhantomLoop) matchesCatchAll(toolName string) bool {
+	for _, h := range p.handlers {
+		if ca, ok := h.(CatchAllPhantomToolHandler); ok {
+			if ca.ShouldHandle(toolName) {
+				return true
 			}
 		}
 	}
-
-	// Add tool results
-	for _, result := range toolResults {
-		messages = append(messages, result)
-	}
-
-	request["messages"] = messages
-	return json.Marshal(request)
+	return false
 }
 
-// appendMessagesToRequestResponses handles the OpenAI Responses API format.
-// Instead of messages[], it appends to input[] using function_call and function_call_output items.
-func appendMessagesToRequestResponses(body []byte, assistantResponse []byte, toolResults []map[string]any) ([]byte, error) {
-	var response map[string]any
-	if err := json.Unmarshal(assistantResponse, &response); err != nil {
-		return nil, err
-	}
-
-	result := body
-
-	// Extract function_call items from output[] and append them to input[]
-	if output, ok := response["output"].([]any); ok {
-		for _, item := range output {
-			itemMap, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			if itemMap["type"] != "function_call" {
-				continue
-			}
-			// Append the function_call item to input[]
-			itemJSON, err := json.Marshal(itemMap)
-			if err != nil {
-				continue
-			}
-			result, err = sjson.SetRawBytes(result, "input.-1", itemJSON)
-			if err != nil {
-				return nil, fmt.Errorf("failed to append function_call to input: %w", err)
-			}
+// filterCallsByCatchAll collects calls claimed by a catch-all handler.
+func (p *PhantomLoop) filterCallsByCatchAll(calls []PhantomToolCall, handler CatchAllPhantomToolHandler) []PhantomToolCall {
+	var filtered []PhantomToolCall
+	for _, call := range calls {
+		if handler.ShouldHandle(call.ToolName) {
+			filtered = append(filtered, call)
 		}
 	}
-
-	// Append tool results as function_call_output items to input[]
-	for _, tr := range toolResults {
-		// Convert tool result to function_call_output format
-		toolUseID, _ := tr["tool_call_id"].(string)
-		if toolUseID == "" {
-			// Anthropic format uses "tool_use_id"
-			toolUseID, _ = tr["tool_use_id"].(string)
-		}
-		content, _ := tr["content"].(string)
-		if content == "" {
-			// Try nested content for Anthropic format
-			if contentArr, ok := tr["content"].([]any); ok && len(contentArr) > 0 {
-				if block, ok := contentArr[0].(map[string]any); ok {
-					content, _ = block["text"].(string)
-				}
-			}
-		}
-
-		outputItem := map[string]any{
-			"type":    "function_call_output",
-			"call_id": toolUseID,
-			"output":  content,
-		}
-		itemJSON, err := json.Marshal(outputItem)
-		if err != nil {
-			continue
-		}
-		result, err = sjson.SetRawBytes(result, "input.-1", itemJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to append function_call_output to input: %w", err)
-		}
-	}
-
-	return result, nil
+	return filtered
 }

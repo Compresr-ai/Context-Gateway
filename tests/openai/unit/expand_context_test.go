@@ -130,7 +130,7 @@ func extractShadowIDFromRequest(body []byte) string {
 	bodyStr := string(body)
 
 	// Try direct match first
-	idx := strings.Index(bodyStr, "<<<SHADOW:")
+	idx := strings.Index(bodyStr, "[REF:")
 	if idx == -1 {
 		// Try JSON-escaped unicode version (\u003c = <)
 		idx = strings.Index(bodyStr, "SHADOW:")
@@ -159,8 +159,8 @@ func extractShadowIDFromRequest(body []byte) string {
 		return bodyStr[start:end]
 	}
 
-	// Extract shadow_xxx from <<<SHADOW:shadow_xxx>>> or SHADOW:shadow_xxx>>>
-	startOffset := 10 // "<<<SHADOW:" length
+	// Extract shadow_xxx from [REF:shadow_xxx] or SHADOW:shadow_xxx>>>
+	startOffset := 10 // "[REF:" length
 	if bodyStr[idx] != '<' {
 		startOffset = 7 // "SHADOW:" length
 	}

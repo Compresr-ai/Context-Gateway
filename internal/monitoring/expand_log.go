@@ -1,10 +1,9 @@
 // Package monitoring - expand_log.go tracks expand_context calls in memory.
-//
-// DESIGN: Ring buffer of recent expand_context events for dashboard display.
-// Shows which tool outputs the model requested to see in full.
 package monitoring
 
-import "time"
+import (
+	"time"
+)
 
 const maxExpandLogEntries = 100
 
@@ -16,7 +15,8 @@ type ExpandLogEntry struct {
 	ShadowID       string    `json:"shadow_id"`
 	Found          bool      `json:"found"`
 	ContentPreview string    `json:"content_preview,omitempty"` // First 100 chars
-	ContentLength  int       `json:"content_length"`
+	ContentLength  int       `json:"content_length"`            // Byte length for debugging
+	ContentTokens  int       `json:"content_tokens,omitempty"`  // Tiktoken count
 }
 
 // ExpandLog keeps a ring buffer of recent expand_context events.
@@ -37,9 +37,6 @@ func (l *ExpandLog) Record(entry ExpandLogEntry) { l.buf.Record(entry) }
 
 // Recent returns the most recent N entries (newest first).
 func (l *ExpandLog) Recent(n int) []ExpandLogEntry { return l.buf.Recent(n) }
-
-// Count returns the total number of logged expansions.
-func (l *ExpandLog) Count() int { return l.buf.Count() }
 
 // ExpandSummary is a brief summary of expand_context activity.
 type ExpandSummary struct {
@@ -64,18 +61,26 @@ func (l *ExpandLog) Summary() ExpandSummary {
 
 // RecentForSession returns the most recent N entries for a specific session (newest first).
 func (l *ExpandLog) RecentForSession(sessionID string, n int) []ExpandLogEntry {
-	entries := l.buf.All()
-	if n <= 0 || len(entries) == 0 {
-		return nil
-	}
+	return l.buf.RecentWhere(n, func(e ExpandLogEntry) bool { return e.SessionID == sessionID })
+}
 
-	var result []ExpandLogEntry
-	for i := len(entries) - 1; i >= 0 && len(result) < n; i-- {
-		if entries[i].SessionID == sessionID {
-			result = append(result, entries[i])
+// SummaryForRequest returns a summary and total content tokens for a request.
+func (l *ExpandLog) SummaryForRequest(requestID string) (ExpandSummary, int) {
+	entries := l.buf.All()
+	var s ExpandSummary
+	var totalContentTokens int
+	for _, e := range entries {
+		if e.RequestID == requestID {
+			s.Total++
+			if e.Found {
+				s.Found++
+				totalContentTokens += e.ContentTokens
+			} else {
+				s.NotFound++
+			}
 		}
 	}
-	return result
+	return s, totalContentTokens
 }
 
 // SummaryForSession returns a summary for a specific session.

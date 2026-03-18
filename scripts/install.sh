@@ -110,19 +110,43 @@ setup_path() {
     warn "Added to PATH in $SHELL_RC. Restart terminal or run: source $SHELL_RC"
 }
 
+# Check for Node.js/npm (required to install agents like Claude Code and Codex)
+check_node() {
+    if ! command -v npm &>/dev/null; then
+        warn "npm not found. Both Claude Code and Codex require Node.js."
+        warn "Install Node.js from https://nodejs.org/ then re-run this installer."
+        warn "Continuing anyway — you can install Node.js later."
+    fi
+}
+
 # Print next steps
 print_next_steps() {
     echo ""
     echo -e "${BOLD}Quick Start${NC}"
     echo ""
-    echo "  1. Add your API key:"
+    echo -e "  Run the interactive setup wizard:"
+    echo ""
+    echo "     context-gateway"
+    echo ""
+    echo -e "  ${BOLD}— or launch a specific agent directly:${NC}"
+    echo ""
+    echo "     context-gateway agent claude_code   # Claude Code (Anthropic)"
+    echo "     context-gateway agent codex         # Codex (OpenAI)"
+    echo "     context-gateway agent cursor        # Cursor"
+    echo ""
+    echo -e "  ${BOLD}The wizard handles all env var setup automatically.${NC}"
+    echo ""
+    echo -e "  To configure API keys manually:"
+    echo "     # Claude Code / Anthropic:"
     echo "     echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.config/context-gateway/.env"
     echo ""
-    echo "  2. Run the gateway:"
-    echo "     context-gateway start"
+    echo "     # Codex / OpenAI (API key mode):"
+    echo "     echo 'OPENAI_API_KEY=sk-proj-...' >> ~/.config/context-gateway/.env"
     echo ""
-    echo "  3. Configure your AI agent:"
-    echo "     export ANTHROPIC_BASE_URL=http://localhost:18081"
+    echo "     # Compresr compression API key (required for compression features):"
+    echo "     echo 'COMPRESR_API_KEY=...' >> ~/.config/context-gateway/.env"
+    echo ""
+    echo -e "  Docs: https://github.com/$REPO"
     echo ""
 }
 
@@ -136,6 +160,7 @@ main() {
     get_download_url
     install_binary
     setup_path
+    check_node
     print_next_steps
 }
 

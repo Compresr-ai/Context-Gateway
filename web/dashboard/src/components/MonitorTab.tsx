@@ -33,30 +33,26 @@ function duration(iso: string): string {
   return `${Math.floor(s)}s`
 }
 
-// Statuses: active -> Running, waiting_for_human -> Waiting for human interaction, finished -> Finished
-const statusConfig: Record<string, { label: string; color: string; bg: string; glow: string }> = {
+// Two statuses: active -> Running, waiting_for_human -> Waiting
+const statusConfig: Record<string, { label: string; color: string; bg: string; glow: string; topBar?: string }> = {
   active: {
     label: 'Running',
     color: '#22c55e',
     bg: 'rgba(22,101,52,0.3)',
     glow: '0 0 8px rgba(34,197,94,0.3)',
+    topBar: 'linear-gradient(90deg, #16a34a, #22c55e, #4ade80)',
   },
   waiting_for_human: {
-    label: 'Waiting for human interaction',
+    label: 'Waiting',
     color: '#eab308',
     bg: 'rgba(133,77,14,0.3)',
-    glow: 'none',
-  },
-  finished: {
-    label: 'Finished',
-    color: '#6b7280',
-    bg: 'rgba(75,85,99,0.2)',
-    glow: 'none',
+    glow: '0 0 8px rgba(234,179,8,0.3)',
+    topBar: 'linear-gradient(90deg, #ca8a04, #eab308, #fde047)',
   },
 }
 
 function getStatusConfig(status: string) {
-  return statusConfig[status] || statusConfig.finished
+  return statusConfig[status] || statusConfig.waiting_for_human
 }
 
 // Inline editable text component
@@ -338,25 +334,6 @@ function DetailPanel({ inst, onClose, onRename }: { inst: MonitorInstance; onClo
           </Section>
         )}
 
-        {inst.last_user_query && (
-          <Section title="Last User Message">
-            <div style={{
-              background: '#0a0a0a',
-              border: '1px solid rgba(255,255,255,0.06)',
-              borderRadius: 10,
-              padding: 14,
-              fontSize: 12,
-              lineHeight: 1.6,
-              color: '#e5e7eb',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              maxHeight: 200,
-              overflowY: 'auto',
-            }}>
-              {inst.last_user_query}
-            </div>
-          </Section>
-        )}
       </div>
     </>
   )
@@ -475,7 +452,11 @@ function InstanceCard({ inst, onExpand, onConfig, onRename }: { inst: MonitorIns
       onMouseLeave={() => setHovered(false)}
       style={{
         background: hovered ? 'rgba(26,26,26,0.95)' : 'rgba(17,17,17,0.9)',
-        border: `1px solid ${inst.status === 'active' ? 'rgba(34,197,94,0.15)' : hovered ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.06)'}`,
+        border: `1px solid ${
+          inst.status === 'active' ? 'rgba(34,197,94,0.15)' :
+          inst.status === 'waiting_for_human' ? 'rgba(234,179,8,0.2)' :
+          hovered ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.06)'
+        }`,
         borderRadius: 14,
         padding: '18px 20px',
         cursor: 'pointer',
@@ -484,14 +465,14 @@ function InstanceCard({ inst, onExpand, onConfig, onRename }: { inst: MonitorIns
         overflow: 'hidden',
       }}
     >
-      {inst.status === 'active' && (
+      {sc.topBar && (
         <div style={{
           position: 'absolute',
           top: 0,
           left: 0,
           right: 0,
           height: 2,
-          background: 'linear-gradient(90deg, #16a34a, #22c55e, #4ade80)',
+          background: sc.topBar,
         }} />
       )}
 
@@ -566,22 +547,6 @@ function InstanceCard({ inst, onExpand, onConfig, onRename }: { inst: MonitorIns
         </div>
       </div>
 
-      {/* Last user message */}
-      {inst.last_user_query && (
-        <div style={{
-          fontSize: 11,
-          color: '#9ca3af',
-          lineHeight: 1.5,
-          marginBottom: 14,
-          maxHeight: 36,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}>
-          {inst.last_user_query.substring(0, 120)}
-          {inst.last_user_query.length > 120 ? '...' : ''}
-        </div>
-      )}
-
       {/* Stats */}
       <div style={{
         display: 'grid',
@@ -648,7 +613,11 @@ function InstanceCard({ inst, onExpand, onConfig, onRename }: { inst: MonitorIns
 
 const SUMMARY_TITLE_KEY = 'compresr_monitor_summary_title'
 
-function MonitorTab() {
+interface MonitorTabProps {
+  dashboardData?: { total_cost: number; savings?: { tokens_saved: number } } | null
+}
+
+function MonitorTab({ dashboardData: propDashboardData }: MonitorTabProps = {}) {
   const [data, setData] = useState<MonitorData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<MonitorInstance | null>(null)
@@ -677,22 +646,43 @@ function MonitorTab() {
     }
   }
 
+  // Use dashboard data passed from parent to avoid redundant API calls.
+  // Falls back to local state if parent doesn't provide it.
+  const [localDashboardData, setLocalDashboardData] = useState<{ total_cost: number; savings?: { tokens_saved: number } } | null>(null)
+  const dashboardData = propDashboardData !== undefined ? propDashboardData : localDashboardData
+
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const resp = await fetch('/api/monitor')
-        if (!resp.ok) { setError(`API returned ${resp.status}`); return }
-        const json = await resp.json()
+        // Only fetch /api/dashboard if parent didn't pass it
+        const requests: Promise<Response>[] = [fetch('/api/monitor')]
+        if (propDashboardData === undefined) {
+          requests.push(fetch('/api/dashboard'))
+        }
+        const [monitorResp, dashResp] = await Promise.all(requests)
+        if (!monitorResp.ok) {
+          // Gateway unreachable — clear stale data so we show a clean offline state.
+          setData(null)
+          setError(`API returned ${monitorResp.status}`)
+          return
+        }
+        const json = await monitorResp.json()
         setData(json)
+        if (dashResp?.ok) {
+          const dashJson = await dashResp.json()
+          setLocalDashboardData(dashJson)
+        }
         setError(null)
       } catch (e) {
+        // Gateway unreachable — clear stale data so we show a clean offline state.
+        setData(null)
         setError(String(e))
       }
     }
     fetchData()
     const interval = setInterval(fetchData, 3000)
     return () => clearInterval(interval)
-  }, [])
+  }, [propDashboardData === undefined]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep selected panel fresh
   useEffect(() => {
@@ -702,23 +692,22 @@ function MonitorTab() {
     }
   }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (error) {
-    return (
-      <div style={{
-        color: '#ef4444',
-        padding: 16,
-        background: '#111111',
-        border: '1px solid rgba(239,68,68,0.2)',
-        borderRadius: 12,
-        fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 13,
-      }}>
-        Error: {error}
-      </div>
-    )
-  }
-
   if (!data) {
+    if (error) {
+      return (
+        <div style={{
+          color: '#ef4444',
+          padding: 16,
+          background: '#111111',
+          border: '1px solid rgba(239,68,68,0.2)',
+          borderRadius: 12,
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 13,
+        }}>
+          Error: {error}
+        </div>
+      )
+    }
     return (
       <div style={{ color: '#9ca3af', textAlign: 'center', padding: 48, fontSize: 14 }}>
         Loading...
@@ -730,24 +719,20 @@ function MonitorTab() {
   const running = instances.filter(i => i.status === 'active').length
   const waiting = instances.filter(i => i.status === 'waiting_for_human').length
   const totalTokens = instances.reduce((sum, i) => sum + i.tokens_in + i.tokens_out, 0)
-  const totalSaved = instances.reduce((sum, i) => sum + i.tokens_saved, 0)
-  const totalCost = instances.reduce((sum, i) => sum + i.cost_usd, 0)
+  // Use dashboard API data for accurate totals (same as savings tab)
+  const totalSaved = dashboardData?.savings?.tokens_saved ?? instances.reduce((sum, i) => sum + i.tokens_saved, 0)
+  const totalCost = dashboardData?.total_cost ?? instances.reduce((sum, i) => sum + i.cost_usd, 0)
 
   const filtered = filter === 'all'
     ? instances
-    : filter === 'waiting_for_human'
-      ? instances.filter(i => i.status === 'waiting_for_human')
-      : instances.filter(i => i.status === filter)
+    : instances.filter(i => i.status === filter)
 
-  const sorted = [...filtered].sort((a, b) => {
-    const order: Record<string, number> = { active: 0, waiting_for_human: 1, finished: 2 }
-    const diff = (order[a.status] ?? 3) - (order[b.status] ?? 3)
-    if (diff !== 0) return diff
-    return a.port - b.port
-  })
+  // Sort by port only — stable order, cards never reorder on status change.
+  const sorted = [...filtered].sort((a, b) => a.port - b.port)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
       {/* Summary section title - editable */}
       <div style={{
         display: 'flex',

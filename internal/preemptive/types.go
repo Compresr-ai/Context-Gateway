@@ -1,14 +1,4 @@
 // Package preemptive provides preemptive summarization for context window management.
-//
-// DESIGN: Eliminate context window wait times by summarizing conversation history
-// before it's needed. When context reaches a threshold (e.g., 80%), a background
-// worker generates a summary. When compaction is requested, the summary is ready.
-//
-// ARCHITECTURE:
-//   - Manager: Main entry point, orchestrates all components
-//   - SessionManager: Tracks conversation sessions by hash
-//   - Summarizer: Generates summaries via LLM API
-//   - Detector: Identifies compaction requests from various agents
 package preemptive
 
 import (
@@ -17,6 +7,7 @@ import (
 	"time"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 )
 
 // Strategy constants for preemptive summarization.
@@ -31,9 +22,7 @@ type CodexDetectorConfig struct {
 	PromptPatterns []string `yaml:"prompt_patterns"`
 }
 
-// =============================================================================
 // CONFIGURATION
-// =============================================================================
 
 // Config contains all configuration for preemptive summarization.
 type Config struct {
@@ -43,9 +32,6 @@ type Config struct {
 	// Timeouts
 	PendingJobTimeout time.Duration `yaml:"pending_job_timeout,omitempty"` // Wait for pending job (default: 90s)
 	SyncTimeout       time.Duration `yaml:"sync_timeout,omitempty"`        // Sync summarization timeout (default: 2m)
-
-	// Token estimation
-	TokenEstimateRatio int `yaml:"token_estimate_ratio,omitempty"` // Bytes per token (default: 4)
 
 	// Testing override for context window size
 	TestContextWindowOverride int `yaml:"test_context_window_override,omitempty"`
@@ -75,15 +61,14 @@ type SummarizerConfig struct {
 	Provider string `yaml:"provider,omitempty"`
 
 	// Inline settings (used if Provider is not set, or for overrides)
-	Model              string        `yaml:"model"`
-	ProviderKey        string        `yaml:"api_key"`
-	Endpoint           string        `yaml:"endpoint"`
-	MaxTokens          int           `yaml:"max_tokens"`
-	Timeout            time.Duration `yaml:"timeout"`
-	KeepRecentTokens   int           `yaml:"keep_recent_tokens"`   // Fixed token count (override)
-	KeepRecentCount    int           `yaml:"keep_recent"`          // Message-based (legacy fallback)
-	TokenEstimateRatio int           `yaml:"token_estimate_ratio"` // Bytes per token for estimation
-	SystemPrompt       string        `yaml:"system_prompt,omitempty"`
+	Model            string        `yaml:"model"`
+	ProviderKey      string        `yaml:"api_key"`
+	Endpoint         string        `yaml:"endpoint"`
+	MaxTokens        int           `yaml:"max_tokens"`
+	Timeout          time.Duration `yaml:"timeout"`
+	KeepRecentTokens int           `yaml:"keep_recent_tokens"` // Fixed token count (override)
+	KeepRecentCount  int           `yaml:"keep_recent"`        // Message-based (legacy fallback)
+	SystemPrompt     string        `yaml:"system_prompt,omitempty"`
 
 	// Compresr config (for strategy: "compresr")
 	Compresr *CompresrConfig `yaml:"compresr,omitempty"`
@@ -95,10 +80,10 @@ type SummarizerConfig struct {
 
 // CompresrConfig for Compresr API compression.
 type CompresrConfig struct {
-	Endpoint  string        `yaml:"endpoint"` // e.g., "/api/compress/history/"
-	AuthParam string        `yaml:"api_key"`
-	Model     string        `yaml:"model"` // e.g., "hcc_espresso_v1"
-	Timeout   time.Duration `yaml:"timeout"`
+	Endpoint string        `yaml:"endpoint"` // e.g., "/api/compress/history/"
+	APIKey   string        `yaml:"api_key"`
+	Model    string        `yaml:"model"` // e.g., "hcc_espresso_v1"
+	Timeout  time.Duration `yaml:"timeout"`
 }
 
 // SessionConfig configures session management.
@@ -133,8 +118,8 @@ func (c *Config) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
-	if c.TriggerThreshold <= 0 || c.TriggerThreshold > 100 {
-		return fmt.Errorf("trigger_threshold must be between 0 and 100")
+	if c.TriggerThreshold < 0 || c.TriggerThreshold > 100 {
+		return fmt.Errorf("trigger_threshold must be between 0 and 100 (0 = disabled)")
 	}
 
 	// Validate strategy
@@ -169,7 +154,7 @@ func (c *Config) Validate() error {
 		if c.Summarizer.Compresr.Endpoint == "" {
 			return fmt.Errorf("summarizer.compresr.endpoint is required")
 		}
-		if c.Summarizer.Compresr.AuthParam == "" {
+		if c.Summarizer.Compresr.APIKey == "" {
 			return fmt.Errorf("summarizer.compresr.api_key is required")
 		}
 		if c.Summarizer.Compresr.Model == "" {
@@ -204,9 +189,7 @@ func (sc *SummarizerConfig) EffectiveModelAndProvider() (model, provider string)
 	}
 }
 
-// =============================================================================
 // SESSION STATES
-// =============================================================================
 
 // SessionState represents the current state of a session.
 type SessionState string
@@ -221,21 +204,17 @@ const (
 // SummaryGracePeriod is how long a summary remains available after first use.
 const SummaryGracePeriod = 500 * time.Millisecond
 
-// =============================================================================
 // DETECTION RESULT
-// =============================================================================
 
 // DetectionResult contains the result of compaction detection.
 type DetectionResult struct {
 	IsCompactionRequest bool
 	DetectedBy          string
 	Confidence          float64
-	Details             map[string]interface{}
+	Details             map[string]any
 }
 
-// =============================================================================
 // MODEL CONTEXT WINDOW
-// =============================================================================
 
 // ModelContextWindow defines context window for a model.
 type ModelContextWindow struct {
@@ -245,9 +224,7 @@ type ModelContextWindow struct {
 	EffectiveMax int
 }
 
-// =============================================================================
 // TOKEN USAGE
-// =============================================================================
 
 // TokenUsage represents current token usage.
 type TokenUsage struct {
@@ -256,9 +233,7 @@ type TokenUsage struct {
 	UsagePercent float64
 }
 
-// =============================================================================
 // INTERNAL REQUEST TYPES
-// =============================================================================
 
 // request represents a parsed incoming request.
 type request struct {
@@ -269,9 +244,7 @@ type request struct {
 	detection DetectionResult
 
 	// Per-request auth captured from headers
-	authToken     string // Captured auth token from this request
-	authIsXAPIKey bool   // true if from x-api-key header
-	authEndpoint  string // Captured endpoint for this request
+	auth authtypes.CapturedAuth
 }
 
 // summaryResult contains the result of a summarization.

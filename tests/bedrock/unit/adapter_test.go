@@ -337,14 +337,16 @@ func TestBedrock_ProviderDetection_XAmzDateDoesNotTrigger(t *testing.T) {
 	assert.NotEqual(t, adapters.ProviderBedrock, provider, "X-Amz-Date header alone should not trigger Bedrock detection")
 }
 
-func TestBedrock_ProviderDetection_PathAfterAnthropicVersion(t *testing.T) {
-	// anthropic-version header should take priority over Bedrock path patterns
+func TestBedrock_ProviderDetection_PathBeatsAnthropicVersionHeader(t *testing.T) {
+	// Bedrock URL path MUST take priority over anthropic-version header.
+	// AWS SDK clients often forward anthropic-version alongside Bedrock requests;
+	// if the header check fired first it would misidentify the provider as Anthropic.
 	registry := adapters.NewRegistry()
 	headers := http.Header{}
 	headers.Set("anthropic-version", "2023-06-01")
 
 	provider, _ := adapters.IdentifyAndGetAdapter(registry, "/model/anthropic.claude-3/invoke", headers)
-	assert.Equal(t, adapters.ProviderAnthropic, provider, "anthropic-version should take priority over Bedrock path")
+	assert.Equal(t, adapters.ProviderBedrock, provider, "Bedrock path should take priority over anthropic-version header")
 }
 
 func TestBedrock_ProviderDetection_XProviderHeader(t *testing.T) {

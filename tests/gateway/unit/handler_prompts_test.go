@@ -111,7 +111,7 @@ func TestHandlePromptsAPI_HTTPResponseStructure(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
-	assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "http://localhost:18080", resp.Header.Get("Access-Control-Allow-Origin"))
 
 	var result promptsResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))

@@ -4,17 +4,23 @@ package monitoring
 import "sync"
 
 // RingBuffer is a thread-safe, bounded ring buffer for recent event tracking.
+// Uses a circular buffer (head index) for O(1) Record, avoiding slice copies.
 type RingBuffer[T any] struct {
-	mu      sync.RWMutex
-	entries []T
-	maxSize int
+	mu     sync.RWMutex
+	buf    []T
+	head   int // index of the oldest entry when full
+	size   int // number of valid entries currently stored
+	capVal int // maximum capacity
 }
 
 // NewRingBuffer creates a new ring buffer with the given capacity.
 func NewRingBuffer[T any](maxSize int) *RingBuffer[T] {
+	if maxSize <= 0 {
+		maxSize = 1
+	}
 	return &RingBuffer[T]{
-		entries: make([]T, 0, maxSize),
-		maxSize: maxSize,
+		buf:    make([]T, maxSize),
+		capVal: maxSize,
 	}
 }
 
@@ -22,19 +28,29 @@ func NewRingBuffer[T any](maxSize int) *RingBuffer[T] {
 func (rb *RingBuffer[T]) Reset() {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	rb.entries = make([]T, 0, rb.maxSize)
+	rb.head = 0
+	rb.size = 0
+	// Zero out slots to allow GC of pointer-bearing T values.
+	var zero T
+	for i := range rb.buf {
+		rb.buf[i] = zero
+	}
 }
 
-// Record adds an entry to the buffer, dropping the oldest if full.
+// Record adds an entry to the buffer, overwriting the oldest entry when full.
+// O(1) — no slice copies.
 func (rb *RingBuffer[T]) Record(entry T) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
-	if len(rb.entries) >= rb.maxSize {
-		copy(rb.entries, rb.entries[1:])
-		rb.entries[len(rb.entries)-1] = entry
+	if rb.size < rb.capVal {
+		// Buffer not yet full: write at (head+size) % cap.
+		rb.buf[(rb.head+rb.size)%rb.capVal] = entry
+		rb.size++
 	} else {
-		rb.entries = append(rb.entries, entry)
+		// Buffer full: overwrite oldest slot (head) and advance head.
+		rb.buf[rb.head] = entry
+		rb.head = (rb.head + 1) % rb.capVal
 	}
 }
 
@@ -43,16 +59,18 @@ func (rb *RingBuffer[T]) Recent(n int) []T {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
 
-	if n <= 0 || len(rb.entries) == 0 {
+	if n <= 0 || rb.size == 0 {
 		return nil
 	}
-	if n > len(rb.entries) {
-		n = len(rb.entries)
+	if n > rb.size {
+		n = rb.size
 	}
 
 	result := make([]T, n)
 	for i := 0; i < n; i++ {
-		result[i] = rb.entries[len(rb.entries)-1-i]
+		// newest-first: index from the tail backwards
+		idx := (rb.head + rb.size - 1 - i + rb.capVal) % rb.capVal
+		result[i] = rb.buf[idx]
 	}
 	return result
 }
@@ -61,7 +79,26 @@ func (rb *RingBuffer[T]) Recent(n int) []T {
 func (rb *RingBuffer[T]) Count() int {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
-	return len(rb.entries)
+	return rb.size
+}
+
+// RecentWhere returns the most recent n entries (newest first) that satisfy match.
+func (rb *RingBuffer[T]) RecentWhere(n int, match func(T) bool) []T {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+
+	if n <= 0 || rb.size == 0 {
+		return nil
+	}
+
+	var result []T
+	for i := 0; i < rb.size && len(result) < n; i++ {
+		idx := (rb.head + rb.size - 1 - i + rb.capVal) % rb.capVal
+		if match(rb.buf[idx]) {
+			result = append(result, rb.buf[idx])
+		}
+	}
+	return result
 }
 
 // All returns a copy of all entries (oldest first). Useful for aggregation.
@@ -69,10 +106,12 @@ func (rb *RingBuffer[T]) All() []T {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
 
-	if len(rb.entries) == 0 {
+	if rb.size == 0 {
 		return nil
 	}
-	result := make([]T, len(rb.entries))
-	copy(result, rb.entries)
+	result := make([]T, rb.size)
+	for i := 0; i < rb.size; i++ {
+		result[i] = rb.buf[(rb.head+i)%rb.capVal]
+	}
 	return result
 }

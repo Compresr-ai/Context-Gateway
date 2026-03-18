@@ -21,27 +21,6 @@ import (
 	"github.com/compresr/context-gateway/internal/tui"
 )
 
-// ANSI color codes
-const (
-	compresrGreen = "\033[38;2;23;128;68m" // #178044
-	bold          = "\033[1m"
-	reset         = "\033[0m"
-)
-
-// ASCII banner for startup
-const banner = `
-  ██████╗ ██████╗ ███╗  ██╗████████╗███████╗██╗ ██╗████████╗  ██████╗  █████╗ ████████╗███████╗██╗    ██╗ █████╗ ██╗   ██╗
- ██╔════╝██╔═══██╗████╗ ██║╚══██╔══╝██╔════╝╚██╗██╔╝╚══██╔══╝ ██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝██║    ██║██╔══██╗╚██╗ ██╔╝
- ██║     ██║   ██║██╔██╗██║   ██║   █████╗   ╚███╔╝    ██║    ██║  ███╗███████║   ██║   █████╗  ██║ █╗ ██║███████║ ╚████╔╝
- ██║     ██║   ██║██║╚████║   ██║   ██╔══╝   ██╔██╗    ██║    ██║   ██║██╔══██║   ██║   ██╔══╝  ██║███╗██║██╔══██║  ╚██╔╝
- ╚██████╗╚██████╔╝██║ ╚███║   ██║   ███████╗██╔╝ ██╗   ██║    ╚██████╔╝██║  ██║   ██║   ███████╗╚███╔███╔╝██║  ██║   ██║
-  ╚═════╝ ╚═════╝ ╚═╝  ╚══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝   ╚═╝     ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝
-`
-
-func printBanner() {
-	fmt.Print(compresrGreen + bold + banner + reset + "\r\n")
-}
-
 // loadEnvFiles loads .env from standard locations
 func loadEnvFiles() {
 	homeDir, err := os.UserHomeDir()
@@ -138,8 +117,19 @@ func resolveServeConfig(userConfig string) ([]byte, string, error) {
 		}
 	}
 
-	// Fall back to embedded config
+	// Fall back to embedded config — materialize to user config dir so the
+	// global config file exists on disk and dashboard changes persist across restarts.
 	if data, err := getEmbeddedConfig("fast_setup"); err == nil {
+		if homeDir != "" {
+			userConfigDir := filepath.Join(homeDir, ".config", "context-gateway", "configs")
+			if mkErr := os.MkdirAll(userConfigDir, 0750); mkErr == nil {
+				persistPath := filepath.Join(userConfigDir, "fast_setup.yaml")
+				// #nosec G306 -- config file, not secret
+				if wErr := os.WriteFile(persistPath, data, 0644); wErr == nil {
+					return data, persistPath, nil
+				}
+			}
+		}
 		return data, "(embedded) fast_setup.yaml", nil
 	}
 
@@ -193,8 +183,16 @@ func runGatewayServer(args []string) {
 		Bool("tool_discovery_pipe", cfg.Pipes.ToolDiscovery.Enabled).
 		Msg("configuration loaded")
 
+	// Warn if any API keys are stored as literal values instead of env var references.
+	// Literal keys don't update automatically when credentials rotate.
+	// Run `context-gateway config migrate` to convert them to env var references.
+	for _, warning := range config.ScanLiteralKeys(cfg) {
+		log.Warn().Msg("config: " + warning)
+	}
+
 	// Create gateway (pass config source for hot-reload support)
 	gw := gateway.New(cfg, configSource)
+	gw.SetVersion(Version)
 
 	// Attach embedded React dashboard SPA
 	if dashFS, err := getDashboardFS(); err == nil {

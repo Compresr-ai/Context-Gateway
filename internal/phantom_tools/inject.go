@@ -7,34 +7,21 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// InjectPhantomTool appends a phantom tool's JSON to the tools[] array in the request body.
-// Performs dedup checking to avoid injecting the same tool twice.
-// Uses sjson for all modifications to preserve KV-cache prefix stability.
-//
-// Parameters:
-//   - body: the request JSON body
-//   - toolName: the tool name for dedup checking
-//   - toolJSON: the pre-computed JSON bytes for this tool (provider-specific format)
-//
-// Returns the modified body and any error.
+// InjectPhantomTool appends a phantom tool to tools[], skipping if already present.
 func InjectPhantomTool(body []byte, toolName string, toolJSON []byte) ([]byte, error) {
-	// Check if tool already exists (dedup)
 	if HasToolByName(body, toolName) {
 		return body, nil
 	}
 
-	// If tools array doesn't exist, create it with just this tool
 	toolsResult := gjson.GetBytes(body, "tools")
 	if !toolsResult.Exists() {
 		return sjson.SetRawBytes(body, "tools", append(append([]byte{'['}, toolJSON...), ']'))
 	}
 
-	// Append to existing tools array using sjson "-1" (append) syntax
 	return sjson.SetRawBytes(body, "tools.-1", toolJSON)
 }
 
 // HasToolByName checks if a tool with the given name already exists in the tools[] array.
-// Checks both Anthropic format (tools.#.name) and OpenAI format (tools.#.function.name).
 func HasToolByName(body []byte, name string) bool {
 	toolsResult := gjson.GetBytes(body, "tools")
 	if !toolsResult.Exists() {
@@ -43,12 +30,10 @@ func HasToolByName(body []byte, name string) bool {
 
 	found := false
 	toolsResult.ForEach(func(_, value gjson.Result) bool {
-		// Anthropic / Responses format: top-level "name"
 		if value.Get("name").String() == name {
 			found = true
 			return false
 		}
-		// OpenAI Chat format: nested "function.name"
 		if value.Get("function.name").String() == name {
 			found = true
 			return false

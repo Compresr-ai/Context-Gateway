@@ -24,6 +24,7 @@ type PromptRecord struct {
 	Model     string `json:"model"`
 	Provider  string `json:"provider"`
 	RequestID string `json:"request_id"`
+	AgentName string `json:"agent_name,omitempty"`
 }
 
 // QueryParams controls filtering, searching, and pagination when querying prompts.
@@ -57,7 +58,9 @@ type Store interface {
 	Record(ctx context.Context, rec PromptRecord) error
 	Query(ctx context.Context, params QueryParams) (*QueryResult, error)
 	FilterOptions(ctx context.Context) (*FilterOptions, error)
+	DeleteByID(ctx context.Context, id int64) error
 	EraseAll(ctx context.Context) error
+	EraseBySession(ctx context.Context, sessionID string) error
 	Close() error
 }
 
@@ -145,6 +148,13 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	// Migration v2: add agent_name column.
+	if current < 2 {
+		if err := s.applyMigrationV2(); err != nil {
+			return fmt.Errorf("migration v2: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -199,9 +209,38 @@ func (s *SQLiteStore) applyMigrationV1() error {
 	return tx.Commit()
 }
 
-// Record inserts a prompt record into the database. If the text is empty the
+func (s *SQLiteStore) applyMigrationV2() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	statements := []string{
+		`ALTER TABLE prompts ADD COLUMN agent_name TEXT NOT NULL DEFAULT ''`,
+	}
+
+	for _, stmt := range statements {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("exec %q: %w", stmt[:min(len(stmt), 60)], err)
+		}
+	}
+
+	if _, err := tx.Exec(
+		"INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+		2, time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		return fmt.Errorf("insert schema_version: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// Record upserts a prompt record into the database. If the text is empty the
 // call is a no-op. Writes are serialized with a mutex.
-// Deduplicates: skips if the same text + session was recorded in the last 30 seconds.
+// Deduplicates globally by text: if the same prompt text already exists, its
+// timestamp and metadata are updated to the latest values instead of inserting
+// a duplicate row.
 func (s *SQLiteStore) Record(ctx context.Context, rec PromptRecord) error {
 	if strings.TrimSpace(rec.Text) == "" {
 		return nil
@@ -210,22 +249,31 @@ func (s *SQLiteStore) Record(ctx context.Context, rec PromptRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Deduplicate: skip if an identical prompt (same text + session) was recorded recently.
-	// This guards against edge cases where the same user prompt is sent in multiple requests.
-	cutoff := time.Now().Add(-30 * time.Second).Format(time.RFC3339)
-	var exists int
+	// Check if this exact text already exists anywhere in the database.
+	var existingID int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM prompts WHERE text = ? AND session_id = ? AND timestamp > ?`,
-		rec.Text, rec.SessionID, cutoff,
-	).Scan(&exists)
-	if err == nil && exists > 0 {
-		return nil // Already recorded recently
+		`SELECT id FROM prompts WHERE text = ? LIMIT 1`,
+		rec.Text,
+	).Scan(&existingID)
+
+	if err == nil {
+		// Duplicate found: update timestamp and metadata so it surfaces as the most recent.
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE prompts SET timestamp = ?, session_id = ?, model = ?, provider = ?, request_id = ?, agent_name = ?
+			 WHERE id = ?`,
+			rec.Timestamp, rec.SessionID, rec.Model, rec.Provider, rec.RequestID, rec.AgentName, existingID,
+		)
+		if err != nil {
+			return fmt.Errorf("prompthistory: update existing: %w", err)
+		}
+		return nil
 	}
 
+	// No duplicate: insert as a new record.
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO prompts (text, timestamp, session_id, model, provider, request_id)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		rec.Text, rec.Timestamp, rec.SessionID, rec.Model, rec.Provider, rec.RequestID,
+		`INSERT INTO prompts (text, timestamp, session_id, model, provider, request_id, agent_name)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rec.Text, rec.Timestamp, rec.SessionID, rec.Model, rec.Provider, rec.RequestID, rec.AgentName,
 	)
 	if err != nil {
 		return fmt.Errorf("prompthistory: record: %w", err)
@@ -269,7 +317,7 @@ func (s *SQLiteStore) Query(ctx context.Context, params QueryParams) (*QueryResu
 
 	// Build the WHERE clause and args dynamically.
 	var conditions []string
-	var args []interface{}
+	var args []any
 
 	useFTS := strings.TrimSpace(params.Search) != ""
 
@@ -314,7 +362,7 @@ func (s *SQLiteStore) Query(ctx context.Context, params QueryParams) (*QueryResu
 	// Fetch paginated results.
 	offset := (params.Page - 1) * params.Limit
 	selectQuery := fmt.Sprintf( //nolint:gosec // #nosec G201 -- fromClause/whereClause are hardcoded strings, all user values use ? placeholders
-		`SELECT p.id, p.text, p.timestamp, p.session_id, p.model, p.provider, p.request_id
+		`SELECT p.id, p.text, p.timestamp, p.session_id, p.model, p.provider, p.request_id, p.agent_name
 		 %s %s ORDER BY p.timestamp DESC LIMIT ? OFFSET ?`,
 		fromClause, whereClause,
 	)
@@ -329,7 +377,7 @@ func (s *SQLiteStore) Query(ctx context.Context, params QueryParams) (*QueryResu
 	var prompts []PromptRecord
 	for rows.Next() {
 		var r PromptRecord
-		if err := rows.Scan(&r.ID, &r.Text, &r.Timestamp, &r.SessionID, &r.Model, &r.Provider, &r.RequestID); err != nil {
+		if err := rows.Scan(&r.ID, &r.Text, &r.Timestamp, &r.SessionID, &r.Model, &r.Provider, &r.RequestID, &r.AgentName); err != nil {
 			return nil, fmt.Errorf("prompthistory: scan row: %w", err)
 		}
 		prompts = append(prompts, r)
@@ -423,6 +471,46 @@ func (s *SQLiteStore) EraseAll(ctx context.Context) error {
 
 	if _, err := tx.ExecContext(ctx, "DELETE FROM prompts"); err != nil {
 		return fmt.Errorf("prompthistory: delete prompts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO prompts_fts(prompts_fts) VALUES('rebuild')"); err != nil {
+		return fmt.Errorf("prompthistory: rebuild fts: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// DeleteByID deletes a single prompt by its ID.
+func (s *SQLiteStore) DeleteByID(ctx context.Context, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, err := s.db.ExecContext(ctx, "DELETE FROM prompts WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("prompthistory: delete prompt %d: %w", id, err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("prompthistory: delete prompt %d rows affected: %w", id, err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("prompthistory: prompt %d not found", id)
+	}
+	return nil
+}
+
+// EraseBySession deletes all prompts for a specific session.
+func (s *SQLiteStore) EraseBySession(ctx context.Context, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("prompthistory: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM prompts WHERE session = ?", sessionID); err != nil {
+		return fmt.Errorf("prompthistory: delete prompts for session %s: %w", sessionID, err)
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO prompts_fts(prompts_fts) VALUES('rebuild')"); err != nil {
 		return fmt.Errorf("prompthistory: rebuild fts: %w", err)

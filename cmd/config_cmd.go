@@ -23,6 +23,12 @@ import (
 // runConfigCommand handles the "context-gateway config" subcommand.
 // Offers TUI or browser-based configuration with hot-reload support.
 func runConfigCommand(args []string) {
+	// Handle sub-subcommands before flag parsing
+	if len(args) > 0 && args[0] == "migrate" {
+		runConfigMigrate(args[1:])
+		return
+	}
+
 	fs := flag.NewFlagSet("config", flag.ExitOnError)
 	browserMode := fs.Bool("browser", false, "open settings in browser")
 	_ = fs.Parse(args)
@@ -250,17 +256,14 @@ type configBrowserPipes struct {
 type configBrowserToolOutput struct {
 	Enabled                bool    `json:"enabled"`
 	Strategy               string  `json:"strategy"`
-	MinBytes               int     `json:"min_bytes"`
+	MinTokens              int     `json:"min_tokens"`
 	TargetCompressionRatio float64 `json:"target_compression_ratio"`
 }
 
 type configBrowserToolDiscovery struct {
-	Enabled        bool    `json:"enabled"`
-	Strategy       string  `json:"strategy"`
-	MinTools       int     `json:"min_tools"`
-	MaxTools       int     `json:"max_tools"`
-	TargetRatio    float64 `json:"target_ratio"`
-	SearchFallback bool    `json:"search_fallback"`
+	Enabled        bool   `json:"enabled"`
+	Strategy       string `json:"strategy"`
+	SearchFallback bool   `json:"search_fallback"`
 }
 
 type configBrowserCostControl struct {
@@ -284,15 +287,12 @@ func buildConfigResponseFromConfig(cfg *config.Config) configBrowserResponse {
 			ToolOutput: configBrowserToolOutput{
 				Enabled:                cfg.Pipes.ToolOutput.Enabled,
 				Strategy:               cfg.Pipes.ToolOutput.Strategy,
-				MinBytes:               cfg.Pipes.ToolOutput.MinBytes,
+				MinTokens:              cfg.Pipes.ToolOutput.MinTokens,
 				TargetCompressionRatio: cfg.Pipes.ToolOutput.TargetCompressionRatio,
 			},
 			ToolDiscovery: configBrowserToolDiscovery{
 				Enabled:        cfg.Pipes.ToolDiscovery.Enabled,
 				Strategy:       cfg.Pipes.ToolDiscovery.Strategy,
-				MinTools:       cfg.Pipes.ToolDiscovery.MinTools,
-				MaxTools:       cfg.Pipes.ToolDiscovery.MaxTools,
-				TargetRatio:    cfg.Pipes.ToolDiscovery.TargetRatio,
 				SearchFallback: cfg.Pipes.ToolDiscovery.EnableSearchFallback,
 			},
 		},
@@ -343,13 +343,11 @@ func pushConfigToGateway(configName string, port int) error {
 		Pipes: &config.PipesPatch{
 			ToolOutput: &config.ToolOutputPatch{
 				Enabled:                &state.ToolOutputEnabled,
-				MinBytes:               &state.ToolOutputMinBytes,
+				MinTokens:              &state.ToolOutputMinTokens,
 				TargetCompressionRatio: &state.ToolOutputTargetRatio,
 			},
 			ToolDiscovery: &config.ToolDiscoveryPatch{
-				Enabled:  &state.ToolDiscoveryEnabled,
-				MinTools: &state.ToolDiscoveryMinTools,
-				MaxTools: &state.ToolDiscoveryMaxTools,
+				Enabled: &state.ToolDiscoveryEnabled,
 			},
 		},
 		CostControl: &config.CostControlPatch{

@@ -20,8 +20,15 @@ server:
   write_timeout: 1000s
 
 urls:
-  gateway: "http://localhost:${GATEWAY_PORT:-18081}"
   compresr: "${COMPRESR_BASE_URL:-https://api.compresr.ai}"
+
+# =============================================================================
+# COMPRESR CREDENTIALS
+# Define your Compresr API key here once — all pipes inherit it automatically.
+# =============================================================================
+
+compresr:
+  api_key: "${COMPRESR_API_KEY:-}"
 
 # =============================================================================
 # PROVIDERS
@@ -37,7 +44,7 @@ providers:
     model: "gpt-4o-mini"
 
 # =============================================================================
-# PREEMPTIVE SUMMARIZATION (Lingua via Compresr API)
+# PREEMPTIVE SUMMARIZATION 
 # =============================================================================
 
 preemptive:
@@ -49,15 +56,13 @@ preemptive:
   compaction_log_path: "${SESSION_COMPACTION_LOG:-logs/history_compaction.jsonl}"
 
   summarizer:
-  #strategy: "compresr"
+    #strategy: "compresr"
     strategy: "external_provider"
     model: "claude-haiku-4-5"
     max_tokens: 4096
     timeout: 60s
-    token_estimate_ratio: 4
     compresr:
       endpoint: "/api/compress/history/"
-      api_key: "${COMPRESR_API_KEY:-}"
       model: "hcc_espresso_v1"
       timeout: 60s
 
@@ -66,7 +71,7 @@ preemptive:
     hash_message_count: 3
 
 # =============================================================================
-# COMPRESSION PIPES (All Enabled)
+# COMPRESSION PIPES 
 # =============================================================================
 
 pipes:
@@ -74,27 +79,33 @@ pipes:
   tool_output:
     enabled: true
     strategy: "compresr"
-    min_bytes: 2048
-    max_bytes: 512000
-    target_compression_ratio: 0.5  # Sent to API: 0.5 = 50% compression strength
+    min_tokens: 512
+    max_tokens: 128000
+    target_compression_ratio: 0.5  # Sent to API: 0.5 = remove ~50% of tokens (medium aggressiveness)
+    refusal_threshold: 0.05         # Reject compression if token savings < 5% (use original instead)
     enable_expand_context: true
     compresr:
       endpoint: "/api/compress/tool-output/"
-      api_key: "${COMPRESR_API_KEY:-}"
       model: "toc_latte_v1"
       timeout: 30s
 
-  # Tool Discovery - SaT backbone
+  # Tool Discovery 
   tool_discovery:
     enabled: true
     strategy: "compresr"
-    min_tools: 5
-    max_tools: 25
     compresr:
       endpoint: "/api/compress/tool-discovery/"
-      api_key: "${COMPRESR_API_KEY:-}"
       model: "tdc_coldbrew_v1"
       timeout: 20s
+
+  # Task Output - subagent result handling (NOT regular tool outputs)
+  # Task output = result from a SPAWNED SUBAGENT back to the main agent.
+  # strategy: passthrough        → observe and log only, no compression (default)
+  # strategy: external_provider  → compress via external LLM (requires provider + model)
+  task_output:
+    enabled: true
+    strategy: "passthrough"
+    min_tokens: 256         # Skip outputs below this token count (external_provider only)
 
 # =============================================================================
 # COST CONTROL
@@ -106,11 +117,12 @@ cost_control:
   global_cap: 0
 
 # =============================================================================
-# SLACK NOTIFICATIONS (Disabled)
+# NOTIFICATIONS (Slack, etc.)
 # =============================================================================
 
-slack:
-  enabled: false
+notifications:
+  slack:
+    enabled: false
 
 # =============================================================================
 # POST-SESSION (CLAUDE.md Auto-Update)
@@ -145,3 +157,7 @@ monitoring:
   telemetry_path: "${SESSION_TELEMETRY_LOG:-logs/telemetry.jsonl}"
   compression_log_path: "${SESSION_COMPRESSION_LOG:-logs/tool_output_compression.jsonl}"
   tool_discovery_log_path: "${SESSION_TOOL_DISCOVERY_LOG:-logs/tool_discovery.jsonl}"
+  task_output_log_path: "${SESSION_TASK_OUTPUT_LOG:-logs/task_output}"
+  session_tools_path: "${SESSION_TOOLS_LOG:-logs/session_tools.json}"
+  session_stats_path: "${SESSION_STATS_LOG:-logs/session_stats.json}"
+  expand_context_calls_path: "${SESSION_EXPAND_CALLS_LOG:-logs/expand_context_calls.jsonl}"

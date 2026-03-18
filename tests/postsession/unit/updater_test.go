@@ -1,8 +1,10 @@
 package unit
 
 import (
+	"context"
 	"testing"
 
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 	"github.com/compresr/context-gateway/internal/postsession"
 	"github.com/stretchr/testify/assert"
 )
@@ -11,7 +13,7 @@ func TestUpdater_DisabledConfig(t *testing.T) {
 	cfg := postsession.Config{Enabled: false}
 	updater := postsession.NewUpdater(cfg)
 
-	result, err := updater.Update(nil, nil, "", false, "")
+	result, err := updater.Update(context.Background(), nil, authtypes.CapturedAuth{})
 	assert.NoError(t, err)
 	assert.False(t, result.Updated)
 	assert.Contains(t, result.Description, "disabled")
@@ -21,7 +23,7 @@ func TestUpdater_NoCollector(t *testing.T) {
 	cfg := postsession.Config{Enabled: true}
 	updater := postsession.NewUpdater(cfg)
 
-	result, err := updater.Update(nil, nil, "", false, "")
+	result, err := updater.Update(context.Background(), nil, authtypes.CapturedAuth{})
 	assert.NoError(t, err)
 	assert.False(t, result.Updated)
 	assert.Contains(t, result.Description, "no session events")
@@ -32,7 +34,7 @@ func TestUpdater_EmptyCollector(t *testing.T) {
 	updater := postsession.NewUpdater(cfg)
 
 	collector := postsession.NewSessionCollector()
-	result, err := updater.Update(nil, collector, "", false, "")
+	result, err := updater.Update(context.Background(), collector, authtypes.CapturedAuth{})
 	assert.NoError(t, err)
 	assert.False(t, result.Updated)
 	assert.Contains(t, result.Description, "no session events")

@@ -1,8 +1,4 @@
 // Config REST API endpoints for hot-reload configuration.
-//
-// DESIGN: Localhost-only endpoints for reading and patching gateway config.
-// GET /api/config returns current config (with API keys masked).
-// PATCH /api/config accepts a ConfigPatch and applies it via the reloader.
 package gateway
 
 import (
@@ -19,7 +15,7 @@ import (
 	"github.com/compresr/context-gateway/internal/utils"
 )
 
-// handleConfigAPI handles GET and PATCH requests to /api/config.
+// handleConfigAPI handles GET, PATCH, and DELETE requests to /api/config.
 func (g *Gateway) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 	if !isLoopback(r.RemoteAddr) {
 		g.writeError(w, "forbidden", http.StatusForbidden)
@@ -31,8 +27,10 @@ func (g *Gateway) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 		g.handleGetConfig(w, r)
 	case http.MethodPatch:
 		g.handlePatchConfig(w, r)
+	case http.MethodDelete:
+		g.handleDeleteConfig(w, r)
 	default:
-		w.Header().Set("Allow", "GET, PATCH")
+		w.Header().Set("Allow", "GET, PATCH, DELETE")
 		g.writeError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -45,6 +43,7 @@ type configResponse struct {
 	CostControl   costControlResponse   `json:"cost_control"`
 	Notifications notificationsResponse `json:"notifications"`
 	Monitoring    monitoringResponse    `json:"monitoring"`
+	HasOverrides  bool                  `json:"has_session_overrides"`
 }
 
 type preemptiveResponse struct {
@@ -61,17 +60,21 @@ type pipesResponse struct {
 type toolOutputResponse struct {
 	Enabled                bool    `json:"enabled"`
 	Strategy               string  `json:"strategy"`
-	MinBytes               int     `json:"min_bytes"`
+	MinTokens              int     `json:"min_tokens"`
 	TargetCompressionRatio float64 `json:"target_compression_ratio"`
 }
 
 type toolDiscoveryResponse struct {
-	Enabled        bool    `json:"enabled"`
-	Strategy       string  `json:"strategy"`
-	MinTools       int     `json:"min_tools"`
-	MaxTools       int     `json:"max_tools"`
-	TargetRatio    float64 `json:"target_ratio"`
-	SearchFallback bool    `json:"search_fallback"`
+	Enabled           bool                      `json:"enabled"`
+	Strategy          string                    `json:"strategy"`
+	TokenThreshold    int                       `json:"token_threshold"`
+	SchemaCompression schemaCompressionResponse `json:"schema_compression"`
+}
+
+type schemaCompressionResponse struct {
+	Enabled        bool   `json:"enabled"`
+	TokenThreshold int    `json:"token_threshold"`
+	Model          string `json:"model"`
 }
 
 type costControlResponse struct {
@@ -94,17 +97,28 @@ type monitoringResponse struct {
 	TelemetryEnabled bool `json:"telemetry_enabled"`
 }
 
-func (g *Gateway) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
+func (g *Gateway) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if g.configReloader == nil {
 		g.writeError(w, "config reloader not initialized", http.StatusInternalServerError)
 		return
 	}
 
+	// ?view=overrides returns only the session overrides (so the dashboard can show what's temporary)
+	if r.URL.Query().Get("view") == "overrides" {
+		overrides := g.configReloader.SessionOverrides()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(overrides)
+		return
+	}
+
 	cfg := g.configReloader.Current()
 	resp := buildConfigResponse(cfg)
+	resp.HasOverrides = !g.configReloader.SessionOverrides().IsEmpty()
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Warn().Err(err).Msg("handleGetConfig: failed to encode JSON response")
+	}
 }
 
 func (g *Gateway) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
@@ -113,9 +127,14 @@ func (g *Gateway) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit (DoS prevention)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		g.writeError(w, "failed to read request body", http.StatusBadRequest)
+		if err.Error() == "http: request body too large" {
+			g.writeError(w, "request body too large (max 1MB)", http.StatusRequestEntityTooLarge)
+		} else {
+			g.writeError(w, "failed to read request body", http.StatusBadRequest)
+		}
 		return
 	}
 
@@ -126,14 +145,23 @@ func (g *Gateway) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := g.configReloader.Update(patch)
+	// scope=session applies changes to this session only (in-memory, not persisted).
+	// scope=global (default) persists to the global config file for future sessions.
+	scope := r.URL.Query().Get("scope")
+
+	var updated *config.Config
+	if scope == "session" {
+		updated, err = g.configReloader.UpdateSession(patch)
+	} else {
+		updated, err = g.configReloader.Update(patch)
+	}
 	if err != nil {
-		log.Error().Err(err).Msg("config patch failed")
+		log.Error().Err(err).Str("scope", scope).Msg("config patch failed")
 		g.writeError(w, "config update failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	log.Info().Msg("config updated via API")
+	log.Info().Str("scope", scope).Msg("config updated via API")
 
 	// If webhook URL was set, also persist to global .env so the hook script can read it
 	if patch.Notifications != nil && patch.Notifications.Slack != nil && patch.Notifications.Slack.WebhookURL != nil {
@@ -153,8 +181,36 @@ func (g *Gateway) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := buildConfigResponse(updated)
+	resp.HasOverrides = !g.configReloader.SessionOverrides().IsEmpty()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleDeleteConfig resets session overrides back to global defaults.
+func (g *Gateway) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
+	if g.configReloader == nil {
+		g.writeError(w, "config reloader not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	scope := r.URL.Query().Get("scope")
+	if scope != "session" {
+		g.writeError(w, "DELETE only supports ?scope=session", http.StatusBadRequest)
+		return
+	}
+
+	cfg := g.configReloader.ResetSession()
+	log.Info().Msg("session overrides cleared")
+
+	if g.monitorHub != nil {
+		g.monitorHub.BroadcastEvent("config_updated", nil)
+	}
+
+	resp := buildConfigResponse(cfg)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Warn().Err(err).Msg("handlePatchConfig: failed to encode JSON response")
+	}
 }
 
 func buildConfigResponse(cfg *config.Config) configResponse {
@@ -179,16 +235,18 @@ func buildConfigResponse(cfg *config.Config) configResponse {
 			ToolOutput: toolOutputResponse{
 				Enabled:                cfg.Pipes.ToolOutput.Enabled,
 				Strategy:               cfg.Pipes.ToolOutput.Strategy,
-				MinBytes:               cfg.Pipes.ToolOutput.MinBytes,
+				MinTokens:              cfg.Pipes.ToolOutput.MinTokens,
 				TargetCompressionRatio: cfg.Pipes.ToolOutput.TargetCompressionRatio,
 			},
 			ToolDiscovery: toolDiscoveryResponse{
 				Enabled:        cfg.Pipes.ToolDiscovery.Enabled,
 				Strategy:       cfg.Pipes.ToolDiscovery.Strategy,
-				MinTools:       cfg.Pipes.ToolDiscovery.MinTools,
-				MaxTools:       cfg.Pipes.ToolDiscovery.MaxTools,
-				TargetRatio:    cfg.Pipes.ToolDiscovery.TargetRatio,
-				SearchFallback: cfg.Pipes.ToolDiscovery.EnableSearchFallback,
+				TokenThreshold: cfg.Pipes.ToolDiscovery.TokenThreshold,
+				SchemaCompression: schemaCompressionResponse{
+					Enabled:        cfg.Pipes.ToolDiscovery.SchemaCompression.Enabled,
+					TokenThreshold: cfg.Pipes.ToolDiscovery.SchemaCompression.TokenThreshold,
+					Model:          cfg.Pipes.ToolDiscovery.SchemaCompression.Model,
+				},
 			},
 		},
 		CostControl: costControlResponse{
@@ -214,7 +272,13 @@ func persistEnvVar(envPath, key, value string) {
 	dir := filepath.Dir(envPath)
 	_ = os.MkdirAll(dir, 0750) // #nosec G301
 
-	data, _ := os.ReadFile(envPath) // #nosec G304
+	// treat only file-not-found as acceptable; other errors (permission, disk full)
+	// would silently discard existing content, so we abort instead.
+	data, err := os.ReadFile(envPath) // #nosec G304
+	if err != nil && !os.IsNotExist(err) {
+		log.Warn().Err(err).Str("path", envPath).Msg("persistEnvVar: cannot read existing .env file; skipping persist to avoid data loss")
+		return
+	}
 	lines := strings.Split(string(data), "\n")
 
 	found := false

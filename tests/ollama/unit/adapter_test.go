@@ -342,7 +342,12 @@ func TestOllama_ApplyToolDiscovery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	assert.Len(t, tools, 2, "Should have filtered out write_file")
+	// With stub behavior, deferred tools remain as stubs with DeferredStubDescription.
+	// Total count stays at 3 (write_file becomes a stub, not removed).
+	assert.Len(t, tools, 3, "Deferred tools remain as stubs, total count unchanged")
+	// Verify write_file is now a stub with DeferredStubDescription
+	writeFileTool := tools[1].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, adapters.DeferredStubDescription, writeFileTool["description"], "write_file should be stubbed with DeferredStubDescription")
 }
 
 func TestOllama_ExtractToolDiscovery_Empty(t *testing.T) {
@@ -415,4 +420,173 @@ func TestOllama_ExtractUsage_BothFormats(t *testing.T) {
 	assert.Equal(t, 50, usage.InputTokens)
 	assert.Equal(t, 25, usage.OutputTokens)
 	assert.Equal(t, 75, usage.TotalTokens)
+}
+
+// =============================================================================
+// PHANTOM TOOL OPERATIONS - Ollama-native overrides
+// =============================================================================
+
+func TestOllama_ExtractToolCallsFromResponse_NativeFormat(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	// Ollama native response: top-level "message.tool_calls[]" with object arguments
+	responseBody := []byte(`{
+		"model": "llama3.2",
+		"message": {
+			"role": "assistant",
+			"content": "",
+			"tool_calls": [
+				{"function": {"name": "get_weather", "arguments": {"location": "Paris", "unit": "celsius"}}},
+				{"function": {"name": "search_web", "arguments": {"query": "news today"}}}
+			]
+		},
+		"done": true
+	}`)
+
+	calls, err := adapter.ExtractToolCallsFromResponse(responseBody)
+	require.NoError(t, err)
+	require.Len(t, calls, 2)
+
+	assert.Equal(t, "get_weather", calls[0].ToolName)
+	assert.Equal(t, "ollama_call_0", calls[0].ToolUseID)
+	assert.Equal(t, "Paris", calls[0].Input["location"])
+	assert.Equal(t, "celsius", calls[0].Input["unit"])
+
+	assert.Equal(t, "search_web", calls[1].ToolName)
+	assert.Equal(t, "ollama_call_1", calls[1].ToolUseID)
+	assert.Equal(t, "news today", calls[1].Input["query"])
+}
+
+func TestOllama_ExtractToolCallsFromResponse_NoToolCalls(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	// Response with no tool calls
+	responseBody := []byte(`{
+		"model": "llama3.2",
+		"message": {"role": "assistant", "content": "Hello there!"},
+		"done": true
+	}`)
+
+	calls, err := adapter.ExtractToolCallsFromResponse(responseBody)
+	require.NoError(t, err)
+	assert.Empty(t, calls)
+}
+
+func TestOllama_ExtractToolCallsFromResponse_StringArgsFallback(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	// Some Ollama builds may encode arguments as a JSON string — should handle gracefully
+	responseBody := []byte(`{
+		"message": {
+			"role": "assistant",
+			"tool_calls": [
+				{"function": {"name": "my_tool", "arguments": "{\"key\": \"value\"}"}}
+			]
+		}
+	}`)
+
+	calls, err := adapter.ExtractToolCallsFromResponse(responseBody)
+	require.NoError(t, err)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "my_tool", calls[0].ToolName)
+	assert.Equal(t, "value", calls[0].Input["key"])
+}
+
+func TestOllama_FilterToolCallFromResponse_NativeFormat(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	responseBody := []byte(`{
+		"message": {
+			"role": "assistant",
+			"tool_calls": [
+				{"function": {"name": "expand_context", "arguments": {}}},
+				{"function": {"name": "read_file", "arguments": {"path": "/foo"}}}
+			]
+		}
+	}`)
+
+	result, modified := adapter.FilterToolCallFromResponse(responseBody, "expand_context")
+	require.True(t, modified)
+
+	// "expand_context" removed, "read_file" remains
+	calls, err := adapter.ExtractToolCallsFromResponse(result)
+	require.NoError(t, err)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "read_file", calls[0].ToolName)
+}
+
+func TestOllama_FilterToolCallFromResponse_ToolNotPresent(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	responseBody := []byte(`{
+		"message": {
+			"role": "assistant",
+			"tool_calls": [
+				{"function": {"name": "read_file", "arguments": {}}}
+			]
+		}
+	}`)
+
+	result, modified := adapter.FilterToolCallFromResponse(responseBody, "nonexistent_tool")
+	assert.False(t, modified)
+	assert.Equal(t, responseBody, result)
+}
+
+func TestOllama_BuildToolResultMessages(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	calls := []adapters.ToolCall{
+		{ToolUseID: "ollama_call_0", ToolName: "get_weather"},
+		{ToolUseID: "ollama_call_1", ToolName: "search_web"},
+	}
+	content := []string{"Sunny, 22°C", "No results found"}
+
+	results := adapter.BuildToolResultMessages(calls, content, nil)
+	require.Len(t, results, 2)
+
+	assert.Equal(t, "tool", results[0]["role"])
+	assert.Equal(t, "get_weather", results[0]["name"])
+	assert.Equal(t, "Sunny, 22°C", results[0]["content"])
+
+	assert.Equal(t, "tool", results[1]["role"])
+	assert.Equal(t, "search_web", results[1]["name"])
+	assert.Equal(t, "No results found", results[1]["content"])
+
+	// Ollama does NOT include tool_call_id
+	assert.NotContains(t, results[0], "tool_call_id")
+}
+
+func TestOllama_AppendMessages_NativeAssistantResponse(t *testing.T) {
+	adapter := adapters.NewOllamaAdapter()
+
+	requestBody := []byte(`{"model":"llama3.2","messages":[{"role":"user","content":"What's the weather?"}]}`)
+	assistantResponse := []byte(`{
+		"message": {
+			"role": "assistant",
+			"content": "",
+			"tool_calls": [{"function": {"name": "get_weather", "arguments": {"location": "Paris"}}}]
+		},
+		"done": true
+	}`)
+	toolResults := []map[string]any{
+		{"role": "tool", "name": "get_weather", "content": "Sunny, 22°C"},
+	}
+
+	result, err := adapter.AppendMessages(requestBody, assistantResponse, toolResults)
+	require.NoError(t, err)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(result, &req))
+
+	messages, ok := req["messages"].([]any)
+	require.True(t, ok)
+	// Original user message + appended assistant + tool result = 3
+	assert.Len(t, messages, 3)
+
+	assistantMsg := messages[1].(map[string]any)
+	assert.Equal(t, "assistant", assistantMsg["role"])
+
+	toolMsg := messages[2].(map[string]any)
+	assert.Equal(t, "tool", toolMsg["role"])
+	assert.Equal(t, "Sunny, 22°C", toolMsg["content"])
 }

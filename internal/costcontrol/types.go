@@ -1,8 +1,4 @@
 // Package costcontrol implements per-session cost tracking and budget enforcement.
-//
-// DESIGN: Tracks API costs per session and optionally enforces spending caps.
-// Cost tracking is always active (for the dashboard). Enabled controls whether
-// requests are blocked when configured caps are exceeded.
 package costcontrol
 
 import (

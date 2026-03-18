@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 	"github.com/rs/zerolog/log"
 )
 
@@ -49,9 +50,7 @@ type Job struct {
 	done          chan struct{}
 
 	// Per-job auth credentials for session isolation
-	AuthValue     string // Captured auth token for this job
-	AuthIsXAPIKey bool   // true = use x-api-key header, false = use Authorization: Bearer
-	AuthEndpoint  string // Captured endpoint for this job
+	Auth authtypes.CapturedAuth
 }
 
 // SummarizationJob is an alias for backward compatibility.
@@ -70,12 +69,15 @@ type Worker struct {
 	mu       sync.RWMutex
 	running  bool
 	stopChan chan struct{}
+	stopCtx  context.Context    // lifecycle context so jobs are cancelled on Stop()
+	stopFn   context.CancelFunc // cancels stopCtx when Stop() is called
 	wg       sync.WaitGroup
 }
 
 // NewWorker creates a new background worker.
 func NewWorker(summarizer *Summarizer, sessions *SessionManager, cfg SummarizerConfig, triggerThreshold float64) *Worker {
 	const defaultJobRetention = 30 * time.Minute
+	stopCtx, stopFn := context.WithCancel(context.Background())
 	return &Worker{
 		summarizer:       summarizer,
 		sessions:         sessions,
@@ -85,6 +87,8 @@ func NewWorker(summarizer *Summarizer, sessions *SessionManager, cfg SummarizerC
 		jobs:             make(map[string]*Job),
 		jobQueue:         make(chan *Job, 100),
 		stopChan:         make(chan struct{}),
+		stopCtx:          stopCtx,
+		stopFn:           stopFn,
 	}
 }
 
@@ -115,24 +119,20 @@ func (w *Worker) Stop() {
 		return
 	}
 	w.running = false
+	w.stopFn() // cancel lifecycle context to abort in-flight jobs
 	close(w.stopChan)
 	w.mu.Unlock()
 	w.wg.Wait()
+	// stop the session manager's cleanup goroutine now that the worker is done
+	if w.sessions != nil {
+		w.sessions.Close()
+	}
 	log.Info().Msg("Preemptive summarization workers stopped")
 }
 
-// JobAuthParams contains per-job auth credentials captured from the triggering request.
+// JobAuthParams is an alias for the centralized auth type.
 // This ensures each background job uses the auth from its originating session, not a global.
-type JobAuthParams struct {
-	Token     string // Auth token (API key or Bearer token)
-	IsXAPIKey bool   // true = use x-api-key header, false = use Authorization: Bearer
-	Endpoint  string // Upstream endpoint URL
-}
-
-// SubmitJob submits a new summarization job (legacy name).
-func (w *Worker) SubmitJob(sessionID string, messages []json.RawMessage, model string) (*Job, error) {
-	return w.Submit(sessionID, messages, model, JobAuthParams{}), nil
-}
+type JobAuthParams = authtypes.CapturedAuth
 
 // Submit submits a new summarization job with per-job auth credentials.
 // The auth params are captured from the request that triggers this job,
@@ -149,17 +149,15 @@ func (w *Worker) Submit(sessionID string, messages []json.RawMessage, model stri
 	}
 
 	job := &Job{
-		ID:            sessionID,
-		SessionID:     sessionID,
-		Status:        JobQueued,
-		CreatedAt:     time.Now(),
-		Messages:      messages,
-		MessageCount:  len(messages),
-		Model:         model,
-		done:          make(chan struct{}),
-		AuthValue:     auth.Token,
-		AuthIsXAPIKey: auth.IsXAPIKey,
-		AuthEndpoint:  auth.Endpoint,
+		ID:           sessionID,
+		SessionID:    sessionID,
+		Status:       JobQueued,
+		CreatedAt:    time.Now(),
+		Messages:     messages,
+		MessageCount: len(messages),
+		Model:        model,
+		done:         make(chan struct{}),
+		Auth:         auth,
 	}
 
 	w.jobs[sessionID] = job
@@ -183,11 +181,6 @@ func (w *Worker) GetJob(sessionID string) *Job {
 	return w.jobs[sessionID]
 }
 
-// WaitForJob waits for a job to complete with timeout.
-func (w *Worker) WaitForJob(sessionID string, timeout time.Duration) bool {
-	return w.Wait(sessionID, timeout)
-}
-
 // Wait waits for a job to complete with timeout.
 func (w *Worker) Wait(sessionID string, timeout time.Duration) bool {
 	w.mu.RLock()
@@ -198,10 +191,12 @@ func (w *Worker) Wait(sessionID string, timeout time.Duration) bool {
 		return false
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-job.done:
 		return true
-	case <-time.After(timeout):
+	case <-timer.C:
 		return false
 	}
 }
@@ -236,8 +231,8 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		s.SummaryTriggeredAt = &now
 	})
 
-	// Do summarization
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Do summarization using lifecycle context so job is cancelled on Stop()
+	ctx, cancel := context.WithTimeout(w.stopCtx, 2*time.Minute)
 	defer cancel()
 
 	result, err := w.summarizer.Summarize(ctx, SummarizeInput{
@@ -246,9 +241,7 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		KeepRecentTokens: w.summarizerCfg.KeepRecentTokens,
 		KeepRecentCount:  w.summarizerCfg.KeepRecentCount,
 		Model:            job.Model,
-		AuthValue:        job.AuthValue,
-		AuthIsXAPIKey:    job.AuthIsXAPIKey,
-		AuthEndpoint:     job.AuthEndpoint,
+		Auth:             job.Auth,
 	})
 
 	now := time.Now()
@@ -266,10 +259,10 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		if logger := GetCompactionLogger(); logger != nil {
 			if strings.Contains(err.Error(), "not enough content to summarize") {
 				log.Debug().Str("session_id", job.SessionID).Msg("Summarization skipped: not enough content")
-				logger.LogSkip(job.SessionID, "preemptive", err.Error(), map[string]interface{}{"model": job.Model})
+				logger.LogSkip(job.SessionID, "preemptive", err.Error(), map[string]any{"model": job.Model})
 			} else {
 				log.Error().Err(err).Str("session_id", job.SessionID).Msg("Summarization job failed")
-				logger.LogError(job.SessionID, "preemptive", err, map[string]interface{}{"model": job.Model})
+				logger.LogError(job.SessionID, "preemptive", err, map[string]any{"model": job.Model})
 			}
 		}
 	} else {
@@ -283,14 +276,15 @@ func (w *Worker) processJob(workerID int, job *Job) {
 		// Log preemptive complete with original and compressed content
 		if logger := GetCompactionLogger(); logger != nil {
 			summModel, summProvider := w.summarizerCfg.EffectiveModelAndProvider()
-			var originalContent string
+			// use strings.Builder to avoid O(N²) allocations from += on large message sets
+			var sb strings.Builder
 			for i, msg := range job.Messages {
 				if i > 0 {
-					originalContent += "\n"
+					sb.WriteByte('\n')
 				}
-				originalContent += string(msg)
+				sb.Write(msg)
 			}
-			logger.LogPreemptiveComplete(job.SessionID, job.Model, result.LastSummarizedIndex+1, result.SummaryTokens, result.Duration, summProvider, summModel, originalContent, result.Summary)
+			logger.LogPreemptiveComplete(job.SessionID, job.Model, result.LastSummarizedIndex+1, result.SummaryTokens, result.Duration, summProvider, summModel, sb.String(), result.Summary)
 		}
 	}
 
@@ -301,10 +295,11 @@ func (w *Worker) processJob(workerID int, job *Job) {
 }
 
 // cleanupJobsLoop removes old terminal jobs to keep memory bounded.
+// OPTIMIZED: Runs every 10 minutes (was 5) to reduce CPU overhead.
 func (w *Worker) cleanupJobsLoop() {
 	defer w.wg.Done()
 
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(10 * time.Minute) // Reduced frequency from 5min to 10min
 	defer ticker.Stop()
 
 	for {
@@ -341,7 +336,7 @@ func (w *Worker) cleanupJobs() {
 }
 
 // Stats returns worker statistics.
-func (w *Worker) Stats() map[string]interface{} {
+func (w *Worker) Stats() map[string]any {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
@@ -350,7 +345,7 @@ func (w *Worker) Stats() map[string]interface{} {
 		counts[job.Status]++
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"total_jobs":   len(w.jobs),
 		"queue_length": len(w.jobQueue),
 		"by_status":    counts,

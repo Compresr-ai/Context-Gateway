@@ -1,14 +1,9 @@
-// Request utilities - URL detection and request patching.
-//
-// DESIGN:
-//   - autoDetectTargetURL(): Infer upstream URL from headers/path
-//   - isNonLLMEndpoint():   Skip compression for non-LLM paths
-//
-// NOTE: Provider detection is centralized in adapters.IdentifyAndGetAdapter()
+// request.go provides URL detection and request patching utilities.
 package gateway
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -17,10 +12,8 @@ import (
 func normalizeOpenAIPath(path string) string {
 	// Paths that need /v1 prefix if missing
 	needsV1Prefix := []string{"/responses", "/chat/completions", "/completions", "/embeddings", "/models"}
-	for _, p := range needsV1Prefix {
-		if path == p {
-			return "/v1" + path
-		}
+	if slices.Contains(needsV1Prefix, path) {
+		return "/v1" + path
 	}
 	return path
 }

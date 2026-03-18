@@ -206,19 +206,16 @@ func TestWithDefaults_AppliesDefaults(t *testing.T) {
 
 	assert.Equal(t, 90*time.Second, cfg.PendingJobTimeout)
 	assert.Equal(t, 2*time.Minute, cfg.SyncTimeout)
-	assert.Equal(t, 4, cfg.TokenEstimateRatio)
 }
 
 func TestWithDefaults_PreservesExisting(t *testing.T) {
 	cfg := preemptive.WithDefaults(preemptive.Config{
-		PendingJobTimeout:  30 * time.Second,
-		SyncTimeout:        1 * time.Minute,
-		TokenEstimateRatio: 3,
+		PendingJobTimeout: 30 * time.Second,
+		SyncTimeout:       1 * time.Minute,
 	})
 
 	assert.Equal(t, 30*time.Second, cfg.PendingJobTimeout)
 	assert.Equal(t, 1*time.Minute, cfg.SyncTimeout)
-	assert.Equal(t, 3, cfg.TokenEstimateRatio)
 }
 
 // =============================================================================

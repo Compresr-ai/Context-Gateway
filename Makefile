@@ -1,4 +1,4 @@
-.PHONY: build run test clean docker dev dev-debug embed-prep docker-test-build docker-test-up docker-test-down docker-test-go docker-test-agents docker-test-e2e
+.PHONY: build run test test-unit test-race test-perf test-perf-quick test-bench test-mem test-stress clean docker dev dev-debug embed-prep build-dashboard docker-test-build docker-test-up docker-test-down docker-test-go docker-test-agents docker-test-e2e
 
 # Build variables
 BINARY_NAME=context-gateway
@@ -16,8 +16,14 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 
-# Build the binary
-build: embed-prep
+# Build the React dashboard into cmd/dashboard_dist/ (required before go build)
+build-dashboard:
+	@echo "Building dashboard assets..."
+	@cd web/dashboard && npm run build
+	@echo "Dashboard build complete: cmd/dashboard_dist/"
+
+# Build the binary (includes dashboard assets via go:embed)
+build: embed-prep build-dashboard
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	$(GOBUILD) -ldflags="$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
@@ -32,9 +38,45 @@ CONFIG ?= configs/tool_output_passthrough.yaml
 run-config:
 	$(GORUN) $(MAIN_PATH) serve --config configs/config.yaml
 
-# Run tests
+# Run tests (unit + short integration; skips slow real-API E2E tests)
 test:
-	$(GOTEST) -v ./...
+	$(GOTEST) -short -timeout 120s ./...
+
+# Run unit tests only (all packages, -short flag skips slow real-API tests)
+test-unit:
+	$(GOTEST) -short -timeout 120s -count=1 ./...
+
+# Run tests with race detector (unit mode)
+test-race:
+	$(GOTEST) -short -race -timeout 180s ./...
+
+# Run performance tests (memory, CPU, stress)
+test-perf:
+	@echo "Running performance tests..."
+	$(GOTEST) -v -timeout 300s ./tests/performance/
+	@echo "✅ Performance tests complete"
+
+# Run quick performance tests (skip stress/leak tests)
+test-perf-quick:
+	@echo "Running quick performance tests..."
+	$(GOTEST) -v -short -timeout 60s ./tests/performance/
+	@echo "✅ Quick performance tests complete"
+
+# Run performance benchmarks
+test-bench:
+	@echo "Running performance benchmarks..."
+	$(GOTEST) -v -bench=. -benchmem -benchtime=5s ./tests/performance/ | tee benchmark-results.txt
+	@echo "✅ Benchmark results saved to benchmark-results.txt"
+
+# Test memory footprint only
+test-mem:
+	@echo "Testing memory footprint..."
+	$(GOTEST) -v -timeout 60s -run TestMemoryFootprint ./tests/performance/
+
+# Run stress test only
+test-stress:
+	@echo "Running stress test..."
+	$(GOTEST) -v -timeout 300s -run TestStressLoad ./tests/performance/
 
 # Run tests with coverage (HTML report)
 coverage:
@@ -180,7 +222,9 @@ help:
 	@echo "  build            - Build the binary"
 	@echo "  run              - Run the application"
 	@echo "  run-config       - Run with config file"
-	@echo "  test             - Run tests"
+	@echo "  test             - Run tests (short mode, skips slow E2E)"
+	@echo "  test-unit        - Run unit tests only (alias for test)"
+	@echo "  test-race        - Run tests with race detector"
 	@echo "  test-coverage    - Run tests with coverage"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  deps             - Download dependencies"

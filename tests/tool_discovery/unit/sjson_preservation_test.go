@@ -32,7 +32,6 @@ func TestToolSearch_PreservesNonToolFields(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -44,23 +43,38 @@ func TestToolSearch_PreservesNonToolFields(t *testing.T) {
 	result, err := pipe.Process(ctx)
 	require.NoError(t, err)
 
-	// Non-tools fields must be byte-identical
+	// Non-tools fields must be preserved (model and max_tokens byte-identical;
+	// messages structurally equivalent — parsed path re-serializes content).
 	origModel := gjson.GetBytes(body, "model").Raw
 	resultModel := gjson.GetBytes(result, "model").Raw
 	assert.Equal(t, origModel, resultModel, "model field must be preserved exactly")
-
-	origMessages := gjson.GetBytes(body, "messages").Raw
-	resultMessages := gjson.GetBytes(result, "messages").Raw
-	assert.Equal(t, origMessages, resultMessages, "messages field must be preserved exactly")
 
 	origMaxTokens := gjson.GetBytes(body, "max_tokens").Raw
 	resultMaxTokens := gjson.GetBytes(result, "max_tokens").Raw
 	assert.Equal(t, origMaxTokens, resultMaxTokens, "max_tokens field must be preserved exactly")
 
-	// Tools should be replaced with search tool only
-	tools := gjson.GetBytes(result, "tools")
-	assert.Equal(t, int64(1), tools.Get("#").Int(), "should have exactly 1 tool (search tool)")
-	assert.Equal(t, "gateway_search_tools", tools.Get("0.name").String())
+	// Messages content must be structurally equivalent (parsed path may re-serialize).
+	origMsgRole := gjson.GetBytes(body, "messages.0.role").String()
+	resultMsgRole := gjson.GetBytes(result, "messages.0.role").String()
+	assert.Equal(t, origMsgRole, resultMsgRole, "messages[0].role must be preserved")
+	origMsgContent := gjson.GetBytes(body, "messages.0.content").String()
+	resultMsgContent := gjson.GetBytes(result, "messages.0.content").String()
+	assert.Equal(t, origMsgContent, resultMsgContent, "messages[0].content must be preserved")
+
+	// Tools: original tools become stubs (name preserved, description=DeferredStubDescription).
+	// NOTE: gateway_search_tools is NOT appended by the pipe — it is injected later
+	// by phantom_tools.InjectAll in handler.go. The pipe output has only stubs.
+	origToolCount := gjson.GetBytes(body, "tools.#").Int()
+	resultToolCount := gjson.GetBytes(result, "tools.#").Int()
+	assert.Equal(t, origToolCount, resultToolCount, "pipe emits one stub per original tool (gateway_search_tools is added by handler)")
+
+	// First stub: read_file → deferred
+	assert.Equal(t, "read_file", gjson.GetBytes(result, "tools.0.name").String())
+	assert.Equal(t, adapters.DeferredStubDescription, gjson.GetBytes(result, "tools.0.description").String())
+
+	// Second stub: write_file → deferred
+	assert.Equal(t, "write_file", gjson.GetBytes(result, "tools.1.name").String())
+	assert.Equal(t, adapters.DeferredStubDescription, gjson.GetBytes(result, "tools.1.description").String())
 }
 
 // TestToolSearch_ByteIdenticalAcrossCalls verifies that calling tool-search
@@ -73,7 +87,6 @@ func TestToolSearch_ByteIdenticalAcrossCalls(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -106,7 +119,6 @@ func TestToolSearch_OpenAI_ByteIdenticalAcrossCalls(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -154,7 +166,6 @@ func TestToolSearch_ValidJSON(t *testing.T) {
 					ToolDiscovery: config.ToolDiscoveryPipeConfig{
 						Enabled:  true,
 						Strategy: config.StrategyToolSearch,
-						MinTools: 1,
 					},
 				},
 			}

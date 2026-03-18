@@ -124,7 +124,7 @@ NOTE: These credentials rotate every 30 days. Last rotation: 2024-01-15`
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Verify NO expand_context leaked
 	assert.NotContains(t, string(responseBody), "expand_context")
-	assert.NotContains(t, string(responseBody), "<<<SHADOW:")
+	assert.NotContains(t, string(responseBody), "[REF:")
 
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
@@ -140,7 +140,7 @@ NOTE: These credentials rotate every 30 days. Last rotation: 2024-01-15`
 // =============================================================================
 
 // TestExpandBehavior_SmallContent_NoCompression tests that small content
-// below the min_bytes threshold is NOT compressed and passes through unchanged.
+// below the min_tokens threshold is NOT compressed and passes through unchanged.
 func TestExpandBehavior_SmallContent_NoCompression(t *testing.T) {
 	apiKey := getAnthropicKey(t)
 
@@ -149,7 +149,7 @@ func TestExpandBehavior_SmallContent_NoCompression(t *testing.T) {
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	// Small content below min_bytes threshold (300 bytes)
+	// Small content below min_tokens threshold (300 bytes)
 	smallContent := `{"status": "ok", "count": 42}`
 
 	requestBody := map[string]interface{}{
@@ -200,7 +200,7 @@ func TestExpandBehavior_SmallContent_NoCompression(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Small content should NOT trigger compression or expand_context
 	assert.NotContains(t, string(responseBody), "expand_context")
-	assert.NotContains(t, string(responseBody), "<<<SHADOW:")
+	assert.NotContains(t, string(responseBody), "[REF:")
 
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
@@ -424,7 +424,7 @@ cache:
 		resp := makeToolResultRequest(t, gwServer.URL, apiKey, question, detailedConfig)
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.NotContains(t, resp.body, "expand_context")
-		assert.NotContains(t, resp.body, "<<<SHADOW:")
+		assert.NotContains(t, resp.body, "[REF:")
 
 	})
 
@@ -587,7 +587,7 @@ func TestExpandBehavior_StressTest_ManyToolResults(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.NotContains(t, string(responseBody), "expand_context")
-	assert.NotContains(t, string(responseBody), "<<<SHADOW:")
+	assert.NotContains(t, string(responseBody), "[REF:")
 
 	var response map[string]interface{}
 	json.Unmarshal(responseBody, &response)
@@ -683,14 +683,14 @@ func configWithExpandEnabled(mockAPIURL string) *config.Config {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr,
 				FallbackStrategy:       "passthrough",
-				MinBytes:               300, // Lower threshold to trigger compression
-				MaxBytes:               65536,
+				MinTokens:              75, // Lower threshold to trigger compression
+				MaxTokens:              16384,
 				TargetCompressionRatio: 0.2,
 				IncludeExpandHint:      true,
 				EnableExpandContext:    true, // ENABLED
 				Compresr: config.CompresrConfig{
 					Endpoint:  apiEndpoint,
-					AuthParam: os.Getenv("COMPRESR_API_KEY"),
+					APIKey: os.Getenv("COMPRESR_API_KEY"),
 					Model:     "toc_espresso_v1",
 					Timeout:   30 * time.Second,
 				},
@@ -704,9 +704,9 @@ func configWithExpandEnabled(mockAPIURL string) *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }
@@ -723,14 +723,14 @@ func configWithExpandDisabled() *config.Config {
 				Enabled:                true,
 				Strategy:               "passthrough", // Use passthrough since no valid API endpoint
 				FallbackStrategy:       "passthrough",
-				MinBytes:               300,
-				MaxBytes:               65536,
+				MinTokens:              75,
+				MaxTokens:              16384,
 				TargetCompressionRatio: 0.2,
 				IncludeExpandHint:      false, // No hint
 				EnableExpandContext:    false, // DISABLED
 				Compresr: config.CompresrConfig{
 					Endpoint:  "",
-					AuthParam: "",
+					APIKey: "",
 					Model:     "",
 					Timeout:   30 * time.Second,
 				},
@@ -744,9 +744,9 @@ func configWithExpandDisabled() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

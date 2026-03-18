@@ -50,7 +50,7 @@ func TestConfig_Validate_InvalidThreshold(t *testing.T) {
 		threshold float64
 		expectErr bool
 	}{
-		{"zero", 0, true},
+		{"zero_disabled", 0, false},
 		{"negative", -10, true},
 		{"over_100", 150, true},
 		{"valid_low", 0.1, false},
@@ -164,7 +164,7 @@ func TestConfig_Validate_ValidAPIStrategy(t *testing.T) {
 			Strategy: preemptive.StrategyCompresr,
 			Compresr: &preemptive.CompresrConfig{
 				Endpoint:  "/api/compress/history/",
-				AuthParam: "cmp_test-key",
+				APIKey: "cmp_test-key",
 				Model:     "hcc_espresso_v1",
 				Timeout:   60 * time.Second,
 			},
@@ -198,7 +198,7 @@ func TestConfig_Validate_APIStrategyMissingEndpoint(t *testing.T) {
 		Strategy: preemptive.StrategyCompresr,
 		Compresr: &preemptive.CompresrConfig{
 			Endpoint:  "",
-			AuthParam: "cmp_test-key",
+			APIKey: "cmp_test-key",
 			Model:     "hcc_espresso_v1",
 			Timeout:   60 * time.Second,
 		},
@@ -215,7 +215,7 @@ func TestConfig_Validate_APIStrategyMissingAPIKey(t *testing.T) {
 		Strategy: preemptive.StrategyCompresr,
 		Compresr: &preemptive.CompresrConfig{
 			Endpoint:  "/api/compress/history/",
-			AuthParam: "",
+			APIKey: "",
 			Model:     "hcc_espresso_v1",
 			Timeout:   60 * time.Second,
 		},
@@ -232,7 +232,7 @@ func TestConfig_Validate_APIStrategyMissingModel(t *testing.T) {
 		Strategy: preemptive.StrategyCompresr,
 		Compresr: &preemptive.CompresrConfig{
 			Endpoint:  "/api/compress/history/",
-			AuthParam: "cmp_test-key",
+			APIKey: "cmp_test-key",
 			Model:     "",
 			Timeout:   60 * time.Second,
 		},
@@ -249,7 +249,7 @@ func TestConfig_Validate_APIStrategyMissingTimeout(t *testing.T) {
 		Strategy: preemptive.StrategyCompresr,
 		Compresr: &preemptive.CompresrConfig{
 			Endpoint:  "/api/compress/history/",
-			AuthParam: "cmp_test-key",
+			APIKey: "cmp_test-key",
 			Model:     "hcc_espresso_v1",
 			Timeout:   0,
 		},

@@ -107,7 +107,7 @@ func (h *Handlers) handleAll(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"terminals": terminals,
 		"timestamp": time.Now().Format(time.RFC3339),
 	})
@@ -151,11 +151,15 @@ func fetchTerminalData(client *http.Client, inst Instance) Terminal {
 			t.CostUSD = dash.TotalCost
 			if dash.Savings != nil {
 				t.CompressedRequests = dash.Savings.CompressedRequests
-				// t.TokensSaved = dash.Savings.TokensSaved
-				// t.TokensSavedPct = dash.Savings.TokenSavedPct
+				t.TokensSaved = dash.Savings.TokensSaved
+				t.TokensSavedPct = dash.Savings.TokenSavedPct
 				t.CostSavedUSD = dash.Savings.CostSavedUSD
 				t.OriginalCostUSD = dash.Savings.OriginalCostUSD
-				t.CostUSD = dash.Savings.BilledSpendUSD
+				// Prefer BilledSpendUSD when available (authoritative from savings);
+				// fall back to TotalCost (from cost tracker) otherwise.
+				if dash.Savings.BilledSpendUSD > 0 {
+					t.CostUSD = dash.Savings.BilledSpendUSD
+				}
 			}
 		}
 	}
@@ -173,8 +177,8 @@ func fetchTerminalData(client *http.Client, inst Instance) Terminal {
 			// Sum metrics across ALL sessions for this instance
 			var totalIn, totalOut int
 			var latestActivity time.Time
-			var latestQueryTime time.Time
 			var bestSession *Session
+			var primarySession *Session // session with most requests (main conversation)
 			for i := range sr.Sessions {
 				s := &sr.Sessions[i]
 				totalIn += s.TokensIn
@@ -183,19 +187,33 @@ func fetchTerminalData(client *http.Client, inst Instance) Terminal {
 					latestActivity = s.LastActivityAt
 					bestSession = s
 				}
-				// Use the query from the most recently active session that has one
-				if s.LastUserQuery != "" && s.LastActivityAt.After(latestQueryTime) {
-					latestQueryTime = s.LastActivityAt
-					t.LastUserQuery = s.LastUserQuery
+				// The primary (main) session is the one with the most requests.
+				// Subagent sessions are short-lived with few requests.
+				if primarySession == nil || s.RequestCount > primarySession.RequestCount {
+					primarySession = s
 				}
 			}
 			t.TotalTokens = totalIn + totalOut
-			// Use the most recently active session for status/context
+			// Use the most recently active session for status/activity
 			if bestSession != nil {
 				t.Status = string(bestSession.Status)
-				t.Model = bestSession.Model
 				t.LastTool = bestSession.LastToolUsed
 				t.LastActivity = bestSession.LastActivityAt.Format(time.RFC3339)
+			}
+			// Use the primary (most active) session for Model and UserQuery.
+			// This avoids subagent sessions (Haiku, code reviewers) overwriting
+			// the main conversation's model and user query on the dashboard.
+			if primarySession != nil {
+				if primarySession.Model != "" {
+					t.Model = primarySession.Model
+				} else if bestSession != nil {
+					t.Model = bestSession.Model
+				}
+				if primarySession.LastUserQuery != "" {
+					t.LastUserQuery = primarySession.LastUserQuery
+				} else if bestSession != nil {
+					t.LastUserQuery = bestSession.LastUserQuery
+				}
 			}
 		}
 	}
@@ -212,7 +230,7 @@ func (h *Handlers) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"sessions":  sessions,
 		"timestamp": time.Now().Format(time.RFC3339),
 	})

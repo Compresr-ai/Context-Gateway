@@ -45,6 +45,10 @@ logs/*.jsonl
 # Compiled binary
 context-gateway
 
+# Internal test scripts (not for public release)
+tests/manual/
+docs/internal/
+
 # AI assistant / planning docs
 CLAUDE.md
 Tool-discovery-rework.md

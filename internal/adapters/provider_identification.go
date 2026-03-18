@@ -1,11 +1,4 @@
 // Provider identification - centralized single entry point.
-//
-// DESIGN: Provider identification is centralized here:
-//   - IdentifyAndGetAdapter(registry, path, headers) is the SINGLE entry point
-//     It detects provider AND returns the corresponding adapter in one call.
-//
-// The gateway calls IdentifyAndGetAdapter() once per request.
-// No other code should detect providers - this is the single source of truth.
 package adapters
 
 import (
@@ -33,10 +26,13 @@ func IdentifyAndGetAdapter(registry *Registry, path string, headers http.Header)
 //
 // Detection priority:
 //  1. Explicit X-Provider header (highest priority)
-//  2. anthropic-version header (definitive Anthropic signal)
-//  3. API key patterns (sk-ant- for Anthropic, sk- for OpenAI)
-//  4. Path patterns (/v1/messages for Anthropic, /v1/chat/completions for OpenAI)
-//  5. Default to OpenAI (most common format)
+//  2. Bedrock URL path patterns — checked before header signals because AWS SDK clients
+//     may forward an anthropic-version header alongside Bedrock requests, causing
+//     misidentification if the header check fires first.
+//  3. anthropic-version header (definitive for direct Anthropic API)
+//  4. API key patterns (sk-ant- for Anthropic, sk- for OpenAI)
+//  5. Path patterns (/v1/messages for Anthropic, /v1/chat/completions for OpenAI)
+//  6. Default to OpenAI (most common format)
 func detectProvider(path string, headers http.Header) Provider {
 	// 1. Explicit X-Provider header (highest priority)
 	if p := headers.Get("X-Provider"); p != "" {
@@ -58,25 +54,36 @@ func detectProvider(path string, headers http.Header) Provider {
 		}
 	}
 
-	// 2. anthropic-version header is definitive for Anthropic
+	// 2. Bedrock: URL path patterns checked BEFORE header signals.
+	// AWS SDK clients often forward anthropic-version alongside Bedrock requests;
+	// path detection is more reliable and must take precedence.
+	if strings.Contains(path, "/model/") &&
+		(strings.HasSuffix(path, "/invoke") ||
+			strings.HasSuffix(path, "/invoke-with-response-stream") ||
+			strings.HasSuffix(path, "/converse") ||
+			strings.HasSuffix(path, "/converse-stream")) {
+		return ProviderBedrock
+	}
+
+	// 3. anthropic-version header is definitive for direct Anthropic API
 	// Claude CLI/SDK always sends this header
 	if headers.Get("anthropic-version") != "" {
 		return ProviderAnthropic
 	}
 
-	// 3. Check x-api-key for Anthropic key pattern
+	// 4. Check x-api-key for Anthropic key pattern
 	if strings.HasPrefix(headers.Get("x-api-key"), "sk-ant-") {
 		return ProviderAnthropic
 	}
 
-	// 4. Check Authorization header - distinguish sk-ant- (Anthropic) from sk- (OpenAI)
+	// 5. Check Authorization header - distinguish sk-ant- (Anthropic) from sk- (OpenAI)
 	if auth := headers.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, "Bearer sk-ant-") {
 			return ProviderAnthropic
 		}
 	}
 
-	// 5. Path-based detection
+	// 6. Path-based detection
 	if strings.HasSuffix(path, "/v1/messages") {
 		return ProviderAnthropic
 	}
@@ -88,26 +95,16 @@ func detectProvider(path string, headers http.Header) Provider {
 		return ProviderOpenAI
 	}
 
-	// 6. Check Gemini
+	// 7. Check Gemini
 	if strings.Contains(path, "generativelanguage.googleapis.com") ||
 		headers.Get("x-goog-api-key") != "" {
 		return ProviderGemini
 	}
 
-	// 7. Check Ollama
+	// 8. Check Ollama
 	if strings.HasSuffix(path, "/api/chat") ||
 		strings.HasSuffix(path, "/api/generate") {
 		return ProviderOllama
-	}
-
-	// 8. Bedrock: URL path patterns (after all other checks)
-	// Only matches specific Bedrock API paths - cannot be triggered by headers alone
-	if strings.Contains(path, "/model/") &&
-		(strings.HasSuffix(path, "/invoke") ||
-			strings.HasSuffix(path, "/invoke-with-response-stream") ||
-			strings.HasSuffix(path, "/converse") ||
-			strings.HasSuffix(path, "/converse-stream")) {
-		return ProviderBedrock
 	}
 
 	// Default to OpenAI format (most common)

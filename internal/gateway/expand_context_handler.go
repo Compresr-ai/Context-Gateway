@@ -1,23 +1,18 @@
 // Expand context handler for tool output expansion.
-//
-// DESIGN: Implements PhantomToolHandler for expand_context.
-// When LLM calls expand_context(id), this handler:
-//  1. Retrieves the original content from the store using the shadow ID
-//  2. Returns tool_result with the full, uncompressed content
-//
-// This allows the LLM to request the full content of compressed tool outputs.
 package gateway
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/monitoring"
+	"github.com/compresr/context-gateway/internal/pipes"
 	"github.com/compresr/context-gateway/internal/store"
+	"github.com/compresr/context-gateway/internal/tokenizer"
 )
 
 // ExpandContextToolName is the name of the expand_context phantom tool.
@@ -25,12 +20,14 @@ const ExpandContextToolName = "expand_context"
 
 // ExpandContextHandler implements PhantomToolHandler for expand_context.
 type ExpandContextHandler struct {
-	store       store.Store
-	expandLog   *monitoring.ExpandLog
-	requestID   string
-	sessionID   string
-	mu          sync.Mutex      // Protects expandedIDs from concurrent access
-	expandedIDs map[string]bool // Track expanded IDs to prevent circular expansion
+	store            store.Store
+	expandLog        *monitoring.ExpandLog
+	expandCallsLog   *monitoring.ExpandCallsLogger          // writes expand_context_calls.jsonl
+	compressionIndex map[string]pipes.ToolOutputCompression // shadow_id → compression metadata
+	requestID        string
+	sessionID        string
+	mu               sync.Mutex      // Protects expandedIDs from concurrent access
+	expandedIDs      map[string]bool // Track expanded IDs to prevent circular expansion
 }
 
 // NewExpandContextHandler creates a new expand context handler.
@@ -42,10 +39,29 @@ func NewExpandContextHandler(st store.Store) *ExpandContextHandler {
 }
 
 // WithExpandLog sets the expand log for recording expand_context calls.
+// Holds mu to be consistent with the read paths that access these fields.
 func (h *ExpandContextHandler) WithExpandLog(el *monitoring.ExpandLog, requestID, sessionID string) *ExpandContextHandler {
+	h.mu.Lock()
 	h.expandLog = el
 	h.requestID = requestID
 	h.sessionID = sessionID
+	h.mu.Unlock()
+	return h
+}
+
+// WithExpandCallsLog sets the JSONL logger and compression index for expand_context_calls.jsonl.
+// compressions maps shadow_id → ToolOutputCompression for the current request.
+func (h *ExpandContextHandler) WithExpandCallsLog(logger *monitoring.ExpandCallsLogger, compressions []pipes.ToolOutputCompression) *ExpandContextHandler {
+	index := make(map[string]pipes.ToolOutputCompression, len(compressions))
+	for _, c := range compressions {
+		if c.ShadowID != "" {
+			index[c.ShadowID] = c
+		}
+	}
+	h.mu.Lock()
+	h.expandCallsLog = logger
+	h.compressionIndex = index
+	h.mu.Unlock()
 	return h
 }
 
@@ -63,7 +79,8 @@ func (h *ExpandContextHandler) Name() string {
 }
 
 // HandleCalls processes expand_context calls and returns results.
-func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic bool) *PhantomToolResult {
+// Supports both shadow IDs (whole content) and field refs (field-level expansion).
+func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, adapter adapters.Adapter, requestBody []byte) *PhantomToolResult {
 	result := &PhantomToolResult{}
 
 	h.mu.Lock()
@@ -71,10 +88,10 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 	// Filter already-expanded IDs
 	filteredCalls := make([]PhantomToolCall, 0, len(calls))
 	for _, call := range calls {
-		shadowID, _ := call.Input["id"].(string)
-		if h.expandedIDs[shadowID] {
+		refID, _ := call.Input["id"].(string)
+		if h.expandedIDs[refID] {
 			log.Warn().
-				Str("shadow_id", shadowID).
+				Str("ref_id", refID).
 				Msg("expand_context: skipping already-expanded ID")
 			continue
 		}
@@ -89,211 +106,119 @@ func (h *ExpandContextHandler) HandleCalls(calls []PhantomToolCall, isAnthropic 
 
 	// Mark all filtered calls as expanded before releasing lock
 	for _, call := range filteredCalls {
-		shadowID, _ := call.Input["id"].(string)
-		h.expandedIDs[shadowID] = true
+		refID, _ := call.Input["id"].(string)
+		h.expandedIDs[refID] = true
 	}
 	h.mu.Unlock()
 
-	// Anthropic: group all tool_results in one user message
-	if isAnthropic {
-		var contentBlocks []any
-		for _, call := range filteredCalls {
-			shadowID, _ := call.Input["id"].(string)
+	// Build adapter-native ToolCall slice and content per call
+	adapterCalls := make([]adapters.ToolCall, 0, len(filteredCalls))
+	contentPerCall := make([]string, 0, len(filteredCalls))
 
-			// Retrieve from store
-			content, found := h.store.Get(shadowID)
-			var resultText string
+	for _, call := range filteredCalls {
+		refID, _ := call.Input["id"].(string)
+
+		var resultText string
+		var found bool
+		var content string
+
+		// Check if this is a field ref (field-level expansion) or shadow ID (whole content)
+		if isFieldRef(refID) {
+			// Field-level expansion: retrieve only the specific field value
+			fieldRef, ok := h.store.GetFieldRef(refID)
+			if ok {
+				found = true
+				content = fieldRef.Original
+				resultText = content
+				log.Debug().
+					Str("field_ref", refID).
+					Str("field", fieldRef.Field).
+					Str("parent", fieldRef.ParentID).
+					Int("content_len", len(content)).
+					Msg("expand_context: retrieved field ref")
+			} else {
+				found = false
+				resultText = fmt.Sprintf("[The full content for field reference '%s' is no longer available. The compressed summary is already present in your context — please continue working with that.]", refID)
+				log.Warn().
+					Str("field_ref", refID).
+					Str("request_id", h.requestID).
+					Msg("expand_context: field ref not found in store")
+			}
+		} else {
+			// Shadow ID: retrieve whole content
+			content, found = h.store.Get(refID)
 			if found {
 				resultText = content
 				log.Debug().
-					Str("shadow_id", shadowID).
+					Str("shadow_id", refID).
 					Int("content_len", len(content)).
 					Msg("expand_context: retrieved content")
 			} else {
-				resultText = fmt.Sprintf("[The full content for shadow reference '%s' is no longer available (gateway was restarted between sessions). The compressed summary is already present in your context — please continue working with that.]", shadowID)
+				resultText = fmt.Sprintf("[The full content for shadow reference '%s' is no longer available (gateway was restarted between sessions). The compressed summary is already present in your context — please continue working with that.]", refID)
 				log.Error().
-					Str("shadow_id", shadowID).
+					Str("shadow_id", refID).
 					Str("request_id", h.requestID).
 					Str("reason", "ttl_expired_or_missing").
 					Msg("expand_context: shadow ID not found in store")
 			}
-			h.recordExpandEntry(shadowID, found, content)
-
-			contentBlocks = append(contentBlocks, map[string]any{
-				"type":        "tool_result",
-				"tool_use_id": call.ToolUseID,
-				"content":     resultText,
-			})
 		}
+		h.recordExpandEntry(refID, found, content)
 
-		result.ToolResults = []map[string]any{{
-			"role":    "user",
-			"content": contentBlocks,
-		}}
-	} else {
-		// OpenAI: separate tool messages
-		for _, call := range filteredCalls {
-			shadowID, _ := call.Input["id"].(string)
-
-			// Retrieve from store
-			content, found := h.store.Get(shadowID)
-			var resultText string
-			if found {
-				resultText = content
-				log.Debug().
-					Str("shadow_id", shadowID).
-					Int("content_len", len(content)).
-					Msg("expand_context: retrieved content")
-			} else {
-				resultText = fmt.Sprintf("[The full content for shadow reference '%s' is no longer available (gateway was restarted between sessions). The compressed summary is already present in your context — please continue working with that.]", shadowID)
-				log.Error().
-					Str("shadow_id", shadowID).
-					Str("request_id", h.requestID).
-					Str("reason", "ttl_expired_or_missing").
-					Msg("expand_context: shadow ID not found in store")
-			}
-			h.recordExpandEntry(shadowID, found, content)
-
-			result.ToolResults = append(result.ToolResults, map[string]any{
-				"role":         "tool",
-				"tool_call_id": call.ToolUseID,
-				"content":      resultText,
-			})
-		}
+		adapterCalls = append(adapterCalls, adapters.ToolCall{
+			ToolUseID: call.ToolUseID,
+			ToolName:  call.ToolName,
+			Input:     call.Input,
+		})
+		contentPerCall = append(contentPerCall, resultText)
 	}
 
+	// Delegate format-specific message construction to adapter
+	result.ToolResults = adapter.BuildToolResultMessages(adapterCalls, contentPerCall, requestBody)
 	return result
 }
 
-// recordExpandEntry logs an expand_context call to the in-memory expand log.
-func (h *ExpandContextHandler) recordExpandEntry(shadowID string, found bool, content string) {
-	if h.expandLog == nil {
-		return
-	}
-	preview := content
-	if len(preview) > 100 {
-		preview = preview[:100]
-	}
-	h.expandLog.Record(monitoring.ExpandLogEntry{
-		Timestamp:      time.Now(),
-		SessionID:      h.sessionID,
-		RequestID:      h.requestID,
-		ShadowID:       shadowID,
-		Found:          found,
-		ContentPreview: preview,
-		ContentLength:  len(content),
-	})
+// isFieldRef checks if the ref ID is a field-level reference.
+func isFieldRef(refID string) bool {
+	return len(refID) > 6 && refID[:6] == "field_"
 }
 
-// FilterFromResponse removes expand_context from the final response.
-// Also fixes stop_reason/finish_reason when all tool_use blocks are removed.
-func (h *ExpandContextHandler) FilterFromResponse(responseBody []byte) ([]byte, bool) {
-	var response map[string]any
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return responseBody, false
-	}
+// recordExpandEntry logs an expand_context call to the in-memory expand log
+// and, if configured, to expand_context_calls.jsonl with full content.
+func (h *ExpandContextHandler) recordExpandEntry(shadowID string, found bool, content string) {
+	now := time.Now()
 
-	modified := false
-
-	// Anthropic format
-	if content, ok := response["content"].([]any); ok {
-		filteredContent := make([]any, 0, len(content))
-		for _, block := range content {
-			blockMap, ok := block.(map[string]any)
-			if !ok {
-				filteredContent = append(filteredContent, block)
-				continue
-			}
-
-			if blockMap["type"] == "tool_use" {
-				name, _ := blockMap["name"].(string)
-				if name == ExpandContextToolName {
-					modified = true
-					continue
-				}
-			}
-			filteredContent = append(filteredContent, block)
+	if h.expandLog != nil {
+		preview := content
+		if len(preview) > 100 {
+			preview = preview[:100]
 		}
-		response["content"] = filteredContent
+		h.expandLog.Record(monitoring.ExpandLogEntry{
+			Timestamp:      now,
+			SessionID:      h.sessionID,
+			RequestID:      h.requestID,
+			ShadowID:       shadowID,
+			Found:          found,
+			ContentPreview: preview,
+			ContentLength:  len(content),
+			ContentTokens:  tokenizer.CountTokens(content),
+		})
+	}
 
-		// Fix stop_reason: if we removed all tool_use blocks, stop_reason should not be "tool_use"
-		if modified {
-			if stopReason, _ := response["stop_reason"].(string); stopReason == "tool_use" {
-				hasRemainingToolUse := false
-				for _, block := range filteredContent {
-					if blockMap, ok := block.(map[string]any); ok {
-						if blockMap["type"] == "tool_use" {
-							hasRemainingToolUse = true
-							break
-						}
-					}
-				}
-				if !hasRemainingToolUse {
-					response["stop_reason"] = "end_turn"
-				}
-			}
+	if h.expandCallsLog != nil {
+		entry := monitoring.ExpandContextCallEntry{
+			Timestamp:       now,
+			SessionID:       h.sessionID,
+			RequestID:       h.requestID,
+			ShadowID:        shadowID,
+			Found:           found,
+			OriginalTokens:  tokenizer.CountTokens(content),
+			OriginalContent: content,
 		}
-	}
-
-	// OpenAI format
-	if choices, ok := response["choices"].([]any); ok {
-		for i, choice := range choices {
-			choiceMap, ok := choice.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			message, ok := choiceMap["message"].(map[string]any)
-			if !ok {
-				continue
-			}
-
-			toolCalls, ok := message["tool_calls"].([]any)
-			if !ok {
-				continue
-			}
-
-			filteredCalls := make([]any, 0, len(toolCalls))
-			for _, tc := range toolCalls {
-				tcMap, ok := tc.(map[string]any)
-				if !ok {
-					filteredCalls = append(filteredCalls, tc)
-					continue
-				}
-
-				function, ok := tcMap["function"].(map[string]any)
-				if ok {
-					name, _ := function["name"].(string)
-					if name == ExpandContextToolName {
-						modified = true
-						continue
-					}
-				}
-				filteredCalls = append(filteredCalls, tc)
-			}
-
-			// Fix finish_reason: if we removed all tool_calls, update to "stop"
-			if modified && len(filteredCalls) == 0 {
-				delete(message, "tool_calls")
-				if finishReason, _ := choiceMap["finish_reason"].(string); finishReason == "tool_calls" {
-					choiceMap["finish_reason"] = "stop"
-				}
-			} else {
-				message["tool_calls"] = filteredCalls
-			}
-			choiceMap["message"] = message
-			choices[i] = choiceMap
+		if comp, ok := h.compressionIndex[shadowID]; ok {
+			entry.ToolName = comp.ToolName
+			entry.CompressedTokens = comp.CompressedTokens
+			entry.CompressedContent = comp.CompressedContent
 		}
-		response["choices"] = choices
+		h.expandCallsLog.Log(entry)
 	}
-
-	if !modified {
-		return responseBody, false
-	}
-
-	result, err := json.Marshal(response)
-	if err != nil {
-		return responseBody, false
-	}
-	return result, true
 }
