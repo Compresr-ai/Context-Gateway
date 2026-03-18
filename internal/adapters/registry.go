@@ -26,6 +26,7 @@ func NewRegistry() *Registry {
 	r.Register(NewBedrockAdapter())
 	r.Register(NewOllamaAdapter())
 	r.Register(NewLiteLLMAdapter())
+	r.Register(NewMiniMaxAdapter())
 	r.Register(NewGeminiAdapter())
 
 	return r

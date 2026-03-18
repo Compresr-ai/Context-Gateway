@@ -109,6 +109,7 @@ const (
 	ProviderBedrock   Provider = "bedrock"
 	ProviderOllama    Provider = "ollama"
 	ProviderLiteLLM   Provider = "litellm"
+	ProviderMiniMax   Provider = "minimax"
 	ProviderUnknown   Provider = "unknown"
 )
 
@@ -132,6 +133,8 @@ func ProviderFromString(s string) Provider {
 		return ProviderOllama
 	case "litellm":
 		return ProviderLiteLLM
+	case "minimax":
+		return ProviderMiniMax
 	default:
 		return ProviderUnknown
 	}

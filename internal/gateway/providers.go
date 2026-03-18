@@ -69,6 +69,12 @@ var Providers = map[string]ProviderConfig{
 		DefaultPath: "/v1/chat/completions",
 		Paths:       []string{}, // Uses OpenAI paths, detected by API key prefix
 	},
+	"minimax": {
+		Name:        "minimax",
+		BaseURL:     envOrDefault("MINIMAX_PROVIDER_URL", "https://api.minimax.io"),
+		DefaultPath: "/v1/chat/completions",
+		Paths:       []string{}, // Uses OpenAI paths, detected by X-Provider header
+	},
 }
 
 // GetProviderByPath returns the provider config that matches the path.
@@ -105,6 +111,8 @@ func getProviderBaseURL(providerName string) string {
 		return envOrDefault("OPENROUTER_PROVIDER_URL", "https://openrouter.ai/api")
 	case "opencode":
 		return envOrDefault("OPENCODE_PROVIDER_URL", "https://opencode.ai/zen")
+	case "minimax":
+		return envOrDefault("MINIMAX_PROVIDER_URL", "https://api.minimax.io")
 	default:
 		return Providers[providerName].BaseURL
 	}

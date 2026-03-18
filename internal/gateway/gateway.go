@@ -84,6 +84,8 @@ var allowedHosts = map[string]bool{
 	"api.perplexity.ai":     true,
 	"inference.cerebras.ai": true,
 	"api.x.ai":              true,
+	"api.minimax.io":        true,
+	"api.minimaxi.com":      true, // MiniMax China endpoint
 
 	// Cloud providers
 	"bedrock-runtime.amazonaws.com": true,

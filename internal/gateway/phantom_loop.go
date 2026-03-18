@@ -276,7 +276,7 @@ func (p *PhantomLoop) parsePhantomCalls(responseBody []byte, provider adapters.P
 			})
 		}
 
-	case adapters.ProviderOpenAI, adapters.ProviderOllama, adapters.ProviderLiteLLM:
+	case adapters.ProviderOpenAI, adapters.ProviderOllama, adapters.ProviderLiteLLM, adapters.ProviderMiniMax:
 		// OpenAI Responses API format: output[] with type:"function_call"
 		// Check this BEFORE Chat Completions since both use the OpenAI adapter.
 		if output, ok := response["output"].([]any); ok {

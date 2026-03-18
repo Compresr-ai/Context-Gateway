@@ -53,6 +53,8 @@ func detectProvider(path string, headers http.Header) Provider {
 			return ProviderOllama
 		case "litellm":
 			return ProviderLiteLLM
+		case "minimax":
+			return ProviderMiniMax
 		}
 	}
 

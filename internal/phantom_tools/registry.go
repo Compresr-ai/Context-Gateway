@@ -70,7 +70,7 @@ func DetectFormat(body []byte, provider adapters.Provider) ProviderFormat {
 	if provider == adapters.ProviderGemini {
 		return FormatGemini
 	}
-	if provider == adapters.ProviderOpenAI || provider == adapters.ProviderOllama || provider == adapters.ProviderLiteLLM {
+	if provider == adapters.ProviderOpenAI || provider == adapters.ProviderOllama || provider == adapters.ProviderLiteLLM || provider == adapters.ProviderMiniMax {
 		// Responses API: has "input" but no "messages"
 		hasInput := gjson.GetBytes(body, "input").Exists()
 		hasMessages := gjson.GetBytes(body, "messages").Exists()
