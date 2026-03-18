@@ -41,9 +41,9 @@ func testConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "error",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }
@@ -51,6 +51,7 @@ func testConfig() *config.Config {
 // createTestGateway creates a gateway and returns its httptest.Server.
 func createTestGateway(cfg *config.Config) *httptest.Server {
 	gw := gateway.New(cfg)
+	gw.SetVersion("test")
 	return httptest.NewServer(gw.Handler())
 }
 

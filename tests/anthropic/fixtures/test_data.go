@@ -1,7 +1,7 @@
 // Package fixtures provides test data and helpers for tool_output tests.
 package fixtures
 
-// SmallToolOutputConst is below typical minBytes threshold (< 256 bytes)
+// SmallToolOutputConst is below typical minTokens threshold (< 256 bytes)
 const SmallToolOutputConst = `{"status": "ok", "count": 42}`
 
 // MediumToolOutputConst triggers compression (~500 bytes)

@@ -12,7 +12,7 @@ import (
 
 func TestSessionStore_TrackAndUpdate(t *testing.T) {
 	hub := dashboard.NewHub()
-	store := dashboard.NewSessionStore(hub)
+	store := dashboard.NewSessionStore(hub, 0)
 	defer store.Stop()
 
 	// Track a new session (first request — RequestCount becomes 0 for initial Track on creation)
@@ -43,9 +43,9 @@ func TestSessionStore_TrackAndUpdate(t *testing.T) {
 	assert.Equal(t, 0.01, got.CostUSD)
 	assert.Equal(t, "Fix the bug in handler.go", got.LastUserQuery)
 	assert.Equal(t, "Read", got.LastToolUsed)
-	assert.Equal(t, 0, got.RequestCount) // First Track (creation) doesn't increment
+	assert.Equal(t, 1, got.RequestCount) // New session is created with RequestCount=1
 
-	// Simulate second request: Track again then Update — RequestCount becomes 1
+	// Simulate second request: Track again then Update — RequestCount becomes 2
 	store.Track("session-1", "claude_code")
 	store.Update("session-1", dashboard.SessionUpdate{
 		TokensIn:  2000,
@@ -56,11 +56,11 @@ func TestSessionStore_TrackAndUpdate(t *testing.T) {
 	assert.Equal(t, 3000, got.TokensIn)
 	assert.Equal(t, 1300, got.TokensOut)
 	assert.InDelta(t, 0.03, got.CostUSD, 0.001)
-	assert.Equal(t, 1, got.RequestCount) // Only Track on re-entry increments
+	assert.Equal(t, 2, got.RequestCount) // Track on re-entry increments from 1 to 2
 }
 
 func TestSessionStore_All(t *testing.T) {
-	store := dashboard.NewSessionStore(nil) // nil hub = no notifications
+	store := dashboard.NewSessionStore(nil, 0) // nil hub = no notifications
 	defer store.Stop()
 
 	store.Track("s1", "claude_code")
@@ -72,7 +72,7 @@ func TestSessionStore_All(t *testing.T) {
 }
 
 func TestSessionStore_SetStatus(t *testing.T) {
-	store := dashboard.NewSessionStore(nil)
+	store := dashboard.NewSessionStore(nil, 0)
 	defer store.Stop()
 
 	store.Track("s1", "claude_code")
@@ -85,7 +85,7 @@ func TestSessionStore_SetStatus(t *testing.T) {
 
 func TestSessionStore_IdleTransition(t *testing.T) {
 	hub := dashboard.NewHub()
-	store := dashboard.NewSessionStore(hub)
+	store := dashboard.NewSessionStore(hub, 0)
 	defer store.Stop()
 
 	sess := store.Track("s1", "claude_code")
@@ -101,7 +101,7 @@ func TestSessionStore_IdleTransition(t *testing.T) {
 }
 
 func TestSessionStore_Remove(t *testing.T) {
-	store := dashboard.NewSessionStore(nil)
+	store := dashboard.NewSessionStore(nil, 0)
 	defer store.Stop()
 
 	store.Track("s1", "claude_code")
@@ -113,7 +113,7 @@ func TestSessionStore_Remove(t *testing.T) {
 }
 
 func TestSessionStore_ReactivateOnTrack(t *testing.T) {
-	store := dashboard.NewSessionStore(nil)
+	store := dashboard.NewSessionStore(nil, 0)
 	defer store.Stop()
 
 	store.Track("s1", "claude_code")

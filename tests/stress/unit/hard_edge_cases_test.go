@@ -18,9 +18,9 @@ import (
 
 	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/config"
+	phantom_tools "github.com/compresr/context-gateway/internal/phantom_tools"
 	"github.com/compresr/context-gateway/internal/pipes"
 	tooldiscovery "github.com/compresr/context-gateway/internal/pipes/tool_discovery"
-	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 )
 
 // =============================================================================
@@ -47,7 +47,7 @@ func TestKVCache_ToolsPrefix_ByteIdentical_10Turns(t *testing.T) {
 		body := []byte(fmt.Sprintf(`{"model":"claude-3-5-sonnet-20241022","max_tokens":4096,"messages":[%s],"tools":[%s]}`,
 			strings.Join(msgs, ","), baseTool))
 
-		result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+		result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err, "turn %d", turn)
 		require.True(t, json.Valid(result), "turn %d: invalid JSON", turn)
 
@@ -81,7 +81,6 @@ func TestKVCache_SearchTool_ByteIdentical_10Turns(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -124,7 +123,7 @@ func TestBothPhantomTools_CoexistStably(t *testing.T) {
 	body := []byte(`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"read_file","description":"Read","input_schema":{"type":"object"}}]}`)
 
 	// First: inject expand_context
-	withExpand, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	withExpand, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	// Second: inject search tool via tool_discovery injectSearchTool
@@ -143,9 +142,6 @@ func TestBothPhantomTools_CoexistStably(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:              true,
 				Strategy:             config.StrategyRelevance,
-				MinTools:             1,
-				MaxTools:             25,
-				TargetRatio:          1.0, // Keep all tools
 				EnableSearchFallback: false,
 			},
 		},
@@ -187,7 +183,7 @@ func TestBothPhantomTools_CoexistStably(t *testing.T) {
 	assert.True(t, hasSearch, "gateway_search_tools must be present")
 
 	// Verify no duplication: re-inject expand_context on the coexist body
-	reinjected, err := tooloutput.InjectExpandContextTool(coexistBody, nil, "anthropic")
+	reinjected, err := phantom_tools.InjectAll(coexistBody, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	// Count expand_context occurrences
@@ -203,7 +199,7 @@ func TestBothPhantomTools_CoexistStably(t *testing.T) {
 	// Verify byte-identical on repeated calls
 	var repeatedResults [][]byte
 	for i := 0; i < 5; i++ {
-		r, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+		r, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err)
 		repeatedResults = append(repeatedResults, r)
 	}
@@ -231,12 +227,12 @@ func TestInject_LargeToolSet_40Tools(t *testing.T) {
 	toolsJSON := "[" + strings.Join(tools, ",") + "]"
 	body := []byte(fmt.Sprintf(`{"model":"claude-3","messages":[{"role":"user","content":"test"}],"tools":%s}`, toolsJSON))
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 	require.True(t, json.Valid(result), "result must be valid JSON")
 
 	resultTools := gjson.GetBytes(result, "tools")
-	assert.Equal(t, int64(41), resultTools.Get("#").Int(), "should have 41 tools (40 + expand_context)")
+	assert.Equal(t, int64(42), resultTools.Get("#").Int(), "should have 42 tools (40 + expand_context + gateway_search_tools)")
 
 	// Verify original 40 preserved exactly
 	for i := 0; i < 40; i++ {
@@ -244,9 +240,11 @@ func TestInject_LargeToolSet_40Tools(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("tool_%03d", i), name, "tool %d name mismatch", i)
 	}
 
-	// Verify expand_context is at the end (index 40)
+	// Verify expand_context is at index 40 (injected first), gateway_search_tools at index 41
 	assert.Equal(t, "expand_context", resultTools.Get("40.name").String(),
-		"expand_context must be appended at the end")
+		"expand_context must be appended before gateway_search_tools")
+	assert.Equal(t, "gateway_search_tools", resultTools.Get("41.name").String(),
+		"gateway_search_tools must be appended last")
 
 	// Verify original tools bytes are preserved (not re-serialized)
 	origToolsRaw := gjson.GetBytes(body, "tools").Raw
@@ -287,7 +285,6 @@ func TestInject_ToolSearch_LargeToolSet_40Tools(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -299,10 +296,10 @@ func TestInject_ToolSearch_LargeToolSet_40Tools(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, json.Valid(result), "result must be valid JSON")
 
-	// Should have exactly 1 tool: gateway_search_tools
+	// With stub behavior: 40 stubs (gateway_search_tools is injected later by InjectAll in handler.go).
 	resultTools := gjson.GetBytes(result, "tools")
-	assert.Equal(t, int64(1), resultTools.Get("#").Int(), "should have exactly 1 tool")
-	assert.Equal(t, "gateway_search_tools", resultTools.Get("0.name").String())
+	totalCount := resultTools.Get("#").Int()
+	assert.Equal(t, int64(40), totalCount, "should have exactly 40 stubs")
 
 	// Deferred tools should contain all 40 original tools
 	assert.Len(t, ctx.DeferredTools, 40, "deferred tools should have 40 entries")
@@ -380,14 +377,14 @@ func TestInject_OpenAI_ResponsesAPI_Format(t *testing.T) {
 	// Responses API body: has "input" field, no "messages" field
 	body := []byte(`{"model":"gpt-4o","input":[{"role":"user","content":"hello"}],"tools":[{"type":"function","name":"read_file","description":"Read","parameters":{"type":"object"}}]}`)
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "openai")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("openai"))
 	require.NoError(t, err)
 	require.True(t, json.Valid(result), "result must be valid JSON")
 
 	tools := gjson.GetBytes(result, "tools")
-	assert.Equal(t, int64(2), tools.Get("#").Int())
+	assert.Equal(t, int64(3), tools.Get("#").Int())
 
-	// The injected tool (last one) should be flat format
+	// expand_context is at index 1 (injected first), gateway_search_tools at index 2
 	injected := tools.Get("1")
 	assert.Equal(t, "function", injected.Get("type").String())
 	assert.Equal(t, "expand_context", injected.Get("name").String())
@@ -403,17 +400,17 @@ func TestInject_OpenAI_ResponsesAPI_Format(t *testing.T) {
 // TEST 8: Empty tools array
 // =============================================================================
 
-// TestInject_EmptyToolsArray verifies that injecting expand_context into
-// a body with "tools":[] creates tools with exactly 1 element.
+// TestInject_EmptyToolsArray verifies that injecting phantom tools into
+// a body with "tools":[] creates tools with exactly 2 elements.
 func TestInject_EmptyToolsArray(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[{"role":"user","content":"test"}],"tools":[]}`)
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 	require.True(t, json.Valid(result))
 
 	tools := gjson.GetBytes(result, "tools")
-	assert.Equal(t, int64(1), tools.Get("#").Int(), "should have exactly 1 tool")
+	assert.Equal(t, int64(2), tools.Get("#").Int(), "should have exactly 2 tools (expand_context + gateway_search_tools)")
 	assert.Equal(t, "expand_context", tools.Get("0.name").String())
 }
 
@@ -421,18 +418,18 @@ func TestInject_EmptyToolsArray(t *testing.T) {
 // TEST 9: No tools field at all
 // =============================================================================
 
-// TestInject_NoToolsField verifies that injecting expand_context into a body
-// without any "tools" field creates "tools":[{expand_context}].
+// TestInject_NoToolsField verifies that injecting phantom tools into a body
+// without any "tools" field creates "tools":[{expand_context},{gateway_search_tools}].
 func TestInject_NoToolsField(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[{"role":"user","content":"test"}]}`)
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 	require.True(t, json.Valid(result))
 
 	tools := gjson.GetBytes(result, "tools")
 	assert.True(t, tools.Exists(), "tools field must be created")
-	assert.Equal(t, int64(1), tools.Get("#").Int(), "should have exactly 1 tool")
+	assert.Equal(t, int64(2), tools.Get("#").Int(), "should have exactly 2 tools (expand_context + gateway_search_tools)")
 	assert.Equal(t, "expand_context", tools.Get("0.name").String())
 }
 
@@ -461,7 +458,6 @@ func TestToolSearch_DeferredToolsStored(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -485,9 +481,9 @@ func TestToolSearch_DeferredToolsStored(t *testing.T) {
 		assert.True(t, deferredNames[name], "deferred tools should contain %s", name)
 	}
 
-	// Verify the result only has the search tool
-	assert.Equal(t, int64(1), gjson.GetBytes(result, "tools.#").Int())
-	assert.Equal(t, "gateway_search_tools", gjson.GetBytes(result, "tools.0.name").String())
+	// With stub behavior: N stubs only (gateway_search_tools injected later by InjectAll).
+	totalToolCount := gjson.GetBytes(result, "tools.#").Int()
+	assert.Equal(t, int64(len(expectedNames)), totalToolCount, "should have exactly N stubs")
 }
 
 // =============================================================================
@@ -536,11 +532,11 @@ func TestMerge_RealWorldAnthropicRequest(t *testing.T) {
 	require.True(t, json.Valid(original))
 
 	// Simulate tool_output pipe: compress the tool result
-	toBody, err := sjson.SetBytes(original, "messages.2.content.0.content", "<<<SHADOW:shadow_abc>>> Compressed: Go main function prints hello")
+	toBody, err := sjson.SetBytes(original, "messages.2.content.0.content", "[REF:shadow_abc] Compressed: Go main function prints hello")
 	require.NoError(t, err)
 
 	// Inject expand_context tool into tool_output result
-	toBody, err = tooloutput.InjectExpandContextTool(toBody, map[string]string{"shadow_abc": "original"}, "anthropic")
+	toBody, err = phantom_tools.InjectAll(toBody, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	// Simulate tool_discovery pipe: filter to 3 most relevant tools + search tool
@@ -561,7 +557,7 @@ func TestMerge_RealWorldAnthropicRequest(t *testing.T) {
 	// Messages from tool_output (compressed content)
 	assert.Equal(t, int64(5), gjson.GetBytes(result, "messages.#").Int(), "should have 5 messages")
 	compressedContent := gjson.GetBytes(result, "messages.2.content.0.content").String()
-	assert.Contains(t, compressedContent, "SHADOW", "compressed content should have shadow marker")
+	assert.Contains(t, compressedContent, "REF", "compressed content should have shadow marker")
 
 	// Tools from tool_discovery (filtered)
 	assert.Equal(t, int64(3), gjson.GetBytes(result, "tools.#").Int(), "should have 3 tools from discovery")
@@ -575,7 +571,7 @@ func TestMerge_RealWorldAnthropicRequest(t *testing.T) {
 // TestPrecomputedBytes_NoHTMLEscaping verifies that pre-computed phantom tool
 // bytes don't contain HTML-escaped characters. Go's json.Marshal escapes
 // < > & as \u003c \u003e \u0026 by default. The description contains
-// <<<SHADOW:>>> markers which must not be escaped, since LLMs need to read them.
+// [REF:] markers which must not be escaped, since LLMs need to read them.
 func TestPrecomputedBytes_NoHTMLEscaping(t *testing.T) {
 	providers := []struct {
 		name     string
@@ -601,7 +597,7 @@ func TestPrecomputedBytes_NoHTMLEscaping(t *testing.T) {
 
 	for _, tt := range providers {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := tooloutput.InjectExpandContextTool(tt.body, nil, tt.provider)
+			result, err := phantom_tools.InjectAll(tt.body, adapters.Provider(tt.provider))
 			require.NoError(t, err)
 
 			resultStr := string(result)
@@ -609,13 +605,13 @@ func TestPrecomputedBytes_NoHTMLEscaping(t *testing.T) {
 			// Check for HTML-escaped angle brackets that json.Marshal would produce
 			if strings.Contains(resultStr, `\u003c`) {
 				t.Errorf("found \\u003c (HTML-escaped '<') in pre-computed bytes — "+
-					"this will confuse LLMs reading <<<SHADOW:>>> markers.\n"+
+					"this will confuse LLMs reading [REF:] markers.\n"+
 					"Snippet: ...%s...",
 					extractAround(resultStr, `\u003c`, 40))
 			}
 			if strings.Contains(resultStr, `\u003e`) {
 				t.Errorf("found \\u003e (HTML-escaped '>') in pre-computed bytes — "+
-					"this will confuse LLMs reading <<<SHADOW:>>> markers.\n"+
+					"this will confuse LLMs reading [REF:] markers.\n"+
 					"Snippet: ...%s...",
 					extractAround(resultStr, `\u003e`, 40))
 			}
@@ -626,7 +622,7 @@ func TestPrecomputedBytes_NoHTMLEscaping(t *testing.T) {
 			if desc == "" {
 				desc = gjson.GetBytes(result, "tools.0.function.description").String()
 			}
-			assert.Contains(t, desc, "SHADOW", "description must mention SHADOW markers")
+			assert.Contains(t, desc, "REF", "description must mention SHADOW markers")
 
 			// Verify valid JSON despite any special characters
 			assert.True(t, json.Valid(result), "must be valid JSON")

@@ -1,19 +1,4 @@
 // Package monitoring - trajectory_types.go defines ATIF (Agent Trajectory Interchange Format) types.
-//
-// DESIGN: These types follow the ATIF v1.6 specification from Harbor:
-// https://github.com/laude-institute/harbor/blob/main/docs/rfcs/0001-trajectory-format.md
-//
-// ATIF provides a standardized JSON format for logging agent interactions,
-// including user messages, assistant responses, tool calls, and observations.
-//
-// TYPES:
-//   - Trajectory:     Root object containing complete interaction history
-//   - Step:           Single interaction turn (user message, agent response, or system)
-//   - ToolCall:       Function/tool invocation by the agent
-//   - Observation:    Environment feedback after actions
-//   - Metrics:        Token usage and cost data per step
-//   - FinalMetrics:   Aggregate statistics for the trajectory
-//   - Agent:          Agent configuration metadata
 package monitoring
 
 import (
@@ -21,9 +6,7 @@ import (
 	"time"
 )
 
-// =============================================================================
 // TRAJECTORY - Root object
-// =============================================================================
 
 // Trajectory represents a complete agent interaction session in ATIF format.
 type Trajectory struct {
@@ -64,9 +47,7 @@ func (t *Trajectory) ToJSON() ([]byte, error) {
 	return json.MarshalIndent(t, "", "  ")
 }
 
-// =============================================================================
 // AGENT - Agent configuration metadata
-// =============================================================================
 
 // Agent identifies the agent system used for the trajectory.
 type Agent struct {
@@ -91,9 +72,7 @@ type FunctionSchema struct {
 	Parameters  any    `json:"parameters,omitempty"`  // JSON Schema for parameters
 }
 
-// =============================================================================
 // STEP - Single interaction turn
-// =============================================================================
 
 // StepSource identifies who originated the step.
 type StepSource string
@@ -149,9 +128,7 @@ func NewSystemStep(message string) Step {
 	}
 }
 
-// =============================================================================
 // TOOL CALLS - Agent actions
-// =============================================================================
 
 // ToolCall represents a function/tool invocation by the agent.
 type ToolCall struct {
@@ -160,9 +137,7 @@ type ToolCall struct {
 	Arguments    any    `json:"arguments"`     // Arguments passed (JSON object)
 }
 
-// =============================================================================
 // OBSERVATION - Environment feedback
-// =============================================================================
 
 // Observation records results from tool executions or system events.
 type Observation struct {
@@ -183,9 +158,7 @@ type SubagentTrajectoryRef struct {
 	Extra          any    `json:"extra,omitempty"`           // Custom metadata
 }
 
-// =============================================================================
 // METRICS - Token usage and costs
-// =============================================================================
 
 // Metrics contains LLM operational data for a single step.
 type Metrics struct {
@@ -199,9 +172,7 @@ type Metrics struct {
 	Extra              any       `json:"extra,omitempty"`                // Provider-specific metrics
 }
 
-// =============================================================================
 // PROXY INTERACTION - Tracks message flow through the gateway proxy
-// =============================================================================
 
 // ProxyInteraction captures the full request/response flow through the proxy.
 // For each step, this shows: Client → Proxy → LLM → Proxy → Client
@@ -237,7 +208,7 @@ type ProxyCompressionInfo struct {
 	OriginalTokens   int                    `json:"original_tokens,omitempty"`   // Tokens before compression
 	CompressedTokens int                    `json:"compressed_tokens,omitempty"` // Tokens after compression
 	TokensSaved      int                    `json:"tokens_saved,omitempty"`      // Tokens removed
-	CompressionRatio float64                `json:"compression_ratio,omitempty"` // Ratio (compressed/original)
+	CompressionRatio float64                `json:"compression_ratio,omitempty"` // Removed fraction: 1 - compressed/original (0.9 = 90% removed; higher = more aggressive)
 	ToolCompressions []ToolCompressionEntry `json:"tool_compressions,omitempty"` // Individual tool compression details
 }
 
@@ -247,17 +218,15 @@ type ToolCompressionEntry struct {
 	ToolCallID        string  `json:"tool_call_id,omitempty"`       // Tool call ID for correlation
 	Status            string  `json:"status"`                       // compressed, passthrough_small, passthrough_large, cache_hit
 	ShadowID          string  `json:"shadow_id,omitempty"`          // Shadow reference ID
-	OriginalBytes     int     `json:"original_bytes"`               // Size before compression
-	CompressedBytes   int     `json:"compressed_bytes"`             // Size after compression
-	CompressionRatio  float64 `json:"compression_ratio"`            // Ratio for this tool
+	OriginalTokens    int     `json:"original_tokens"`              // Token count before compression
+	CompressedTokens  int     `json:"compressed_tokens"`            // Token count after compression
+	CompressionRatio  float64 `json:"compression_ratio"`            // Removed fraction: 1 - compressed/original (0.9 = 90% removed; higher = more aggressive)
 	OriginalContent   string  `json:"original_content,omitempty"`   // Original content
 	CompressedContent string  `json:"compressed_content,omitempty"` // Compressed content
 	CacheHit          bool    `json:"cache_hit"`                    // Was this a cache hit
 }
 
-// =============================================================================
 // FINAL METRICS - Aggregate statistics
-// =============================================================================
 
 // FinalMetrics provides aggregate statistics for the entire trajectory.
 type FinalMetrics struct {

@@ -67,20 +67,6 @@ func TestExtractLastUserQuery(t *testing.T) {
 	assert.Equal(t, "", dashboard.ExtractLastUserQuery([]byte(body)))
 }
 
-func TestDetectWaitingForHuman(t *testing.T) {
-	// Anthropic tool_use response
-	body := `{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Read","id":"tu_1","input":{"path":"/foo"}}]}`
-	assert.True(t, dashboard.DetectWaitingForHuman([]byte(body)))
-
-	// Normal end_turn response
-	body = `{"stop_reason":"end_turn","content":[{"type":"text","text":"Done!"}]}`
-	assert.False(t, dashboard.DetectWaitingForHuman([]byte(body)))
-
-	// OpenAI tool_calls finish reason
-	body = `{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant"}}]}`
-	assert.True(t, dashboard.DetectWaitingForHuman([]byte(body)))
-}
-
 func TestExtractLastToolUsed(t *testing.T) {
 	body := `{"messages":[{"role":"user","content":"do it"},{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"tool_use","name":"Bash","id":"tu_1","input":{}}]}]}`
 	assert.Equal(t, "Bash", dashboard.ExtractLastToolUsed([]byte(body)))

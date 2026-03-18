@@ -1,19 +1,4 @@
 // Package retry provides simple retry with exponential backoff for HTTP calls.
-//
-// Usage:
-//
-//	for attempt := 0; attempt < retry.MaxAttempts; attempt++ {
-//	    if attempt > 0 {
-//	        time.Sleep(retry.Backoff(attempt - 1))
-//	    }
-//	    resp, err := doRequest()
-//	    if err != nil {
-//	        if retry.IsTransientErr(err) { lastErr = err; continue }
-//	        return err
-//	    }
-//	    if retry.IsTransientStatus(resp.StatusCode) { lastErr = ...; continue }
-//	    // success
-//	}
 package retry
 
 import (

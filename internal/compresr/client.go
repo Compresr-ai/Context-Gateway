@@ -1,9 +1,4 @@
 // Package compresr provides a client for the Compresr API.
-//
-// FILES:
-//   - client.go:       API client and HTTP helpers
-//   - types.go:        Request/response types
-//   - subscription.go: Subscription caching
 package compresr
 
 import (
@@ -31,10 +26,6 @@ const (
 // The canonical definition lives here. config.DefaultCompresrAPIBaseURL re-exports it.
 const DefaultCompresrAPIBaseURL = "https://api.compresr.ai"
 
-// =============================================================================
-// Client
-// =============================================================================
-
 // Client is the Compresr API client.
 type Client struct {
 	baseURL    string
@@ -49,6 +40,7 @@ type Client struct {
 	// Background refresh goroutine control
 	refreshStopCh chan struct{}
 	refreshOnce   sync.Once
+	stopOnce      sync.Once // ensures StopBackgroundRefresh is safe to call concurrently
 }
 
 // ClientOption configures the Client.
@@ -122,15 +114,14 @@ func (c *Client) StartBackgroundRefresh(interval time.Duration) {
 }
 
 // StopBackgroundRefresh stops the background refresh goroutine.
+// Safe to call multiple times and from concurrent goroutines.
 func (c *Client) StopBackgroundRefresh() {
-	if c.refreshStopCh != nil {
-		select {
-		case <-c.refreshStopCh:
-			// Already closed
-		default:
+	// sync.Once guarantees exactly one close even under concurrent calls.
+	c.stopOnce.Do(func() {
+		if c.refreshStopCh != nil {
 			close(c.refreshStopCh)
 		}
-	}
+	})
 }
 
 // backgroundRefreshLoop runs in a goroutine and refreshes status at the given interval.
@@ -158,10 +149,6 @@ func (c *Client) GetCachedStatus() *GatewayStatus {
 	defer c.statusMu.RUnlock()
 	return c.statusCache
 }
-
-// =============================================================================
-// API Methods
-// =============================================================================
 
 // GetSubscription fetches the subscription status for the current API key.
 func (c *Client) GetSubscription() (*SubscriptionData, error) {
@@ -303,10 +290,6 @@ func (c *Client) ValidateAPIKey() (string, error) {
 	return sub.Tier, nil
 }
 
-// =============================================================================
-// HISTORY COMPRESSION API
-// =============================================================================
-
 // CompressHistory calls the Compresr API to compress conversation history.
 func (c *Client) CompressHistory(params CompressHistoryParams) (*CompressHistoryResponse, error) {
 	if c.apiKey == "" {
@@ -354,10 +337,6 @@ func (c *Client) CompressHistory(params CompressHistoryParams) (*CompressHistory
 	return &resp.Data, nil
 }
 
-// =============================================================================
-// TOOL OUTPUT COMPRESSION API
-// =============================================================================
-
 // CompressToolOutput calls the Compresr API to compress tool output.
 func (c *Client) CompressToolOutput(params CompressToolOutputParams) (*CompressToolOutputResponse, error) {
 	if c.apiKey == "" {
@@ -403,12 +382,12 @@ func (c *Client) CompressToolOutput(params CompressToolOutputParams) (*CompressT
 		return nil, fmt.Errorf("API error: %s", resp.Message)
 	}
 
+	if resp.Data.CompressedOutput == "" {
+		return nil, fmt.Errorf("API returned empty compressed_output")
+	}
+
 	return &resp.Data, nil
 }
-
-// =============================================================================
-// TOOL DISCOVERY API
-// =============================================================================
 
 // FilterTools calls the Compresr API to select relevant tools.
 func (c *Client) FilterTools(params FilterToolsParams) (*FilterToolsResponse, error) {
@@ -464,11 +443,7 @@ func (c *Client) FilterTools(params FilterToolsParams) (*FilterToolsResponse, er
 	return &resp.Data, nil
 }
 
-// =============================================================================
-// HTTP Helpers
-// =============================================================================
-
-func (c *Client) get(path string, result interface{}) error {
+func (c *Client) get(path string, result any) error {
 	reqURL := c.baseURL + path
 
 	parsedURL, err := url.Parse(reqURL)
@@ -531,7 +506,7 @@ func (c *Client) get(path string, result interface{}) error {
 	return lastErr
 }
 
-func (c *Client) post(path string, payload interface{}, result interface{}) error {
+func (c *Client) post(path string, payload any, result any) error {
 	reqURL := c.baseURL + path
 
 	parsedURL, err := url.Parse(reqURL)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/compresr/context-gateway/internal/utils"
 	"github.com/rs/zerolog/log"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -28,37 +27,39 @@ func NewAnthropicAdapter() *AnthropicAdapter {
 	}
 }
 
-// =============================================================================
 // TOOL OUTPUT - Extract/Apply
-// =============================================================================
 
 // ExtractToolOutput extracts tool result content from Anthropic format.
 // Anthropic format: {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "xxx", "content": "..."}]}
 // Note: content can be string or array of blocks
 func (a *AnthropicAdapter) ExtractToolOutput(body []byte) ([]ExtractedContent, error) {
-	var req struct {
-		Messages []struct {
-			Role    string      `json:"role"`
-			Content interface{} `json:"content"` // Can be string or array
-		} `json:"messages"`
-	}
-
+	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to parse request: %w", err)
 	}
+	messages, _ := req["messages"].([]any)
+	return a.extractToolOutputsFromMessages(messages), nil
+}
 
-	// Build tool name lookup map once (avoids O(n²) re-parsing)
+// extractToolOutputsFromMessages extracts all tool_result blocks from a messages []any slice.
+// Shared by ExtractToolOutput (parses from body) and ExtractToolOutputFromParsed (uses pre-parsed).
+func (a *AnthropicAdapter) extractToolOutputsFromMessages(messages []any) []ExtractedContent {
+	// Step 1: Build tool name lookup from assistant messages (avoids O(n²) re-parsing)
 	toolNames := make(map[string]string)
-	for _, msg := range req.Messages {
-		if msg.Role != "assistant" {
+	for _, msgAny := range messages {
+		msg, ok := msgAny.(map[string]any)
+		if !ok {
 			continue
 		}
-		contentArr, ok := msg.Content.([]interface{})
+		if role, _ := msg["role"].(string); role != "assistant" {
+			continue
+		}
+		contentArr, ok := msg["content"].([]any)
 		if !ok {
 			continue
 		}
 		for _, block := range contentArr {
-			blockMap, ok := block.(map[string]interface{})
+			blockMap, ok := block.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -72,37 +73,37 @@ func (a *AnthropicAdapter) ExtractToolOutput(body []byte) ([]ExtractedContent, e
 		}
 	}
 
+	// Step 2: Extract tool_result blocks from user messages
 	var extracted []ExtractedContent
-	for msgIdx, msg := range req.Messages {
-		if msg.Role != "user" {
-			continue
-		}
-
-		// Content can be string (skip) or array of blocks
-		contentArr, ok := msg.Content.([]interface{})
+	for msgIdx, msgAny := range messages {
+		msg, ok := msgAny.(map[string]any)
 		if !ok {
 			continue
 		}
-
+		if role, _ := msg["role"].(string); role != "user" {
+			continue
+		}
+		contentArr, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
 		for blockIdx, block := range contentArr {
-			blockMap, ok := block.(map[string]interface{})
+			blockMap, ok := block.(map[string]any)
 			if !ok {
 				continue
 			}
-
 			blockType, _ := blockMap["type"].(string)
 			if blockType != "tool_result" {
 				continue
 			}
-
 			toolUseID, _ := blockMap["tool_use_id"].(string)
 			content := a.extractBlockContent(blockMap)
-
 			if content != "" {
 				extracted = append(extracted, ExtractedContent{
 					ID:           toolUseID,
 					Content:      content,
 					ContentType:  "tool_result",
+					Format:       DetectContentFormat(content),
 					ToolName:     toolNames[toolUseID],
 					MessageIndex: msgIdx,
 					BlockIndex:   blockIdx,
@@ -110,8 +111,7 @@ func (a *AnthropicAdapter) ExtractToolOutput(body []byte) ([]ExtractedContent, e
 			}
 		}
 	}
-
-	return extracted, nil
+	return extracted
 }
 
 // ApplyToolOutput applies compressed tool results back to the Anthropic format request.
@@ -138,57 +138,80 @@ func (a *AnthropicAdapter) ApplyToolOutput(body []byte, results []CompressedResu
 	return modified, nil
 }
 
-// =============================================================================
 // TOOL DISCOVERY - Extract/Apply
-// =============================================================================
 
 // ExtractToolDiscovery extracts tool definitions for filtering.
 // Anthropic format: tools: [{name, description, input_schema}]
-// Stores full tool JSON in Metadata["raw_json"] for later injection.
 func (a *AnthropicAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("failed to parse request: %w", err)
 	}
-
 	tools, ok := req["tools"].([]any)
 	if !ok || len(tools) == 0 {
 		return nil, nil
 	}
+	return a.extractToolsToContent(tools), nil
+}
 
+// extractToolsToContent converts a tools []any slice into []ExtractedContent.
+// Shared by ExtractToolDiscovery (parses from body) and ExtractToolDiscoveryFromParsed (uses pre-parsed).
+// Stores full tool JSON in Metadata["raw_json"] for later injection.
+func (a *AnthropicAdapter) extractToolsToContent(tools []any) []ExtractedContent {
 	extracted := make([]ExtractedContent, 0, len(tools))
 	for i, toolAny := range tools {
 		tool, ok := toolAny.(map[string]any)
 		if !ok {
 			continue
 		}
-
 		name, _ := tool["name"].(string)
 		if name == "" {
 			continue
 		}
 		description, _ := tool["description"].(string)
-
-		// Serialize full tool definition for later injection
 		rawJSON, _ := json.Marshal(toolAny)
-
 		extracted = append(extracted, ExtractedContent{
 			ID:           name,
 			Content:      description,
 			ContentType:  "tool_def",
 			ToolName:     name,
 			MessageIndex: i,
-			Metadata: map[string]interface{}{
+			Metadata: map[string]any{
 				"raw_json": string(rawJSON),
 			},
 		})
 	}
+	return extracted
+}
 
-	return extracted, nil
+// buildDeferredStub returns minimal Anthropic-format stub bytes for a deferred tool.
+// Deferred tools keep their name so the LLM knows they exist, but have a stripped
+// description and empty schema to save tokens.
+// Output is deterministic: same toolName → identical bytes every call.
+// The description is a constant (DeferredStubDescription) so all stubs are byte-identical
+// except for the tool name, preserving KV-cache prefix stability.
+func buildDeferredStub(toolName string) []byte {
+	nameJSON, _ := json.Marshal(toolName)
+	descJSON, _ := json.Marshal(DeferredStubDescription)
+	b := make([]byte, 0, 8+len(nameJSON)+16+len(descJSON)+45)
+	b = append(b, `{"name":`...)
+	b = append(b, nameJSON...)
+	b = append(b, `,"description":`...)
+	b = append(b, descJSON...)
+	b = append(b, `,"input_schema":{"type":"object","properties":{}}}`...)
+	return b
 }
 
 // ApplyToolDiscovery filters tools based on Keep flag in results.
-// Uses gjson/sjson to preserve original JSON byte representation and KV-cache prefix.
+// Kept tools (Keep=true) are forwarded with their original definition.
+// Deferred tools (Keep=false) are replaced with minimal stubs so the tools[]
+// array length stays constant across requests — preserving KV-cache prefix.
+//
+// Server tools (type != "custom", e.g. "web_search_20260209", "bash_20250124") are
+// always forwarded as-is regardless of Keep flag. Stubbing them would strip the
+// type field, breaking the server-side execution hook keyed on that type.
+//
+// Uses gjson/sjson to preserve original JSON byte representation outside tools[].
 func (a *AnthropicAdapter) ApplyToolDiscovery(body []byte, results []CompressedResult) ([]byte, error) {
 	if len(results) == 0 {
 		return body, nil
@@ -201,34 +224,40 @@ func (a *AnthropicAdapter) ApplyToolDiscovery(body []byte, results []CompressedR
 		}
 	}
 
-	// Extract each kept tool's raw JSON bytes from the original body
 	toolsResult := gjson.GetBytes(body, "tools")
 	if !toolsResult.Exists() {
 		return body, nil
 	}
 
-	var keptRaw []byte
-	keptRaw = append(keptRaw, '[')
+	var newRaw []byte
+	newRaw = append(newRaw, '[')
 	first := true
 	toolsResult.ForEach(func(_, value gjson.Result) bool {
 		name := value.Get("name").String()
-		if keepSet[name] {
-			if !first {
-				keptRaw = append(keptRaw, ',')
-			}
-			keptRaw = append(keptRaw, value.Raw...)
-			first = false
+		if name == "" {
+			return true // skip malformed entries
 		}
+		if !first {
+			newRaw = append(newRaw, ',')
+		}
+		// Server tools have a type field that is not "custom" (e.g. "web_search_20260209").
+		// Their type drives server-side execution — always preserve them verbatim.
+		toolType := value.Get("type").String()
+		isServerTool := toolType != "" && toolType != "custom"
+		if keepSet[name] || isServerTool {
+			newRaw = append(newRaw, value.Raw...) // full definition
+		} else {
+			newRaw = append(newRaw, buildDeferredStub(name)...) // minimal stub
+		}
+		first = false
 		return true
 	})
-	keptRaw = append(keptRaw, ']')
+	newRaw = append(newRaw, ']')
 
-	return sjson.SetRawBytes(body, "tools", keptRaw)
+	return sjson.SetRawBytes(body, "tools", newRaw)
 }
 
-// =============================================================================
 // QUERY EXTRACTION
-// =============================================================================
 
 // ExtractUserQuery extracts the last real user question from Anthropic format.
 // Skips tool_result messages and system-reminder injections to find the actual
@@ -379,9 +408,7 @@ func isSystemReminder(text string) bool {
 	return strings.HasPrefix(strings.TrimSpace(text), "<system-reminder>")
 }
 
-// =============================================================================
 // LAST USER CONTENT - Structural extraction for classification
-// =============================================================================
 
 // ExtractLastUserContent extracts text blocks and tool_result flag from the last user message.
 // Returns individual text blocks (not concatenated) and whether tool_result blocks exist.
@@ -446,9 +473,7 @@ func (a *AnthropicAdapter) ExtractLastUserContent(body []byte) ([]string, bool) 
 	return nil, false
 }
 
-// =============================================================================
 // PARSED REQUEST - Single-parse optimization
-// =============================================================================
 
 // ParseRequest parses the request body once for reuse.
 // This avoids repeated JSON unmarshaling when extracting multiple pieces of data.
@@ -459,7 +484,8 @@ func (a *AnthropicAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
 	}
 
 	parsed := &ParsedRequest{
-		Raw: req,
+		Raw:          req,
+		OriginalBody: body,
 	}
 
 	// Extract messages
@@ -476,41 +502,11 @@ func (a *AnthropicAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
 }
 
 // ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
-// Stores full tool JSON in Metadata["raw_json"] for later injection.
 func (a *AnthropicAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
 	if parsed == nil || len(parsed.Tools) == 0 {
 		return nil, nil
 	}
-
-	extracted := make([]ExtractedContent, 0, len(parsed.Tools))
-	for i, toolAny := range parsed.Tools {
-		tool, ok := toolAny.(map[string]any)
-		if !ok {
-			continue
-		}
-
-		name, _ := tool["name"].(string)
-		if name == "" {
-			continue
-		}
-		description, _ := tool["description"].(string)
-
-		// Serialize full tool definition for later injection
-		rawJSON, _ := json.Marshal(toolAny)
-
-		extracted = append(extracted, ExtractedContent{
-			ID:           name,
-			Content:      description,
-			ContentType:  "tool_def",
-			ToolName:     name,
-			MessageIndex: i,
-			Metadata: map[string]interface{}{
-				"raw_json": string(rawJSON),
-			},
-		})
-	}
-
-	return extracted, nil
+	return a.extractToolsToContent(parsed.Tools), nil
 }
 
 // ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
@@ -538,138 +534,33 @@ func (a *AnthropicAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) str
 
 // ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
 func (a *AnthropicAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
-	if parsed == nil || len(parsed.Messages) == 0 {
+	if parsed == nil {
 		return nil, nil
 	}
-
-	// Build tool name lookup map once (avoids O(n²) re-parsing)
-	toolNames := make(map[string]string)
-	for _, msgAny := range parsed.Messages {
-		msg, ok := msgAny.(map[string]any)
-		if !ok {
-			continue
-		}
-		role, _ := msg["role"].(string)
-		if role != "assistant" {
-			continue
-		}
-		contentArr, ok := msg["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, block := range contentArr {
-			blockMap, ok := block.(map[string]any)
-			if !ok {
-				continue
-			}
-			if blockMap["type"] == "tool_use" {
-				id, _ := blockMap["id"].(string)
-				name, _ := blockMap["name"].(string)
-				if id != "" && name != "" {
-					toolNames[id] = name
-				}
-			}
-		}
-	}
-
-	var extracted []ExtractedContent
-	for msgIdx, msgAny := range parsed.Messages {
-		msg, ok := msgAny.(map[string]any)
-		if !ok {
-			continue
-		}
-		role, _ := msg["role"].(string)
-		if role != "user" {
-			continue
-		}
-
-		// Content can be string (skip) or array of blocks
-		contentArr, ok := msg["content"].([]any)
-		if !ok {
-			continue
-		}
-
-		for blockIdx, block := range contentArr {
-			blockMap, ok := block.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			blockType, _ := blockMap["type"].(string)
-			if blockType != "tool_result" {
-				continue
-			}
-
-			toolUseID, _ := blockMap["tool_use_id"].(string)
-			// Convert to map[string]interface{} for extractBlockContent
-			blockMapInterface := make(map[string]interface{}, len(blockMap))
-			for k, v := range blockMap {
-				blockMapInterface[k] = v
-			}
-			content := a.extractBlockContent(blockMapInterface)
-
-			if content != "" {
-				extracted = append(extracted, ExtractedContent{
-					ID:           toolUseID,
-					Content:      content,
-					ContentType:  "tool_result",
-					ToolName:     toolNames[toolUseID],
-					MessageIndex: msgIdx,
-					BlockIndex:   blockIdx,
-				})
-			}
-		}
-	}
-
-	return extracted, nil
+	return a.extractToolOutputsFromMessages(parsed.Messages), nil
 }
 
 // ApplyToolDiscoveryToParsed filters tools and returns modified body.
-// Note: ParsedRequest doesn't preserve original bytes, so we use MarshalNoEscape here.
-// For KV-cache preservation, prefer the byte-level ApplyToolDiscovery when possible.
+// Delegates to the sjson-based ApplyToolDiscovery via OriginalBody to preserve
+// key ordering and KV-cache prefix stability.
 func (a *AnthropicAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
-	if len(results) == 0 || parsed == nil {
-		return utils.MarshalNoEscape(parsed.Raw)
+	if parsed == nil {
+		return nil, fmt.Errorf("nil parsed request")
 	}
-
-	keepSet := make(map[string]bool)
-	for _, r := range results {
-		if r.Keep {
-			keepSet[r.ID] = true
-		}
+	if len(results) == 0 {
+		return parsed.OriginalBody, nil
 	}
-
-	req, ok := parsed.Raw.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("invalid parsed request type")
-	}
-
-	filtered := make([]any, 0, len(keepSet))
-	for _, toolAny := range parsed.Tools {
-		tool, ok := toolAny.(map[string]any)
-		if !ok {
-			continue
-		}
-		name, _ := tool["name"].(string)
-		if keepSet[name] {
-			filtered = append(filtered, toolAny)
-		}
-	}
-
-	req["tools"] = filtered
-	return utils.MarshalNoEscape(req)
+	return a.ApplyToolDiscovery(parsed.OriginalBody, results)
 }
 
 // Ensure AnthropicAdapter implements ParsedRequestAdapter
 var _ ParsedRequestAdapter = (*AnthropicAdapter)(nil)
 
-// =============================================================================
 // HELPERS
-// =============================================================================
 
 // extractBlockContent gets the content string from a tool_result block.
 // Content can be a string or an array of content blocks.
-func (a *AnthropicAdapter) extractBlockContent(block map[string]interface{}) string {
+func (a *AnthropicAdapter) extractBlockContent(block map[string]any) string {
 	content := block["content"]
 	if content == nil {
 		return ""
@@ -681,10 +572,10 @@ func (a *AnthropicAdapter) extractBlockContent(block map[string]interface{}) str
 	}
 
 	// Array content - extract text blocks
-	if arr, ok := content.([]interface{}); ok {
+	if arr, ok := content.([]any); ok {
 		var text string
 		for _, item := range arr {
-			if itemMap, ok := item.(map[string]interface{}); ok {
+			if itemMap, ok := item.(map[string]any); ok {
 				if itemMap["type"] == "text" {
 					if t, ok := itemMap["text"].(string); ok {
 						text += t
@@ -698,12 +589,15 @@ func (a *AnthropicAdapter) extractBlockContent(block map[string]interface{}) str
 	return ""
 }
 
-// =============================================================================
 // USAGE EXTRACTION - Extract token usage from API response
-// =============================================================================
 
 // ExtractUsage extracts token usage from Anthropic API response.
-// Anthropic format: {"usage": {"input_tokens": N, "output_tokens": N}}
+// Anthropic format: {"usage": {"input_tokens": N, "output_tokens": N, "cache_creation_input_tokens": N, "cache_read_input_tokens": N}}
+//
+// IMPORTANT: Anthropic's input_tokens represents ONLY the non-cached portion of the input
+// (tokens processed after the last cache breakpoint). It does NOT include cache hits.
+// Total input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+// See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 func (a *AnthropicAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 	if len(responseBody) == 0 {
 		return UsageInfo{}
@@ -721,17 +615,12 @@ func (a *AnthropicAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 		return UsageInfo{}
 	}
 
-	// Anthropic's input_tokens includes cache_read tokens and cache_creation tokens.
-	// Subtract them so InputTokens represents only non-cached input (avoids double-counting in cost calculation).
-	nonCachedInput := resp.Usage.InputTokens - resp.Usage.CacheCreationInputTokens - resp.Usage.CacheReadInputTokens
-	if nonCachedInput < 0 {
-		nonCachedInput = 0
-	}
-
+	// input_tokens is already the non-cached suffix — no subtraction needed.
+	// TotalTokens must include all three input categories.
 	return UsageInfo{
-		InputTokens:              nonCachedInput,
+		InputTokens:              resp.Usage.InputTokens,
 		OutputTokens:             resp.Usage.OutputTokens,
-		TotalTokens:              resp.Usage.InputTokens + resp.Usage.OutputTokens,
+		TotalTokens:              resp.Usage.InputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.OutputTokens,
 		CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
 		CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
 	}
@@ -755,6 +644,171 @@ func (a *AnthropicAdapter) ExtractModel(requestBody []byte) string {
 		return req.Model[idx:]
 	}
 	return req.Model
+}
+
+// PHANTOM TOOL OPERATIONS - Response parsing and message construction
+
+// ExtractToolCallsFromResponse extracts tool_use blocks from Anthropic response.
+func (a *AnthropicAdapter) ExtractToolCallsFromResponse(responseBody []byte) ([]ToolCall, error) {
+	var response map[string]any
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	content, ok := response["content"].([]any)
+	if !ok {
+		return nil, nil
+	}
+	var calls []ToolCall
+	for _, block := range content {
+		blockMap, ok := block.(map[string]any)
+		if !ok {
+			continue
+		}
+		if blockMap["type"] != "tool_use" {
+			continue
+		}
+		name, _ := blockMap["name"].(string)
+		toolUseID, _ := blockMap["id"].(string)
+		input, _ := blockMap["input"].(map[string]any)
+		if toolUseID != "" {
+			calls = append(calls, ToolCall{ToolUseID: toolUseID, ToolName: name, Input: input})
+		}
+	}
+	return calls, nil
+}
+
+// FilterToolCallFromResponse removes a named tool_use block from an Anthropic response.
+// Also fixes stop_reason when all tool_use blocks are removed.
+func (a *AnthropicAdapter) FilterToolCallFromResponse(responseBody []byte, toolName string) ([]byte, bool) {
+	contentRaw := gjson.GetBytes(responseBody, "content")
+	if !contentRaw.Exists() {
+		return responseBody, false
+	}
+
+	var blocks []json.RawMessage
+	if err := json.Unmarshal([]byte(contentRaw.Raw), &blocks); err != nil {
+		return responseBody, false
+	}
+
+	filtered := make([]json.RawMessage, 0, len(blocks))
+	modified := false
+	hasRemainingToolUse := false
+
+	for _, block := range blocks {
+		blockType := gjson.GetBytes(block, "type").String()
+		if blockType == "tool_use" && gjson.GetBytes(block, "name").String() == toolName {
+			modified = true
+			continue
+		}
+		if blockType == "tool_use" {
+			hasRemainingToolUse = true
+		}
+		filtered = append(filtered, block)
+	}
+
+	if !modified {
+		return responseBody, false
+	}
+
+	filteredJSON, err := json.Marshal(filtered)
+	if err != nil {
+		return responseBody, false
+	}
+
+	result, err := sjson.SetRawBytes(responseBody, "content", filteredJSON)
+	if err != nil {
+		return responseBody, false
+	}
+
+	// Fix stop_reason only if all tool_use blocks were removed
+	if !hasRemainingToolUse {
+		if gjson.GetBytes(result, "stop_reason").String() == "tool_use" {
+			result, err = sjson.SetBytes(result, "stop_reason", "end_turn")
+			if err != nil {
+				return responseBody, false
+			}
+		}
+	}
+
+	return result, true
+}
+
+// AppendMessages appends an assistant response and tool results to an Anthropic request.
+// Uses sjson for byte-level modification to preserve KV-cache prefix.
+func (a *AnthropicAdapter) AppendMessages(body []byte, assistantResponse []byte, toolResults []map[string]any) ([]byte, error) {
+	out := body
+
+	// Append assistant message using raw content bytes
+	contentRaw := gjson.GetBytes(assistantResponse, "content")
+	if contentRaw.Exists() {
+		assistantMsg := []byte(`{"role":"assistant","content":` + contentRaw.Raw + `}`)
+		var err error
+		out, err = sjson.SetRawBytes(out, "messages.-1", assistantMsg)
+		if err != nil {
+			return nil, fmt.Errorf("AppendMessages: append assistant message: %w", err)
+		}
+	}
+
+	// Append tool result messages
+	for _, tr := range toolResults {
+		trJSON, marshalErr := json.Marshal(tr)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("AppendMessages: marshal tool result: %w", marshalErr)
+		}
+		var err error
+		out, err = sjson.SetRawBytes(out, "messages.-1", trJSON)
+		if err != nil {
+			return nil, fmt.Errorf("AppendMessages: append tool result: %w", err)
+		}
+	}
+
+	return out, nil
+}
+
+// BuildToolResultMessages constructs the Anthropic tool result message format.
+// Anthropic groups all tool results in ONE user message with tool_result content blocks.
+// The requestBody parameter is unused for Anthropic (format is always the same).
+func (a *AnthropicAdapter) BuildToolResultMessages(calls []ToolCall, contentPerCall []string, _ []byte) []map[string]any {
+	contentBlocks := make([]any, 0, len(calls))
+	for i, call := range calls {
+		var text string
+		if i < len(contentPerCall) {
+			text = contentPerCall[i]
+		}
+		contentBlocks = append(contentBlocks, map[string]any{
+			"type":        "tool_result",
+			"tool_use_id": call.ToolUseID,
+			"content":     text,
+		})
+	}
+	return []map[string]any{{
+		"role":    "user",
+		"content": contentBlocks,
+	}}
+}
+
+// ExtractTurnSignal classifies the Anthropic stop reason into a normalized TurnSignal.
+//
+//	end_turn, stop_sequence, refusal → HumanTurn (agent finished, waiting for user)
+//	tool_use, pause_turn             → AgentWorking (tool loop or server-side tool)
+//	max_tokens, model_context_window_exceeded → Truncated
+func (a *AnthropicAdapter) ExtractTurnSignal(responseBody []byte, streamStopReason string) TurnSignal {
+	reason := streamStopReason
+	if reason == "" {
+		reason = gjson.GetBytes(responseBody, "stop_reason").String()
+	}
+	switch reason {
+	case "tool_use", "pause_turn":
+		return TurnSignalAgentWorking
+	case "max_tokens", "model_context_window_exceeded":
+		return TurnSignalTruncated
+	case "end_turn", "stop_sequence", "refusal":
+		return TurnSignalHumanTurn
+	case "":
+		return TurnSignalUnknown
+	default:
+		return TurnSignalHumanTurn
+	}
 }
 
 // Ensure AnthropicAdapter implements Adapter

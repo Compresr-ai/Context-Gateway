@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Save, X, ExternalLink } from 'lucide-react'
 import type { GatewayConfig } from '../types'
 import CustomSelect from './CustomSelect'
+import SettingsSection from './SettingsSection'
+import Toggle from './Toggle'
 
 const preemptiveStrategies = [
   { value: 'compresr', label: 'Compresr API' },
@@ -11,8 +13,6 @@ const preemptiveStrategies = [
 const toolOutputStrategies = [
   { value: 'compresr', label: 'Compresr API' },
   { value: 'external_provider', label: 'External Provider' },
-  { value: 'simple', label: 'Simple' },
-  { value: 'passthrough', label: 'Passthrough' },
 ]
 
 const toolDiscoveryStrategies = [
@@ -34,7 +34,54 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [validationErrors, setValidationErrors] = useState<Record<string, string>>({})
   const toastTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Validate config and return errors
+  const validateConfig = useCallback((cfg: GatewayConfig): Record<string, string> => {
+    const errors: Record<string, string> = {}
+    
+    // Preemptive trigger_threshold: 1-99
+    if (cfg.preemptive.trigger_threshold < 1 || cfg.preemptive.trigger_threshold > 99) {
+      errors['preemptive.trigger_threshold'] = 'Must be between 1 and 99'
+    }
+    
+    // Tool Output min_tokens: >= 0
+    if (cfg.pipes.tool_output.min_tokens < 0 || !Number.isFinite(cfg.pipes.tool_output.min_tokens)) {
+      errors['pipes.tool_output.min_tokens'] = 'Must be 0 or greater'
+    }
+    
+    // Tool Output target_compression_ratio: 0.1-0.9
+    if (cfg.pipes.tool_output.target_compression_ratio < 0.1 || cfg.pipes.tool_output.target_compression_ratio > 0.9) {
+      errors['pipes.tool_output.target_compression_ratio'] = 'Must be between 0.1 and 0.9'
+    }
+    
+    // Tool Discovery token_threshold: >= 0
+    if (cfg.pipes.tool_discovery.token_threshold < 0 || !Number.isFinite(cfg.pipes.tool_discovery.token_threshold)) {
+      errors['pipes.tool_discovery.token_threshold'] = 'Must be 0 or greater'
+    }
+    
+    // Cost Control session_cap: >= 0
+    if (cfg.cost_control.session_cap < 0 || !Number.isFinite(cfg.cost_control.session_cap)) {
+      errors['cost_control.session_cap'] = 'Must be 0 or greater'
+    }
+    
+    // Cost Control global_cap: >= 0
+    if (cfg.cost_control.global_cap < 0 || !Number.isFinite(cfg.cost_control.global_cap)) {
+      errors['cost_control.global_cap'] = 'Must be 0 or greater'
+    }
+    
+    return errors
+  }, [])
+
+  // Update validation when config changes
+  useEffect(() => {
+    if (config) {
+      setValidationErrors(validateConfig(config))
+    }
+  }, [config, validateConfig])
+
+  const hasValidationErrors = Object.keys(validationErrors).length > 0
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -72,6 +119,10 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
 
   const saveAll = async () => {
     if (!config || !savedConfig) return
+    if (hasValidationErrors) {
+      showToast('Fix validation errors before saving')
+      return
+    }
     setSaving(true)
     try {
       const patch = {
@@ -121,28 +172,19 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
     width: 100,
   }
 
-  const toggleStyle = (active: boolean): React.CSSProperties => ({
-    width: 40,
-    height: 22,
-    borderRadius: 11,
-    background: active ? '#16a34a' : 'rgba(255,255,255,0.1)',
-    border: 'none',
-    cursor: 'pointer',
-    position: 'relative',
-    transition: 'background 0.2s',
-    flexShrink: 0,
-  })
+  const errorInputStyle: React.CSSProperties = {
+    ...inputStyle,
+    border: '1px solid #ef4444',
+    background: 'rgba(239,68,68,0.1)',
+  }
 
-  const toggleDot = (active: boolean): React.CSSProperties => ({
-    position: 'absolute',
-    top: 3,
-    left: active ? 21 : 3,
-    width: 16,
-    height: 16,
-    borderRadius: '50%',
-    background: '#fff',
-    transition: 'left 0.2s',
-  })
+  const getInputStyle = (field: string) => validationErrors[field] ? errorInputStyle : inputStyle
+
+  const errorTextStyle: React.CSSProperties = {
+    fontSize: 10,
+    color: '#ef4444',
+    marginTop: 3,
+  }
 
   const rowStyle: React.CSSProperties = {
     display: 'flex',
@@ -257,7 +299,7 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
         )}
 
         {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px' }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
           {error && (
             <div style={{
               color: '#ef4444',
@@ -279,35 +321,36 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
           )}
 
           {config && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-              {/* Preemptive Summarization */}
-              <Section title="Preemptive Summarization">
-                <div style={rowStyle}>
-                  <div>
-                    <div style={labelStyle}>Enabled</div>
-                    <div style={descStyle}>Background summarization before context limit</div>
-                  </div>
-                  <button
-                    style={toggleStyle(config.preemptive.enabled)}
-                    onClick={() => setConfig({ ...config, preemptive: { ...config.preemptive, enabled: !config.preemptive.enabled } })}
-                  >
-                    <span style={toggleDot(config.preemptive.enabled)} />
-                  </button>
-                </div>
+            <>
+              {/* ── Preemptive Summarization ── */}
+              <SettingsSection
+                title="Preemptive Summarization"
+                description="Background summarization before context limit"
+                defaultOpen
+                enabled={config.preemptive.enabled}
+                onToggle={() => setConfig({ ...config, preemptive: { ...config.preemptive, enabled: !config.preemptive.enabled } })}
+              >
                 <div style={rowStyle}>
                   <div>
                     <div style={labelStyle}>Trigger Threshold (%)</div>
                     <div style={descStyle}>Context usage % that triggers summarization</div>
                   </div>
-                  <input
-                    type="number"
-                    min={1}
-                    max={99}
-                    step={1}
-                    value={config.preemptive.trigger_threshold}
-                    style={inputStyle}
-                    onChange={(e) => setConfig({ ...config, preemptive: { ...config.preemptive, trigger_threshold: Number(e.target.value) } })}
-                  />
+                  <div>
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      step={1}
+                      value={config.preemptive.trigger_threshold}
+                      style={getInputStyle('preemptive.trigger_threshold')}
+                      onChange={(e) => {
+                        setConfig({ ...config, preemptive: { ...config.preemptive, trigger_threshold: Number(e.target.value) } })
+                      }}
+                    />
+                    {validationErrors['preemptive.trigger_threshold'] && (
+                      <div style={errorTextStyle}>{validationErrors['preemptive.trigger_threshold']}</div>
+                    )}
+                  </div>
                 </div>
                 <div style={rowStyle}>
                   <div>
@@ -320,25 +363,18 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
                     options={preemptiveStrategies}
                   />
                 </div>
-              </Section>
+              </SettingsSection>
 
-              {/* Tool Output Compression */}
-              <Section title="Tool Output Compression">
-                <div style={rowStyle}>
-                  <div>
-                    <div style={labelStyle}>Enabled</div>
-                    <div style={descStyle}>Compress large tool results</div>
-                  </div>
-                  <button
-                    style={toggleStyle(config.pipes.tool_output.enabled)}
-                    onClick={() => setConfig({
-                      ...config,
-                      pipes: { ...config.pipes, tool_output: { ...config.pipes.tool_output, enabled: !config.pipes.tool_output.enabled } },
-                    })}
-                  >
-                    <span style={toggleDot(config.pipes.tool_output.enabled)} />
-                  </button>
-                </div>
+              {/* ── Tool Output Compression ── */}
+              <SettingsSection
+                title="Tool Output Compression"
+                description="Compress large tool results to save context"
+                enabled={config.pipes.tool_output.enabled}
+                onToggle={() => setConfig({
+                  ...config,
+                  pipes: { ...config.pipes, tool_output: { ...config.pipes.tool_output, enabled: !config.pipes.tool_output.enabled } },
+                })}
+              >
                 <div style={rowStyle}>
                   <div>
                     <div style={labelStyle}>Strategy</div>
@@ -355,58 +391,65 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
                 </div>
                 <div style={rowStyle}>
                   <div>
-                    <div style={labelStyle}>Min Bytes</div>
-                    <div style={descStyle}>Skip below this size</div>
+                    <div style={labelStyle}>Min Tokens</div>
+                    <div style={descStyle}>Skip outputs shorter than this many tokens (default 512)</div>
                   </div>
-                  <input
-                    type="number"
-                    min={0}
-                    step={256}
-                    value={config.pipes.tool_output.min_bytes}
-                    style={inputStyle}
-                    onChange={(e) => setConfig({
-                      ...config,
-                      pipes: { ...config.pipes, tool_output: { ...config.pipes.tool_output, min_bytes: Number(e.target.value) } },
-                    })}
-                  />
+                  <div>
+                    <input
+                      type="number"
+                      min={0}
+                      step={64}
+                      value={config.pipes.tool_output.min_tokens || 512}
+                      style={getInputStyle('pipes.tool_output.min_tokens')}
+                      onChange={(e) => {
+                        setConfig({
+                          ...config,
+                          pipes: { ...config.pipes, tool_output: { ...config.pipes.tool_output, min_tokens: Number(e.target.value) } },
+                        })
+                      }}
+                    />
+                    {validationErrors['pipes.tool_output.min_tokens'] && (
+                      <div style={errorTextStyle}>{validationErrors['pipes.tool_output.min_tokens']}</div>
+                    )}
+                  </div>
                 </div>
                 <div style={rowStyle}>
                   <div>
                     <div style={labelStyle}>Target Ratio</div>
-                    <div style={descStyle}>Compressed-to-original (0-1)</div>
+                    <div style={descStyle}>Fraction to remove (0.3 = remove 30%, keep 70%)</div>
                   </div>
-                  <input
-                    type="number"
-                    min={0.1}
-                    max={1.0}
-                    step={0.05}
-                    value={config.pipes.tool_output.target_compression_ratio}
-                    style={inputStyle}
-                    onChange={(e) => setConfig({
-                      ...config,
-                      pipes: { ...config.pipes, tool_output: { ...config.pipes.tool_output, target_compression_ratio: Number(e.target.value) } },
-                    })}
-                  />
-                </div>
-              </Section>
-
-              {/* Tool Discovery */}
-              <Section title="Tool Discovery">
-                <div style={rowStyle}>
                   <div>
-                    <div style={labelStyle}>Enabled</div>
-                    <div style={descStyle}>Filter irrelevant tool definitions</div>
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={0.9}
+                      step={0.05}
+                      value={config.pipes.tool_output.target_compression_ratio}
+                      style={getInputStyle('pipes.tool_output.target_compression_ratio')}
+                      onChange={(e) => {
+                        setConfig({
+                          ...config,
+                          pipes: { ...config.pipes, tool_output: { ...config.pipes.tool_output, target_compression_ratio: Number(e.target.value) } },
+                        })
+                      }}
+                    />
+                    {validationErrors['pipes.tool_output.target_compression_ratio'] && (
+                      <div style={errorTextStyle}>{validationErrors['pipes.tool_output.target_compression_ratio']}</div>
+                    )}
                   </div>
-                  <button
-                    style={toggleStyle(config.pipes.tool_discovery.enabled)}
-                    onClick={() => setConfig({
-                      ...config,
-                      pipes: { ...config.pipes, tool_discovery: { ...config.pipes.tool_discovery, enabled: !config.pipes.tool_discovery.enabled } },
-                    })}
-                  >
-                    <span style={toggleDot(config.pipes.tool_discovery.enabled)} />
-                  </button>
                 </div>
+              </SettingsSection>
+
+              {/* ── Tool Discovery ── */}
+              <SettingsSection
+                title="Tool Discovery"
+                description="Filter irrelevant tool definitions from requests"
+                enabled={config.pipes.tool_discovery.enabled}
+                onToggle={() => setConfig({
+                  ...config,
+                  pipes: { ...config.pipes, tool_discovery: { ...config.pipes.tool_discovery, enabled: !config.pipes.tool_discovery.enabled } },
+                })}
+              >
                 <div style={rowStyle}>
                   <div>
                     <div style={labelStyle}>Strategy</div>
@@ -423,143 +466,108 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
                 </div>
                 <div style={rowStyle}>
                   <div>
-                    <div style={labelStyle}>Min Tools</div>
-                    <div style={descStyle}>Below this, no filtering</div>
+                    <div style={labelStyle}>Tool Token Limit</div>
+                    <div style={descStyle}>Trigger filtering when total tool definitions exceed this many tokens (default 512)</div>
                   </div>
-                  <input
-                    type="number"
-                    min={1}
-                    value={config.pipes.tool_discovery.min_tools}
-                    style={inputStyle}
-                    onChange={(e) => setConfig({
-                      ...config,
-                      pipes: { ...config.pipes, tool_discovery: { ...config.pipes.tool_discovery, min_tools: Number(e.target.value) } },
-                    })}
-                  />
+                  <div>
+                    <input
+                      type="number"
+                      min={0}
+                      step={500}
+                      value={config.pipes.tool_discovery.token_threshold || 512}
+                      style={getInputStyle('pipes.tool_discovery.token_threshold')}
+                      onChange={(e) => {
+                        setConfig({
+                          ...config,
+                          pipes: { ...config.pipes, tool_discovery: { ...config.pipes.tool_discovery, token_threshold: Number(e.target.value) } },
+                        })
+                      }}
+                    />
+                    {validationErrors['pipes.tool_discovery.token_threshold'] && (
+                      <div style={errorTextStyle}>{validationErrors['pipes.tool_discovery.token_threshold']}</div>
+                    )}
+                  </div>
                 </div>
                 <div style={rowStyle}>
                   <div>
-                    <div style={labelStyle}>Max Tools</div>
-                    <div style={descStyle}>Max tools after filtering</div>
+                    <div style={labelStyle}>Compress Search Results</div>
+                    <div style={descStyle}>Compress tool schemas returned by gateway_search_tools</div>
                   </div>
-                  <input
-                    type="number"
-                    min={1}
-                    value={config.pipes.tool_discovery.max_tools}
-                    style={inputStyle}
-                    onChange={(e) => setConfig({
+                  <Toggle
+                    enabled={config.pipes.tool_discovery.search_result_compression.enabled}
+                    onToggle={() => setConfig({
                       ...config,
-                      pipes: { ...config.pipes, tool_discovery: { ...config.pipes.tool_discovery, max_tools: Number(e.target.value) } },
+                      pipes: { ...config.pipes, tool_discovery: { ...config.pipes.tool_discovery, search_result_compression: { ...config.pipes.tool_discovery.search_result_compression, enabled: !config.pipes.tool_discovery.search_result_compression.enabled } } },
                     })}
                   />
                 </div>
-                <div style={rowStyle}>
-                  <div>
-                    <div style={labelStyle}>Target Ratio</div>
-                    <div style={descStyle}>Fraction to keep (0-1)</div>
-                  </div>
-                  <input
-                    type="number"
-                    min={0.1}
-                    max={1.0}
-                    step={0.05}
-                    value={config.pipes.tool_discovery.target_ratio}
-                    style={inputStyle}
-                    onChange={(e) => setConfig({
-                      ...config,
-                      pipes: { ...config.pipes, tool_discovery: { ...config.pipes.tool_discovery, target_ratio: Number(e.target.value) } },
-                    })}
-                  />
-                </div>
-                <div style={rowStyle}>
-                  <div>
-                    <div style={labelStyle}>Search Fallback</div>
-                    <div style={descStyle}>LLM can search for filtered tools</div>
-                  </div>
-                  <button
-                    style={toggleStyle(config.pipes.tool_discovery.search_fallback)}
-                    onClick={() => setConfig({
-                      ...config,
-                      pipes: { ...config.pipes, tool_discovery: { ...config.pipes.tool_discovery, search_fallback: !config.pipes.tool_discovery.search_fallback } },
-                    })}
-                  >
-                    <span style={toggleDot(config.pipes.tool_discovery.search_fallback)} />
-                  </button>
-                </div>
-              </Section>
+              </SettingsSection>
 
-              {/* Cost Control */}
-              <Section title="Cost Control">
-                <div style={rowStyle}>
-                  <div>
-                    <div style={labelStyle}>Enabled</div>
-                    <div style={descStyle}>Enforce spending limits</div>
-                  </div>
-                  <button
-                    style={toggleStyle(config.cost_control.enabled)}
-                    onClick={() => setConfig({
-                      ...config,
-                      cost_control: { ...config.cost_control, enabled: !config.cost_control.enabled },
-                    })}
-                  >
-                    <span style={toggleDot(config.cost_control.enabled)} />
-                  </button>
-                </div>
+              {/* ── Cost Control ── */}
+              <SettingsSection
+                title="Cost Control"
+                description="Set spending limits for this session"
+                enabled={config.cost_control.enabled}
+                onToggle={() => setConfig({
+                  ...config,
+                  cost_control: { ...config.cost_control, enabled: !config.cost_control.enabled },
+                })}
+              >
                 <div style={rowStyle}>
                   <div>
                     <div style={labelStyle}>Session Cap (USD)</div>
                     <div style={descStyle}>Max per session (0 = unlimited)</div>
                   </div>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.5}
-                    value={config.cost_control.session_cap}
-                    style={inputStyle}
-                    onChange={(e) => setConfig({
-                      ...config,
-                      cost_control: { ...config.cost_control, session_cap: Number(e.target.value) },
-                    })}
-                  />
+                  <div>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      value={config.cost_control.session_cap}
+                      style={getInputStyle('cost_control.session_cap')}
+                      onChange={(e) => {
+                        setConfig({ ...config, cost_control: { ...config.cost_control, session_cap: Number(e.target.value) } })
+                      }}
+                    />
+                    {validationErrors['cost_control.session_cap'] && (
+                      <div style={errorTextStyle}>{validationErrors['cost_control.session_cap']}</div>
+                    )}
+                  </div>
                 </div>
                 <div style={rowStyle}>
                   <div>
                     <div style={labelStyle}>Global Cap (USD)</div>
                     <div style={descStyle}>Max total (0 = unlimited)</div>
                   </div>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.5}
-                    value={config.cost_control.global_cap}
-                    style={inputStyle}
-                    onChange={(e) => setConfig({
-                      ...config,
-                      cost_control: { ...config.cost_control, global_cap: Number(e.target.value) },
-                    })}
-                  />
-                </div>
-              </Section>
-
-              {/* Notifications */}
-              <Section title="Notifications">
-                <div style={rowStyle}>
                   <div>
-                    <div style={labelStyle}>Slack</div>
-                    <div style={descStyle}>Notify on stop, permission, idle</div>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      value={config.cost_control.global_cap}
+                      style={getInputStyle('cost_control.global_cap')}
+                      onChange={(e) => {
+                        setConfig({ ...config, cost_control: { ...config.cost_control, global_cap: Number(e.target.value) } })
+                      }}
+                    />
+                    {validationErrors['cost_control.global_cap'] && (
+                      <div style={errorTextStyle}>{validationErrors['cost_control.global_cap']}</div>
+                    )}
                   </div>
-                  <button
-                    style={toggleStyle(config.notifications.slack.enabled)}
-                    onClick={() => setConfig({
-                      ...config,
-                      notifications: { ...config.notifications, slack: { ...config.notifications.slack, enabled: !config.notifications.slack.enabled } },
-                    })}
-                  >
-                    <span style={toggleDot(config.notifications.slack.enabled)} />
-                  </button>
                 </div>
+              </SettingsSection>
 
-                {config.notifications.slack.enabled && !config.notifications.slack.configured && (
+              {/* ── Notifications ── */}
+              <SettingsSection
+                title="Notifications"
+                description="Notify on stop, permission prompts, and idle events"
+                enabled={config.notifications.slack.enabled}
+                onToggle={() => setConfig({
+                  ...config,
+                  notifications: { ...config.notifications, slack: { ...config.notifications.slack, enabled: !config.notifications.slack.enabled } },
+                })}
+              >
+                {!config.notifications.slack.configured && (
                   <div style={{
                     background: 'rgba(34,197,94,0.04)',
                     border: '1px solid rgba(34,197,94,0.12)',
@@ -571,38 +579,19 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
                     <div style={{ fontSize: 12, fontWeight: 600, color: '#e5e7eb', marginBottom: 10 }}>
                       Setup Slack Webhook
                     </div>
-                    <div style={{ fontSize: 11, color: '#9ca3af', lineHeight: 1.8 }}>
-                      <div style={{ marginBottom: 4 }}>
-                        <span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>1.</span>
+                    <div style={{ fontSize: 11, color: '#9ca3af', lineHeight: 1.8, marginBottom: 10 }}>
+                      <div><span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>1.</span>
                         <a href="https://api.slack.com/apps?new_app=1" target="_blank" rel="noopener noreferrer"
                           style={{ color: '#22c55e', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                           Create new app <ExternalLink size={10} />
                         </a>, then <strong style={{ color: '#d1d5db' }}>From Scratch</strong>
                       </div>
-                      <div style={{ marginBottom: 4 }}>
-                        <span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>2.</span>
-                        Add an app name and a workspace to develop your app
-                      </div>
-                      <div style={{ marginBottom: 4 }}>
-                        <span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>3.</span>
-                        On the left side choose <strong style={{ color: '#d1d5db' }}>Incoming Webhooks</strong>
-                      </div>
-                      <div style={{ marginBottom: 4 }}>
-                        <span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>4.</span>
-                        Activate by turning the slider
-                      </div>
-                      <div style={{ marginBottom: 4 }}>
-                        <span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>5.</span>
-                        On the bottom click <strong style={{ color: '#d1d5db' }}>Add New Webhook</strong>
-                      </div>
-                      <div style={{ marginBottom: 4 }}>
-                        <span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>6.</span>
-                        Select a channel and authorize
-                      </div>
-                      <div style={{ marginBottom: 10 }}>
-                        <span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>7.</span>
-                        Copy the Webhook URL and paste below
-                      </div>
+                      <div><span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>2.</span>Add an app name and workspace</div>
+                      <div><span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>3.</span>Choose <strong style={{ color: '#d1d5db' }}>Incoming Webhooks</strong></div>
+                      <div><span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>4.</span>Activate the slider</div>
+                      <div><span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>5.</span>Click <strong style={{ color: '#d1d5db' }}>Add New Webhook</strong></div>
+                      <div><span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>6.</span>Select a channel and authorize</div>
+                      <div><span style={{ color: '#22c55e', fontWeight: 600, marginRight: 6 }}>7.</span>Copy the Webhook URL and paste below</div>
                     </div>
                     <input
                       type="text"
@@ -610,10 +599,7 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
                       value={config.notifications.slack.webhook_url || ''}
                       onChange={(e) => setConfig({
                         ...config,
-                        notifications: {
-                          ...config.notifications,
-                          slack: { ...config.notifications.slack, webhook_url: e.target.value },
-                        },
+                        notifications: { ...config.notifications, slack: { ...config.notifications.slack, webhook_url: e.target.value } },
                       })}
                       style={{
                         width: '100%',
@@ -630,37 +616,29 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
                     />
                   </div>
                 )}
-
-                {config.notifications.slack.enabled && config.notifications.slack.configured && (
-                  <div style={{
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    padding: '6px 0 2px', fontSize: 11, color: '#6b7280',
-                  }}>
+                {config.notifications.slack.configured && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 0 2px', fontSize: 11, color: '#6b7280' }}>
                     <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
                     <span>Webhook: <span style={{ fontFamily: "'JetBrains Mono', monospace", color: '#9ca3af' }}>{config.notifications.slack.webhook_url}</span></span>
                   </div>
                 )}
-              </Section>
+              </SettingsSection>
 
-              {/* Monitoring */}
-              <Section title="Monitoring">
-                <div style={rowStyle}>
-                  <div>
-                    <div style={labelStyle}>Telemetry</div>
-                    <div style={descStyle}>Write session telemetry logs</div>
-                  </div>
-                  <button
-                    style={toggleStyle(config.monitoring.telemetry_enabled)}
-                    onClick={() => setConfig({
-                      ...config,
-                      monitoring: { ...config.monitoring, telemetry_enabled: !config.monitoring.telemetry_enabled },
-                    })}
-                  >
-                    <span style={toggleDot(config.monitoring.telemetry_enabled)} />
-                  </button>
+              {/* ── Monitoring ── */}
+              <SettingsSection
+                title="Monitoring"
+                description="Write session telemetry to JSONL log files"
+                enabled={config.monitoring.telemetry_enabled}
+                onToggle={() => setConfig({
+                  ...config,
+                  monitoring: { ...config.monitoring, telemetry_enabled: !config.monitoring.telemetry_enabled },
+                })}
+              >
+                <div style={{ fontSize: 11, color: '#6b7280', padding: '4px 0', fontFamily: "'Inter', system-ui, sans-serif" }}>
+                  When enabled, writes telemetry.jsonl, tool_output_compression.jsonl, and tool_discovery.jsonl for analysis and debugging.
                 </div>
-              </Section>
-            </div>
+              </SettingsSection>
+            </>
           )}
         </div>
 
@@ -676,8 +654,10 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
             justifyContent: 'space-between',
             flexShrink: 0,
           }}>
-            <span style={{ fontSize: 12, color: '#9ca3af' }}>
-              Unsaved changes
+            <span style={{ fontSize: 12, color: hasValidationErrors ? '#ef4444' : '#9ca3af' }}>
+              {hasValidationErrors 
+                ? `Fix ${Object.keys(validationErrors).length} error${Object.keys(validationErrors).length > 1 ? 's' : ''}`
+                : 'Unsaved changes'}
             </span>
             <div style={{ display: 'flex', gap: 8 }}>
               <button
@@ -698,21 +678,21 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
               </button>
               <button
                 onClick={saveAll}
-                disabled={saving}
+                disabled={saving || hasValidationErrors}
                 style={{
-                  background: saving ? 'rgba(22,163,74,0.5)' : 'linear-gradient(135deg, #16a34a, #22c55e)',
+                  background: (saving || hasValidationErrors) ? 'rgba(22,163,74,0.3)' : 'linear-gradient(135deg, #16a34a, #22c55e)',
                   border: 'none',
                   borderRadius: 8,
                   padding: '6px 16px',
-                  color: '#fff',
+                  color: (saving || hasValidationErrors) ? 'rgba(255,255,255,0.5)' : '#fff',
                   fontSize: 12,
                   fontWeight: 600,
-                  cursor: saving ? 'default' : 'pointer',
+                  cursor: (saving || hasValidationErrors) ? 'not-allowed' : 'pointer',
                   fontFamily: "'Inter', system-ui, sans-serif",
                   display: 'flex',
                   alignItems: 'center',
                   gap: 5,
-                  boxShadow: '0 0 16px rgba(34,197,94,0.15)',
+                  boxShadow: hasValidationErrors ? 'none' : '0 0 16px rgba(34,197,94,0.15)',
                 }}
               >
                 <Save size={12} />
@@ -723,31 +703,6 @@ function SessionConfigPanel({ port, name, onClose }: SessionConfigPanelProps) {
         )}
       </div>
     </>
-  )
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div style={{
-        fontSize: 10,
-        fontWeight: 600,
-        textTransform: 'uppercase',
-        letterSpacing: '0.08em',
-        color: '#6b7280',
-        marginBottom: 8,
-      }}>
-        {title}
-      </div>
-      <div style={{
-        background: 'rgba(255,255,255,0.02)',
-        border: '1px solid rgba(255,255,255,0.05)',
-        borderRadius: 10,
-        padding: '4px 14px',
-      }}>
-        {children}
-      </div>
-    </div>
   )
 }
 

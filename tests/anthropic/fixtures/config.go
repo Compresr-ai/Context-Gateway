@@ -39,14 +39,14 @@ func TestPipeContextAnthropic(requestBody []byte) *pipes.PipeContext {
 }
 
 // TestConfig creates a config for testing
-func TestConfig(strategy string, minBytes int, enableExpand bool) *config.Config {
+func TestConfig(strategy string, minTokens int, enableExpand bool) *config.Config {
 	return &config.Config{
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:                true,
 				Strategy:               strategy,
 				FallbackStrategy:       config.StrategyPassthrough,
-				MinBytes:               minBytes,
+				MinTokens:              minTokens,
 				TargetCompressionRatio: 0.5,
 				IncludeExpandHint:      enableExpand,
 				EnableExpandContext:    enableExpand,
@@ -80,19 +80,19 @@ func DisabledConfig() *config.Config {
 }
 
 // TestConfigWithModel creates a config for testing with a specific model
-func TestConfigWithModel(strategy string, model string, minBytes int, enableExpand bool) *config.Config {
-	return TestConfigWithModelAndQuery(strategy, model, minBytes, enableExpand, true) // Default: query agnostic
+func TestConfigWithModel(strategy string, model string, minTokens int, enableExpand bool) *config.Config {
+	return TestConfigWithModelAndQuery(strategy, model, minTokens, enableExpand, true) // Default: query agnostic
 }
 
 // TestConfigWithModelAndQuery creates a config for testing with a specific model and query agnostic setting
-func TestConfigWithModelAndQuery(strategy string, model string, minBytes int, enableExpand bool, queryAgnostic bool) *config.Config {
+func TestConfigWithModelAndQuery(strategy string, model string, minTokens int, enableExpand bool, queryAgnostic bool) *config.Config {
 	return &config.Config{
 		Pipes: config.PipesConfig{
 			ToolOutput: config.ToolOutputPipeConfig{
 				Enabled:                true,
 				Strategy:               strategy,
 				FallbackStrategy:       config.StrategyPassthrough,
-				MinBytes:               minBytes,
+				MinTokens:              minTokens,
 				TargetCompressionRatio: 0.5,
 				IncludeExpandHint:      enableExpand,
 				EnableExpandContext:    enableExpand,

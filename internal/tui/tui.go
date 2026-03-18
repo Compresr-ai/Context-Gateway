@@ -14,9 +14,7 @@ import (
 	"golang.org/x/term"
 )
 
-// =============================================================================
 // COLORS
-// =============================================================================
 
 const (
 	ColorReset  = "\033[0m"
@@ -30,9 +28,7 @@ const (
 	ColorBrand  = "\033[38;2;23;128;68m" // Compresr brand green
 )
 
-// =============================================================================
 // PRINT FUNCTIONS
-// =============================================================================
 
 // PrintBanner displays the Context Gateway ASCII banner.
 func PrintBanner() {
@@ -90,9 +86,7 @@ func ClearTerminalTitle() {
 	fmt.Print("\033]0;\007")
 }
 
-// =============================================================================
 // MENU SELECTION
-// =============================================================================
 
 // MenuItem represents an item in a menu.
 type MenuItem struct {
@@ -402,9 +396,7 @@ func selectNumberedMenu(prompt string, items []MenuItem) (int, error) {
 	}
 }
 
-// =============================================================================
 // PROMPTS
-// =============================================================================
 
 // PromptString prompts for a string input. Returns empty if skipped.
 func PromptString(prompt string) string {

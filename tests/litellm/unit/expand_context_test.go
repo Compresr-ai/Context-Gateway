@@ -152,7 +152,7 @@ func TestExpandContext_LiteLLM_Passthrough(t *testing.T) {
 
 	// In passthrough mode, the original content should be forwarded unchanged
 	assert.Contains(t, string(receivedBody), "CRITICAL ERROR")
-	assert.NotContains(t, string(receivedBody), "<<<SHADOW:")
+	assert.NotContains(t, string(receivedBody), "[REF:shadow_")
 }
 
 // Helper functions
@@ -160,7 +160,7 @@ func TestExpandContext_LiteLLM_Passthrough(t *testing.T) {
 func extractShadowIDFromRequest(body []byte) string {
 	bodyStr := string(body)
 
-	idx := strings.Index(bodyStr, "<<<SHADOW:")
+	idx := strings.Index(bodyStr, "[REF:")
 	if idx == -1 {
 		idx = strings.Index(bodyStr, "SHADOW:")
 	}

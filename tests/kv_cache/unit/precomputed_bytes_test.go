@@ -14,7 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
-	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
+	"github.com/compresr/context-gateway/internal/adapters"
+	phantom_tools "github.com/compresr/context-gateway/internal/phantom_tools"
 )
 
 // TestPrecomputedExpandBytes_Deterministic verifies expand_context tool JSON
@@ -25,7 +26,7 @@ func TestPrecomputedExpandBytes_Deterministic(t *testing.T) {
 	// Inject 100 times on identical input
 	var results [][]byte
 	for i := 0; i < 100; i++ {
-		result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+		result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err)
 		results = append(results, result)
 	}
@@ -78,30 +79,30 @@ func TestPrecomputedExpandBytes_ValidJSON(t *testing.T) {
 				body = []byte(`{"model":"claude-3","messages":[],"tools":[]}`)
 			}
 
-			result, err := tooloutput.InjectExpandContextTool(body, nil, tt.provider)
+			result, err := phantom_tools.InjectAll(body, adapters.Provider(tt.provider))
 			require.NoError(t, err)
 			assert.True(t, json.Valid(result), "result must be valid JSON")
 
-			// Extract the injected tool
+			// Extract the injected tool (expand_context is at index 0, gateway_search_tools at index 1)
 			tools := gjson.GetBytes(result, "tools")
-			assert.Equal(t, int64(1), tools.Get("#").Int())
+			assert.Equal(t, int64(2), tools.Get("#").Int())
 			tt.checkFn(t, tools.Get("0").Raw)
 		})
 	}
 }
 
 // TestPrecomputedExpandBytes_DescriptionImproved verifies the new description
-// mentions <<<SHADOW:id>>> markers and when to expand.
+// mentions [REF:id] markers and when to expand.
 func TestPrecomputedExpandBytes_DescriptionImproved(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[],"tools":[]}`)
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	desc := gjson.GetBytes(result, "tools.0.description").String()
-	assert.Contains(t, desc, "SHADOW", "description should mention SHADOW markers")
-	assert.Contains(t, desc, "compressed", "description should mention compression")
-	assert.Contains(t, desc, "expand", "description should mention expanding")
+	assert.Contains(t, desc, "REF", "description should mention REF markers")
+	// New concise description: "Expand a [REF:id] reference to retrieve the full uncompressed content."
+	assert.Contains(t, desc, "Expand", "description should mention expanding")
 	// Verify no HTML escaping of angle brackets
 	assert.NotContains(t, desc, `\u003c`, "description must not have HTML-escaped < characters")
 }

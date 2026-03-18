@@ -364,7 +364,7 @@ func TestExternalProvider_ErrorHandling(t *testing.T) {
 		defer server.Close()
 
 		st := store.NewMemoryStore(time.Hour)
-		pipe := tooloutput.New(cfgHighMinBytes(server.URL), st)
+		pipe := tooloutput.New(cfgHighMinTokens(server.URL), st)
 
 		openaiReq := map[string]interface{}{
 			"model": "gpt-5",
@@ -537,9 +537,9 @@ func TestStructuredPrefix_E2E(t *testing.T) {
 		}))
 		defer server.Close()
 
-		// MinBytes=55: first JSON object ends with }, at ~position 53, within search zone
+		// MinTokens=14 (→56 bytes): first JSON object ends with }, at ~position 53, within search zone
 		c := cfg(server.URL)
-		c.Pipes.ToolOutput.MinBytes = 55
+		c.Pipes.ToolOutput.MinTokens = 14
 		st := store.NewMemoryStore(time.Hour)
 		pipe := tooloutput.New(c, st)
 
@@ -621,13 +621,13 @@ func TestStructuredPrefix_E2E(t *testing.T) {
 		}))
 		defer server.Close()
 
-		// MinBytes=50: content 30 bytes < 50 → passthrough before even reaching compression
+		// MinTokens=12 (→48 bytes): content ~30 bytes/8 tokens < 12 → passthrough before even reaching compression
 		c := cfg(server.URL)
-		c.Pipes.ToolOutput.MinBytes = 50
+		c.Pipes.ToolOutput.MinTokens = 12
 		st := store.NewMemoryStore(time.Hour)
 		pipe := tooloutput.New(c, st)
 
-		// Small JSON — below min_bytes threshold
+		// Small JSON — below min_tokens threshold
 		smallJSON := `{"status":"ok","count":3}`
 
 		openaiReq := map[string]interface{}{
@@ -671,10 +671,10 @@ func cfg(endpoint string) *config.Config {
 				Enabled:          true,
 				Strategy:         pipes.StrategyExternalProvider,
 				FallbackStrategy: pipes.StrategyPassthrough,
-				MinBytes:         10,
+				MinTokens:        3,
 				Compresr: pipes.CompresrConfig{
 					Endpoint:      endpoint,
-					AuthParam:     "test-key",
+					APIKey:     "test-key",
 					Model:         "gpt-5-nano",
 					Timeout:       30 * time.Second,
 					QueryAgnostic: false,
@@ -697,10 +697,10 @@ func cfgAnthropic(endpoint string) *config.Config {
 				Enabled:          true,
 				Strategy:         pipes.StrategyExternalProvider,
 				FallbackStrategy: pipes.StrategyPassthrough,
-				MinBytes:         10,
+				MinTokens:        3,
 				Compresr: pipes.CompresrConfig{
 					Endpoint:      endpoint,
-					AuthParam:     "test-key",
+					APIKey:     "test-key",
 					Model:         "claude-haiku-4-5",
 					Timeout:       30 * time.Second,
 					QueryAgnostic: false,
@@ -717,10 +717,10 @@ func cfgWithFallback(endpoint string) *config.Config {
 				Enabled:          true,
 				Strategy:         pipes.StrategyExternalProvider,
 				FallbackStrategy: pipes.StrategyPassthrough,
-				MinBytes:         10,
+				MinTokens:        3,
 				Compresr: pipes.CompresrConfig{
 					Endpoint:  endpoint,
-					AuthParam: "key",
+					APIKey: "key",
 					Model:     "gpt-5-nano",
 					Timeout:   5 * time.Second,
 				},
@@ -736,10 +736,10 @@ func cfgWithTimeout(endpoint string) *config.Config {
 				Enabled:          true,
 				Strategy:         pipes.StrategyExternalProvider,
 				FallbackStrategy: pipes.StrategyPassthrough,
-				MinBytes:         10,
+				MinTokens:        3,
 				Compresr: pipes.CompresrConfig{
 					Endpoint:  endpoint,
-					AuthParam: "key",
+					APIKey: "key",
 					Model:     "gpt-5-nano",
 					Timeout:   100 * time.Millisecond, // Short timeout
 				},
@@ -748,16 +748,16 @@ func cfgWithTimeout(endpoint string) *config.Config {
 	}
 }
 
-func cfgHighMinBytes(endpoint string) *config.Config {
+func cfgHighMinTokens(endpoint string) *config.Config {
 	return &config.Config{
 		Pipes: pipes.Config{
 			ToolOutput: pipes.ToolOutputConfig{
-				Enabled:  true,
-				Strategy: pipes.StrategyExternalProvider,
-				MinBytes: 1000, // High threshold
+				Enabled:   true,
+				Strategy:  pipes.StrategyExternalProvider,
+				MinTokens: 250, // High threshold
 				Compresr: pipes.CompresrConfig{
 					Endpoint:  endpoint,
-					AuthParam: "key",
+					APIKey: "key",
 					Model:     "gpt-5-nano",
 					Timeout:   5 * time.Second,
 				},

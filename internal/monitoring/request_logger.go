@@ -1,10 +1,4 @@
 // Package monitoring - request_logger.go logs HTTP request lifecycle.
-//
-// DESIGN: Structured logging for request tracing at DEBUG level:
-//   - LogIncoming:      Request received from client
-//   - LogOutgoing:      Request forwarded to provider
-//   - LogResponse:      Response sent to client
-//   - LogCompression:   Compression operation details
 package monitoring
 
 import (
@@ -69,6 +63,8 @@ func (rl *RequestLogger) LogOutgoing(info *OutgoingRequestInfo) {
 	event := rl.logger.Debug().
 		Str("request_id", info.RequestID).
 		Str("provider", info.Provider).
+		Str("method", info.Method).
+		Str("target_url", info.TargetURL).
 		Int("body_size", info.BodySize)
 	if info.Compressed {
 		event = event.Bool("compressed", true)
@@ -114,9 +110,9 @@ type CompressionInfo struct {
 	ToolName         string
 	ToolCallID       string
 	ShadowID         string
-	OriginalBytes    int
-	CompressedBytes  int
-	CompressionRatio float64
+	OriginalTokens   int     // Token count before compression
+	CompressedTokens int     // Token count after compression
+	CompressionRatio float64 // Removed fraction: 1 - compressed/original (0.9 = 90% removed; higher = more aggressive)
 	CacheHit         bool
 	IsLastTool       bool
 	MappingStatus    string
@@ -128,8 +124,8 @@ func (rl *RequestLogger) LogCompression(info *CompressionInfo) {
 	rl.logger.Debug().
 		Str("request_id", info.RequestID).
 		Str("tool", info.ToolName).
-		Int("original", info.OriginalBytes).
-		Int("compressed", info.CompressedBytes).
+		Int("original_tokens", info.OriginalTokens).
+		Int("compressed_tokens", info.CompressedTokens).
 		Float64("ratio", info.CompressionRatio).
 		Bool("cache_hit", info.CacheHit).
 		Msg("compression")

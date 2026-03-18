@@ -8,16 +8,29 @@ import (
 
 // BedrockAdapter handles AWS Bedrock API format requests.
 // Bedrock with Anthropic models (Claude) uses the same Messages API format
-// as direct Anthropic, so this adapter embeds AnthropicAdapter and delegates
-// all Extract/Apply operations to it.
+// as direct Anthropic. This adapter embeds *AnthropicAdapter to inherit all
+// Extract/Apply operations without delegation boilerplate.
 //
 // The key differences from direct Anthropic are:
 //   - Authentication: AWS SigV4 instead of x-api-key (handled by gateway)
 //   - URL pattern: /model/{modelId}/invoke instead of /v1/messages
 //   - Model ID format: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+//
+// METHOD AMBIGUITY: Both BaseAdapter and *AnthropicAdapter (which also embeds
+// BaseAdapter) provide Name, Provider, ExtractAssistantIntent, and ExtractTurnSignal.
+// Those 4 methods are explicitly delegated below to resolve the ambiguity.
+// All other Adapter/ParsedRequestAdapter methods are promoted automatically.
+//
+// KNOWN LIMITATION — Converse API (/converse, /converse-stream):
+// These endpoints use a different camelCase format incompatible with the
+// Messages API parsing in AnthropicAdapter (e.g. "toolConfig" vs "tools",
+// "inputText" vs text content blocks). Requests via /converse will be routed
+// to this adapter but compression pipes will silently produce no-ops for them
+// since extraction will find no tool outputs or discoveries to compress.
+// Fix requires a dedicated ConverseAdapter with its own Extract/Apply logic.
 type BedrockAdapter struct {
 	BaseAdapter
-	anthropic *AnthropicAdapter
+	*AnthropicAdapter
 }
 
 // NewBedrockAdapter creates a new Bedrock adapter.
@@ -27,78 +40,33 @@ func NewBedrockAdapter() *BedrockAdapter {
 			name:     "bedrock",
 			provider: ProviderBedrock,
 		},
-		anthropic: NewAnthropicAdapter(),
+		AnthropicAdapter: NewAnthropicAdapter(),
 	}
 }
 
-// =============================================================================
-// TOOL OUTPUT - Delegate to Anthropic
-// =============================================================================
+// Name returns the adapter name (overrides embedded AnthropicAdapter.Name via BaseAdapter).
+func (a *BedrockAdapter) Name() string { return a.BaseAdapter.Name() }
 
-// ExtractToolOutput extracts tool result content from Bedrock format.
-// Bedrock with Claude uses the same Anthropic Messages format.
-func (a *BedrockAdapter) ExtractToolOutput(body []byte) ([]ExtractedContent, error) {
-	return a.anthropic.ExtractToolOutput(body)
-}
+// Provider returns the provider type (overrides embedded AnthropicAdapter.Provider via BaseAdapter).
+func (a *BedrockAdapter) Provider() Provider { return a.BaseAdapter.Provider() }
 
-// ApplyToolOutput applies compressed tool results back to the request.
-func (a *BedrockAdapter) ApplyToolOutput(body []byte, results []CompressedResult) ([]byte, error) {
-	return a.anthropic.ApplyToolOutput(body, results)
-}
-
-// =============================================================================
-// TOOL DISCOVERY - Delegate to Anthropic
-// =============================================================================
-
-// ExtractToolDiscovery extracts tool definitions for filtering.
-func (a *BedrockAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
-	return a.anthropic.ExtractToolDiscovery(body, opts)
-}
-
-// ApplyToolDiscovery applies filtered tools back to the request.
-func (a *BedrockAdapter) ApplyToolDiscovery(body []byte, results []CompressedResult) ([]byte, error) {
-	return a.anthropic.ApplyToolDiscovery(body, results)
-}
-
-// =============================================================================
-// QUERY EXTRACTION - Delegate to Anthropic
-// =============================================================================
-
-// ExtractUserQuery extracts the last user message content.
-func (a *BedrockAdapter) ExtractUserQuery(body []byte) string {
-	return a.anthropic.ExtractUserQuery(body)
-}
-
-// ExtractAssistantIntent extracts the LLM's reasoning from the last assistant message.
+// ExtractAssistantIntent delegates to AnthropicAdapter (resolves BaseAdapter ambiguity).
 func (a *BedrockAdapter) ExtractAssistantIntent(body []byte) string {
-	return a.anthropic.ExtractAssistantIntent(body)
+	return a.AnthropicAdapter.ExtractAssistantIntent(body)
 }
 
-// ExtractLastUserContent extracts text blocks and tool_result flag from the last user message.
-func (a *BedrockAdapter) ExtractLastUserContent(body []byte) ([]string, bool) {
-	return a.anthropic.ExtractLastUserContent(body)
+// ExtractTurnSignal delegates to AnthropicAdapter (resolves BaseAdapter ambiguity).
+func (a *BedrockAdapter) ExtractTurnSignal(responseBody []byte, streamStopReason string) TurnSignal {
+	return a.AnthropicAdapter.ExtractTurnSignal(responseBody, streamStopReason)
 }
 
-// =============================================================================
-// USAGE EXTRACTION
-// =============================================================================
-
-// ExtractUsage extracts token usage from Bedrock API response.
-// Bedrock with Anthropic models returns the same usage format as direct Anthropic:
-// {"usage": {"input_tokens": N, "output_tokens": N}}
-func (a *BedrockAdapter) ExtractUsage(responseBody []byte) UsageInfo {
-	return a.anthropic.ExtractUsage(responseBody)
-}
-
-// =============================================================================
-// MODEL EXTRACTION
-// =============================================================================
+// MODEL EXTRACTION — Bedrock-specific override
 
 // ExtractModel extracts the model name from Bedrock request body.
-// Bedrock requests may include a "model" field in the body (like Anthropic)
-// or the model ID may only be in the URL path (/model/{modelId}/invoke).
-// This method handles the body case; URL-based extraction is handled by
-// ExtractModelFromPath.
+// In practice this always returns "" because AWS SDK clients put the model ID
+// in the URL path, not the body. Use ExtractModelFromPath for Bedrock requests.
+// This method exists to satisfy the Adapter interface; URL-based extraction is
+// handled by ExtractModelFromPath.
 func (a *BedrockAdapter) ExtractModel(requestBody []byte) string {
 	if len(requestBody) == 0 {
 		return ""
@@ -110,7 +78,6 @@ func (a *BedrockAdapter) ExtractModel(requestBody []byte) string {
 	if err := json.Unmarshal(requestBody, &req); err != nil {
 		return ""
 	}
-
 	if req.Model != "" {
 		return req.Model
 	}
@@ -132,49 +99,16 @@ func (a *BedrockAdapter) ExtractModel(requestBody []byte) string {
 // Path format: /model/{modelId}/invoke or /model/{modelId}/invoke-with-response-stream
 // Example: /model/anthropic.claude-3-5-sonnet-20241022-v2:0/invoke
 func ExtractModelFromPath(path string) string {
-	// Find "/model/" prefix
 	const prefix = "/model/"
 	idx := strings.Index(path, prefix)
 	if idx == -1 {
 		return ""
 	}
-
-	// Extract everything after /model/ up to the next /
 	rest := path[idx+len(prefix):]
 	if slashIdx := strings.Index(rest, "/"); slashIdx != -1 {
 		return rest[:slashIdx]
 	}
-
 	return rest
-}
-
-// =============================================================================
-// PARSED REQUEST ADAPTER - Delegate to Anthropic
-// =============================================================================
-
-// ParseRequest parses the request body once for reuse.
-func (a *BedrockAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
-	return a.anthropic.ParseRequest(body)
-}
-
-// ExtractToolDiscoveryFromParsed extracts tool definitions from a pre-parsed request.
-func (a *BedrockAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
-	return a.anthropic.ExtractToolDiscoveryFromParsed(parsed, opts)
-}
-
-// ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
-func (a *BedrockAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) string {
-	return a.anthropic.ExtractUserQueryFromParsed(parsed)
-}
-
-// ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
-func (a *BedrockAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
-	return a.anthropic.ExtractToolOutputFromParsed(parsed)
-}
-
-// ApplyToolDiscoveryToParsed filters tools and returns modified body.
-func (a *BedrockAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
-	return a.anthropic.ApplyToolDiscoveryToParsed(parsed, results)
 }
 
 // Ensure BedrockAdapter implements Adapter and ParsedRequestAdapter

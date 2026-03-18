@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
-import { Copy, Check, ChevronDown, ChevronUp } from 'lucide-react'
+import { Copy, Check, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
 import type { PromptEntry } from '../types'
 
 interface PromptCardProps {
   prompt: PromptEntry
   expanded: boolean
   onToggle: () => void
+  onDelete?: (id: number) => void
   sessionName?: string
 }
 
@@ -39,10 +40,11 @@ function formatTimestamp(isoString: string): string {
   })
 }
 
-function PromptCard({ prompt, expanded, onToggle, sessionName }: PromptCardProps) {
+function PromptCard({ prompt, expanded, onToggle, onDelete, sessionName }: PromptCardProps) {
   const [copied, setCopied] = useState(false)
   const [hovered, setHovered] = useState(false)
   const [copyHovered, setCopyHovered] = useState(false)
+  const [deleteHovered, setDeleteHovered] = useState(false)
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Clear copy timeout on unmount to prevent state update after unmount
@@ -72,6 +74,13 @@ function PromptCard({ prompt, expanded, onToggle, sessionName }: PromptCardProps
   const handleToggle = (e: React.MouseEvent) => {
     e.stopPropagation()
     onToggle()
+  }
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (onDelete && window.confirm('Delete this prompt?')) {
+      onDelete(prompt.id)
+    }
   }
 
   return (
@@ -163,50 +172,77 @@ function PromptCard({ prompt, expanded, onToggle, sessionName }: PromptCardProps
             )}
           </div>
 
-          {/* Copy button */}
-          <div style={{ position: 'relative' }}>
-            <button
-              onClick={handleCopy}
-              onMouseEnter={() => setCopyHovered(true)}
-              onMouseLeave={() => setCopyHovered(false)}
-              style={{
-                background: copyHovered ? 'rgba(255,255,255,0.08)' : 'transparent',
-                border: 'none',
-                cursor: 'pointer',
-                padding: 6,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: copied ? '#22c55e' : '#6b7280',
-                transition: 'all 0.2s ease',
-                borderRadius: 8,
-                width: 30,
-                height: 30,
-              }}
-            >
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-            </button>
-            {/* Copied tooltip */}
-            {copied && (
-              <div
+          {/* Action buttons */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            {/* Copy button */}
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={handleCopy}
+                onMouseEnter={() => setCopyHovered(true)}
+                onMouseLeave={() => setCopyHovered(false)}
                 style={{
-                  position: 'absolute',
-                  top: -28,
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                  background: '#22c55e',
-                  color: '#000',
-                  fontSize: 10,
-                  fontWeight: 600,
-                  fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
-                  padding: '3px 8px',
-                  borderRadius: 6,
-                  whiteSpace: 'nowrap',
-                  pointerEvents: 'none',
+                  background: copyHovered ? 'rgba(255,255,255,0.08)' : 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 6,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: copied ? '#22c55e' : '#6b7280',
+                  transition: 'all 0.2s ease',
+                  borderRadius: 8,
+                  width: 30,
+                  height: 30,
                 }}
               >
-                Copied!
-              </div>
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+              </button>
+              {/* Copied tooltip */}
+              {copied && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: -28,
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    background: '#22c55e',
+                    color: '#000',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
+                    padding: '3px 8px',
+                    borderRadius: 6,
+                    whiteSpace: 'nowrap',
+                    pointerEvents: 'none',
+                  }}
+                >
+                  Copied!
+                </div>
+              )}
+            </div>
+            {/* Delete button */}
+            {onDelete && (
+              <button
+                onClick={handleDelete}
+                onMouseEnter={() => setDeleteHovered(true)}
+                onMouseLeave={() => setDeleteHovered(false)}
+                style={{
+                  background: deleteHovered ? 'rgba(239,68,68,0.12)' : 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 6,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: deleteHovered ? '#ef4444' : '#6b7280',
+                  transition: 'all 0.2s ease',
+                  borderRadius: 8,
+                  width: 30,
+                  height: 30,
+                }}
+              >
+                <Trash2 size={14} />
+              </button>
             )}
           </div>
         </div>
@@ -304,7 +340,7 @@ function PromptCard({ prompt, expanded, onToggle, sessionName }: PromptCardProps
 
           {/* Right: model + provider pills */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            {prompt.model && (
+            {(prompt.agent_name || prompt.model) && (
               <span
                 style={{
                   background: 'rgba(167,139,250,0.1)',
@@ -318,7 +354,7 @@ function PromptCard({ prompt, expanded, onToggle, sessionName }: PromptCardProps
                   letterSpacing: '0.01em',
                 }}
               >
-                {prompt.model}
+                {prompt.agent_name || prompt.model}
               </span>
             )}
 

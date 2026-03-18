@@ -15,7 +15,6 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/compresr/context-gateway/internal/adapters"
-	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/monitoring"
 	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 )
@@ -31,7 +30,7 @@ import (
 func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Request, forwardBody []byte,
 	pipeCtx *PipelineContext, requestID string, startTime time.Time, adapter adapters.Adapter,
 	pipeType PipeType, pipeStrategy string, originalBodySize int, compressionUsed bool,
-	compressLatency time.Duration, originalBody []byte, expandEnabled bool) {
+	compressLatency time.Duration, originalBody []byte, expandEnabled bool, compressedBodySize int) {
 
 	provider := adapter.Name()
 	g.requestLogger.LogOutgoing(&monitoring.OutgoingRequestInfo{
@@ -48,7 +47,7 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalBodySize: originalBodySize,
 			compressionUsed: compressionUsed, statusCode: 502, errorMsg: err.Error(),
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
-			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody,
+			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, compressedBodySize: compressedBodySize,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
 			requestHeaders: r.Header, responseHeaders: nil, upstreamURL: "", fallbackReason: "",
 		})
@@ -57,35 +56,47 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Check if tool-search needs stream buffering to detect phantom tool calls.
-	toolSearchActive := g.cfg().Pipes.ToolDiscovery.Enabled &&
-		(g.cfg().Pipes.ToolDiscovery.Strategy == config.StrategyToolSearch || g.cfg().Pipes.ToolDiscovery.EnableSearchFallback) &&
-		pipeCtx.ToolsFiltered
-	needsExpandBuffer := expandEnabled && compressionUsed && len(pipeCtx.ShadowRefs) > 0
+	// Buffer when phantom tools were injected (the model may call them and we must intercept),
+	// OR when tool discovery filtered tools (gateway_search_tools may be called),
+	// OR when compressed content exists (expand_context may be called).
+	// toolSearchActive must include PhantomToolsInjected so that:
+	//   (a) the scan loop detects phantom tool calls for small tool sets, and
+	//   (b) the re-route condition fires and sends the request through handleNonStreaming.
+	toolSearchActive := pipeCtx.ToolsFiltered || pipeCtx.PhantomToolsInjected
+	needsExpandBuffer := compressionUsed && len(pipeCtx.ShadowRefs) > 0
 
 	// If no buffering needed, stream directly to client
-	if !needsExpandBuffer && !toolSearchActive {
+	if !needsExpandBuffer && !toolSearchActive && !pipeCtx.PhantomToolsInjected {
 		defer func() { _ = resp.Body.Close() }()
 		writeStreamingHeaders(w, resp.Header, pipeCtx.PreemptiveHeaders)
 		w.WriteHeader(resp.StatusCode)
-		sseUsage := g.streamResponse(w, resp.Body)
+		sseUsage, sseStopReason := g.streamResponse(w, resp.Body)
 
+		upstreamURL := ""
+		if resp.Request != nil {
+			upstreamURL = resp.Request.URL.String()
+		}
 		g.recordRequestTelemetry(telemetryParams{
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
 			clientIP: r.RemoteAddr, requestBodySize: len(originalBody), responseBodySize: 0,
 			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalBodySize: originalBodySize,
 			compressionUsed: compressionUsed, statusCode: resp.StatusCode,
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
-			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &sseUsage,
+			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, compressedBodySize: compressedBodySize, streamUsage: &sseUsage, streamStopReason: sseStopReason,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
-			requestHeaders: r.Header, responseHeaders: resp.Header, upstreamURL: resp.Request.URL.String(), fallbackReason: "",
+			requestHeaders: r.Header, responseHeaders: resp.Header, upstreamURL: upstreamURL, fallbackReason: "",
 		})
-		// Log for each pipe that ran
-		if len(pipeCtx.ToolOutputCompressions) > 0 || pipeCtx.OutputCompressed {
+		// Log for each pipe that ran; always write session tool catalog regardless of pipes.
+		toolOutputRan := len(pipeCtx.ToolOutputCompressions) > 0 || pipeCtx.OutputCompressed
+		toolDiscoveryRan := pipeCtx.KeptToolCount > 0 || pipeCtx.ToolsFiltered || pipeCtx.ToolDiscoverySkipReason != ""
+		if toolOutputRan {
 			g.logCompressionDetails(pipeCtx, requestID, string(PipeToolOutput), originalBody, forwardBody)
 		}
-		if pipeCtx.FilteredToolCount > 0 || pipeCtx.ToolsFiltered {
+		if toolDiscoveryRan {
 			g.logCompressionDetails(pipeCtx, requestID, string(PipeToolDiscovery), originalBody, forwardBody)
+		}
+		if !toolOutputRan && !toolDiscoveryRan {
+			g.ensureSessionToolsCatalog(pipeCtx, forwardBody)
 		}
 		return
 	}
@@ -95,17 +106,27 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 	usageParser := newSSEUsageParser()
 	var bufferedChunks [][]byte
 
-	// Determine the search tool name for detection
-	searchToolName := g.cfg().Pipes.ToolDiscovery.SearchToolName
-	if searchToolName == "" {
-		searchToolName = "gateway_search_tools"
+	searchToolName := g.searchToolName()
+
+	// Build set of deferred tool names for direct-call detection.
+	// When a model bypasses gateway_search_tools and calls a stub directly (training
+	// knowledge), we must detect the call here and re-route through handleNonStreaming
+	// so the DeferredCallInterceptor can inject the full schema and ask the model to retry.
+	deferredToolNames := make(map[string]bool, len(pipeCtx.DeferredTools))
+	for _, dt := range pipeCtx.DeferredTools {
+		deferredToolNames[dt.ToolName] = true
 	}
 
 	// Read and buffer the entire stream (bounded to prevent OOM)
 	buf := make([]byte, DefaultBufferSize)
 	totalBuffered := 0
 	hasSearchToolCall := false
+	hasDeferredToolCall := false
 	for {
+		if r.Context().Err() != nil {
+			log.Debug().Str("request_id", requestID).Msg("client disconnected during stream buffering")
+			break
+		}
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
 			totalBuffered += n
@@ -130,6 +151,19 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 					hasSearchToolCall = true
 				}
 			}
+
+			// Detect direct calls to deferred (stubbed) tools — training knowledge bypass.
+			// When the model skips gateway_search_tools and calls a stub directly,
+			// the tool name appears in the stream. We re-route through handleNonStreaming
+			// so DeferredCallInterceptor can inject the schema and prompt a retry.
+			if !hasDeferredToolCall && len(deferredToolNames) > 0 {
+				for name := range deferredToolNames {
+					if bytes.Contains(chunk, []byte(name)) {
+						hasDeferredToolCall = true
+						break
+					}
+				}
+			}
 		}
 		if readErr != nil {
 			break
@@ -137,42 +171,46 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 	}
 	_ = resp.Body.Close()
 
-	// Extract usage from buffered SSE chunks
+	// Extract usage and stop_reason from buffered SSE chunks
 	bufferedUsage := usageParser.Usage()
+	bufferedStopReason := usageParser.StopReason()
 
-	// If gateway_search_tools was called, re-send as non-streaming through phantom loop.
-	// This lets the phantom loop intercept and handle search/call modes.
-	// The phantom loop produces a non-streaming JSON response which we convert back to SSE
-	// before sending to the client (which expects streaming format).
-	if hasSearchToolCall && toolSearchActive {
+	// If gateway_search_tools OR a direct deferred-tool call was detected, re-send as
+	// non-streaming through the phantom loop. The phantom loop handles both SearchToolHandler
+	// (for gateway_search_tools) and DeferredCallInterceptor (for direct stub bypasses).
+	// The phantom loop produces a non-streaming JSON response which we convert back to SSE.
+	if (hasSearchToolCall || hasDeferredToolCall) && toolSearchActive {
 		log.Info().
 			Str("request_id", requestID).
-			Msg("streaming: gateway_search_tools detected, re-sending through phantom loop")
+			Bool("search_tool", hasSearchToolCall).
+			Bool("deferred_direct", hasDeferredToolCall).
+			Msg("streaming: phantom tool detected, re-sending through phantom loop")
 
 		// Capture the non-streaming response from handleNonStreaming
 		capture := &responseCaptureWriter{header: make(http.Header)}
 		nonStreamBody := setStreamFlag(forwardBody, false)
 		g.handleNonStreaming(capture, r, nonStreamBody, pipeCtx, requestID, startTime, adapter,
-			pipeType, pipeStrategy, originalBodySize, compressionUsed, compressLatency, originalBody, expandEnabled)
+			pipeType, pipeStrategy+"_streaming_search_fallback", originalBodySize, compressionUsed, compressLatency, originalBody, expandEnabled, &bufferedUsage, compressedBodySize)
 
 		// Convert the captured JSON response to SSE format for the streaming client
-		isAnthropic := adapter.Provider() == adapters.ProviderAnthropic || adapter.Provider() == adapters.ProviderBedrock
-		// Detect Responses API (Codex): has "input" but no "messages"
-		isResponsesAPI := gjson.GetBytes(forwardBody, "input").Exists() && !gjson.GetBytes(forwardBody, "messages").Exists()
+		isResponsesAPI := isResponsesAPI(forwardBody)
 		var sseBody []byte
-		if isAnthropic {
-			sseBody = jsonResponseToSSE(capture.body.Bytes(), true)
+		provider := adapter.Provider()
+		if provider == adapters.ProviderAnthropic || provider == adapters.ProviderBedrock {
+			sseBody = jsonToAnthropicSSE(capture.body.Bytes())
 		} else if isResponsesAPI {
 			sseBody = jsonToResponsesAPISSE(capture.body.Bytes())
 		} else {
-			sseBody = jsonResponseToSSE(capture.body.Bytes(), false)
+			sseBody = jsonToOpenAISSE(capture.body.Bytes())
 		}
 
 		writeStreamingHeaders(w, capture.header, pipeCtx.PreemptiveHeaders)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Del("Content-Length") // SSE streams have no Content-Length
 		w.WriteHeader(capture.statusCode)
-		_, _ = w.Write(sseBody) //nolint:gosec // G705: Content-Type and X-Content-Type-Options: nosniff set via writeStreamingHeaders
+		if _, err := w.Write(sseBody); err != nil {
+			log.Debug().Err(err).Str("request_id", requestID).Msg("client write failed during SSE flush")
+		}
 		return
 	}
 
@@ -204,12 +242,12 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		if g.expandLog != nil {
 			ecHandler.WithExpandLog(g.expandLog, requestID, pipeCtx.CostSessionID)
 		}
-		isAnthropic := adapter.Provider() == adapters.ProviderAnthropic || adapter.Provider() == adapters.ProviderBedrock
-		phantomResult := ecHandler.HandleCalls(phantomCalls, isAnthropic)
+		ecHandler.WithExpandCallsLog(g.tracker.ExpandCallsLogger(), pipeCtx.ToolOutputCompressions)
+		phantomResult := ecHandler.HandleCalls(phantomCalls, adapter, forwardBody)
 
 		// Build append body: original forwardBody + assistant expand_context call + tool_results
 		// This preserves KV cache — all existing messages are unchanged, we only append at the end
-		appendBody, err := buildExpandAppendBody(forwardBody, expandCalls, phantomResult.ToolResults, isAnthropic)
+		appendBody, err := buildExpandAppendBody(forwardBody, expandCalls, phantomResult.ToolResults, adapter)
 		if err != nil {
 			log.Error().Err(err).Msg("streaming: failed to build expand append body")
 			g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks, resp.StatusCode)
@@ -231,10 +269,20 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		defer func() { _ = retryResp.Body.Close() }()
 
 		// Stream the retry response (filter expand_context if it calls again)
+		// Also parse usage from the retry stream so we can track the full cost.
 		writeStreamingHeaders(w, retryResp.Header, pipeCtx.PreemptiveHeaders)
 		w.WriteHeader(retryResp.StatusCode)
 
-		g.streamResponseWithFilter(w, retryResp.Body)
+		retryUsage, retryStopReason := g.streamResponseWithFilterAndUsage(w, retryResp.Body)
+
+		// Combine usage from both streams (initial buffered + retry)
+		combinedUsage := adapters.UsageInfo{
+			InputTokens:              bufferedUsage.InputTokens + retryUsage.InputTokens,
+			OutputTokens:             bufferedUsage.OutputTokens + retryUsage.OutputTokens,
+			CacheCreationInputTokens: bufferedUsage.CacheCreationInputTokens + retryUsage.CacheCreationInputTokens,
+			CacheReadInputTokens:     bufferedUsage.CacheReadInputTokens + retryUsage.CacheReadInputTokens,
+			TotalTokens:              bufferedUsage.TotalTokens + retryUsage.TotalTokens,
+		}
 
 		expandedCount := 0
 		for _, ec := range expandCalls {
@@ -243,22 +291,51 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			}
 		}
 
+		// Query expand log for found/not-found counts and penalty tokens
+		var streamExpandFound, streamExpandNotFound, streamExpandPenaltyTokens int
+		if g.expandLog != nil {
+			summary, contentTokens := g.expandLog.SummaryForRequest(requestID)
+			streamExpandFound = summary.Found
+			streamExpandNotFound = summary.NotFound
+			streamExpandPenaltyTokens = contentTokens
+		}
+
 		g.recordRequestTelemetry(telemetryParams{
 			requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
 			clientIP: r.RemoteAddr, requestBodySize: len(originalBody), responseBodySize: 0,
 			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming_expanded",
 			originalBodySize: originalBodySize, compressionUsed: compressionUsed, statusCode: retryResp.StatusCode,
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
-			expandLoops: 1, expandCallsFound: len(expandCalls),
-			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &bufferedUsage,
+			expandLoops: 1, expandCallsFound: streamExpandFound, expandCallsNotFound: streamExpandNotFound,
+			expandPenaltyTokens: streamExpandPenaltyTokens,
+			adapter:             adapter, requestBody: originalBody, forwardBody: forwardBody, compressedBodySize: compressedBodySize, streamUsage: &combinedUsage, streamStopReason: retryStopReason,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
-			requestHeaders: r.Header, responseHeaders: retryResp.Header, upstreamURL: retryResp.Request.URL.String(), fallbackReason: "",
+			requestHeaders: r.Header, responseHeaders: retryResp.Header, upstreamURL: func() string {
+				if retryResp.Request != nil {
+					return retryResp.Request.URL.String()
+				}
+				return ""
+			}(), fallbackReason: "",
 		})
 
 		log.Info().
 			Int("expanded_count", expandedCount).
 			Str("request_id", requestID).
 			Msg("streaming: expansion complete (append-only)")
+
+		// Log for each pipe that ran; always write session tool catalog regardless of pipes.
+		toolOutputRan := len(pipeCtx.ToolOutputCompressions) > 0 || pipeCtx.OutputCompressed
+		toolDiscoveryRan := pipeCtx.KeptToolCount > 0 || pipeCtx.ToolsFiltered || pipeCtx.ToolDiscoverySkipReason != ""
+		if toolOutputRan {
+			g.logCompressionDetails(pipeCtx, requestID, string(PipeToolOutput), originalBody, forwardBody)
+		}
+		if toolDiscoveryRan {
+			g.logCompressionDetails(pipeCtx, requestID, string(PipeToolDiscovery), originalBody, forwardBody)
+		}
+		if !toolOutputRan && !toolDiscoveryRan {
+			g.ensureSessionToolsCatalog(pipeCtx, forwardBody)
+		}
+		return
 	} else {
 		// No expand_context detected - flush buffered response
 		g.flushBufferedResponse(w, resp.Header, pipeCtx.PreemptiveHeaders, bufferedChunks, resp.StatusCode)
@@ -266,7 +343,9 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 		// If stream was truncated, inject an SSE error event so the client knows
 		if pipeCtx.StreamTruncated {
 			errorEvent := []byte("event: error\ndata: {\"type\":\"stream_truncated\",\"message\":\"Response exceeded buffer limit\"}\n\n")
-			_, _ = w.Write(errorEvent)
+			if _, err := w.Write(errorEvent); err != nil {
+				log.Debug().Err(err).Msg("client write failed for stream_truncated event")
+			}
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
 			}
@@ -278,18 +357,28 @@ func (g *Gateway) handleStreamingWithExpand(w http.ResponseWriter, r *http.Reque
 			provider: provider, pipeType: pipeType, pipeStrategy: pipeStrategy + "_streaming", originalBodySize: originalBodySize,
 			compressionUsed: compressionUsed, statusCode: resp.StatusCode,
 			compressLatency: compressLatency, forwardLatency: time.Since(forwardStart), pipeCtx: pipeCtx,
-			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, streamUsage: &bufferedUsage,
+			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, compressedBodySize: compressedBodySize, streamUsage: &bufferedUsage, streamStopReason: bufferedStopReason,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
-			requestHeaders: r.Header, responseHeaders: resp.Header, upstreamURL: resp.Request.URL.String(), fallbackReason: "",
+			requestHeaders: r.Header, responseHeaders: resp.Header, upstreamURL: func() string {
+				if resp.Request != nil {
+					return resp.Request.URL.String()
+				}
+				return ""
+			}(), fallbackReason: "",
 		})
-	}
 
-	// Log for each pipe that ran
-	if len(pipeCtx.ToolOutputCompressions) > 0 || pipeCtx.OutputCompressed {
-		g.logCompressionDetails(pipeCtx, requestID, string(PipeToolOutput), originalBody, forwardBody)
-	}
-	if pipeCtx.FilteredToolCount > 0 || pipeCtx.ToolsFiltered {
-		g.logCompressionDetails(pipeCtx, requestID, string(PipeToolDiscovery), originalBody, forwardBody)
+		// Log for each pipe that ran; always write session tool catalog regardless of pipes.
+		toolOutputRan := len(pipeCtx.ToolOutputCompressions) > 0 || pipeCtx.OutputCompressed
+		toolDiscoveryRan := pipeCtx.KeptToolCount > 0 || pipeCtx.ToolsFiltered || pipeCtx.ToolDiscoverySkipReason != ""
+		if toolOutputRan {
+			g.logCompressionDetails(pipeCtx, requestID, string(PipeToolOutput), originalBody, forwardBody)
+		}
+		if toolDiscoveryRan {
+			g.logCompressionDetails(pipeCtx, requestID, string(PipeToolDiscovery), originalBody, forwardBody)
+		}
+		if !toolOutputRan && !toolDiscoveryRan {
+			g.ensureSessionToolsCatalog(pipeCtx, forwardBody)
+		}
 	}
 }
 
@@ -313,30 +402,38 @@ func (g *Gateway) flushBufferedResponse(w http.ResponseWriter, headers http.Head
 
 	flusher, ok := w.(http.Flusher)
 	for _, chunk := range chunks {
-		_, _ = w.Write(chunk) //nolint:gosec // G705: Content-Type and X-Content-Type-Options: nosniff set via writeStreamingHeaders
+		if _, err := w.Write(chunk); err != nil {
+			log.Debug().Err(err).Msg("client write failed during buffered flush")
+			return
+		}
 		if ok {
 			flusher.Flush()
 		}
 	}
 }
 
-// streamResponseWithFilter streams response while filtering expand_context calls.
-func (g *Gateway) streamResponseWithFilter(w http.ResponseWriter, reader io.Reader) {
+// streamResponseWithFilterAndUsage is like streamResponseWithFilter but also
+// parses SSE usage from the stream. Returns the extracted usage info and stop_reason.
+func (g *Gateway) streamResponseWithFilterAndUsage(w http.ResponseWriter, reader io.Reader) (adapters.UsageInfo, string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Warn().Msg("streaming not supported, falling back to buffered")
 		_, _ = io.Copy(w, reader)
-		return
+		return adapters.UsageInfo{}, ""
 	}
 
 	streamBuffer := tooloutput.NewStreamBuffer()
+	usageParser := newSSEUsageParser()
 	buf := make([]byte, DefaultBufferSize)
 
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
+			chunk := buf[:n]
+			usageParser.Feed(chunk)
+
 			// Filter expand_context from the stream
-			filtered, _ := streamBuffer.ProcessChunk(buf[:n])
+			filtered, _ := streamBuffer.ProcessChunk(chunk)
 			if len(filtered) > 0 {
 				_, _ = w.Write(filtered)
 				flusher.Flush()
@@ -349,16 +446,17 @@ func (g *Gateway) streamResponseWithFilter(w http.ResponseWriter, reader io.Read
 			break
 		}
 	}
+	return usageParser.Usage(), usageParser.StopReason()
 }
 
 // streamResponse streams data from reader to writer with flushing.
-// Returns usage extracted from SSE events (Anthropic message_start/message_delta).
-func (g *Gateway) streamResponse(w http.ResponseWriter, reader io.Reader) adapters.UsageInfo {
+// Returns usage and stop_reason extracted from SSE events.
+func (g *Gateway) streamResponse(w http.ResponseWriter, reader io.Reader) (adapters.UsageInfo, string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Warn().Msg("streaming not supported, falling back to buffered")
 		_, _ = io.Copy(w, reader)
-		return adapters.UsageInfo{}
+		return adapters.UsageInfo{}, ""
 	}
 
 	usageParser := newSSEUsageParser()
@@ -383,12 +481,10 @@ func (g *Gateway) streamResponse(w http.ResponseWriter, reader io.Reader) adapte
 			break
 		}
 	}
-	return usageParser.Usage()
+	return usageParser.Usage(), usageParser.StopReason()
 }
 
-// =============================================================================
 // SSE Usage Parser
-// =============================================================================
 
 type sseUsage struct {
 	// Anthropic + Responses API fields
@@ -407,18 +503,36 @@ type ssePayload struct {
 	Message struct {
 		Usage sseUsage `json:"usage"`
 	} `json:"message"`
-	// Responses API: response.completed wraps usage inside "response"
+	// Responses API: response.completed wraps usage and output inside "response"
 	Response struct {
-		Usage sseUsage `json:"usage"`
+		Usage  sseUsage `json:"usage"`
+		Output []struct {
+			Type string `json:"type"`
+		} `json:"output"`
 	} `json:"response"`
+	// Anthropic: message_delta carries stop_reason
+	Delta struct {
+		StopReason string `json:"stop_reason"`
+	} `json:"delta"`
+	// OpenAI Chat Completions: choices carry finish_reason
+	Choices []struct {
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
 }
 
 // sseUsageParser incrementally parses Anthropic SSE events and extracts usage.
 // It only reads structured "data: {json}" events to avoid false positives from
 // arbitrary text that might contain token-like key names.
 type sseUsageParser struct {
-	buffer []byte
-	usage  adapters.UsageInfo
+	buffer     []byte
+	usage      adapters.UsageInfo
+	stopReason string // last non-empty stop_reason / finish_reason seen
+}
+
+// StopReason returns the stop/finish reason extracted from the SSE stream.
+func (p *sseUsageParser) StopReason() string {
+	p.parse(true)
+	return p.stopReason
 }
 
 func newSSEUsageParser() *sseUsageParser {
@@ -427,8 +541,17 @@ func newSSEUsageParser() *sseUsageParser {
 	}
 }
 
+// MaxSSEParserBufferSize caps the internal parser buffer to prevent unbounded
+// growth when an upstream sends a giant SSE event with no \n\n delimiter.
+const MaxSSEParserBufferSize = 1 << 20 // 1 MB
+
 func (p *sseUsageParser) Feed(chunk []byte) {
 	p.buffer = append(p.buffer, chunk...)
+	if len(p.buffer) > MaxSSEParserBufferSize {
+		log.Warn().Int("buffer_size", len(p.buffer)).Msg("SSE parser buffer exceeded max, clearing")
+		p.buffer = p.buffer[:0]
+		return
+	}
 	p.parse(false)
 }
 
@@ -494,12 +617,57 @@ func (p *sseUsageParser) parseEvent(event []byte) {
 		return
 	}
 
+	// Patch OpenAI nested cached_tokens into flat fields for applyUsage.
+	// OpenAI nests cached tokens under prompt_tokens_details.cached_tokens
+	// which json.Unmarshal can't reach with the flat sseUsage struct.
+	if payload.Usage.CacheReadInputTokens == 0 {
+		if cached := gjson.GetBytes(data, "usage.prompt_tokens_details.cached_tokens").Int(); cached > 0 {
+			payload.Usage.CacheReadInputTokens = int(cached)
+		}
+	}
+	if payload.Message.Usage.CacheReadInputTokens == 0 {
+		if cached := gjson.GetBytes(data, "message.usage.prompt_tokens_details.cached_tokens").Int(); cached > 0 {
+			payload.Message.Usage.CacheReadInputTokens = int(cached)
+		}
+	}
+	if payload.Response.Usage.CacheReadInputTokens == 0 {
+		if cached := gjson.GetBytes(data, "response.usage.prompt_tokens_details.cached_tokens").Int(); cached > 0 {
+			payload.Response.Usage.CacheReadInputTokens = int(cached)
+		}
+	}
+
 	p.applyUsage(payload.Message.Usage)
 	p.applyUsage(payload.Usage)
 
 	// Responses API: response.completed events have usage nested under "response"
 	if payload.Type == "response.completed" {
 		p.applyUsage(payload.Response.Usage)
+		// Derive a synthetic stop reason from the output array.
+		// If any output item is a function_call the agent is still working;
+		// otherwise the turn is complete and the session should become waiting_for_human.
+		hasFunctionCall := false
+		for _, item := range payload.Response.Output {
+			if item.Type == "function_call" {
+				hasFunctionCall = true
+				break
+			}
+		}
+		if hasFunctionCall {
+			p.stopReason = "function_call"
+		} else {
+			p.stopReason = "stop"
+		}
+	}
+
+	// Capture stop reason from Anthropic message_delta or OpenAI choices
+	if payload.Delta.StopReason != "" {
+		p.stopReason = payload.Delta.StopReason
+	}
+	for _, c := range payload.Choices {
+		if c.FinishReason != "" {
+			p.stopReason = c.FinishReason
+			break
+		}
 	}
 }
 
@@ -546,9 +714,7 @@ func (p *sseUsageParser) applyUsage(u sseUsage) {
 		p.usage.CacheCreationInputTokens + p.usage.CacheReadInputTokens
 }
 
-// =============================================================================
 // RESPONSE CAPTURE & JSON-TO-SSE CONVERSION
-// =============================================================================
 
 // responseCaptureWriter captures an http.ResponseWriter's output in memory.
 // Used to intercept handleNonStreaming's output so we can convert it to SSE.
@@ -561,15 +727,6 @@ type responseCaptureWriter struct {
 func (w *responseCaptureWriter) Header() http.Header         { return w.header }
 func (w *responseCaptureWriter) WriteHeader(statusCode int)  { w.statusCode = statusCode }
 func (w *responseCaptureWriter) Write(b []byte) (int, error) { return w.body.Write(b) }
-
-// jsonResponseToSSE converts a non-streaming JSON response to SSE format.
-// Handles both Anthropic and OpenAI response structures.
-func jsonResponseToSSE(jsonBody []byte, isAnthropic bool) []byte {
-	if isAnthropic {
-		return jsonToAnthropicSSE(jsonBody)
-	}
-	return jsonToOpenAISSE(jsonBody)
-}
 
 // jsonToAnthropicSSE converts an Anthropic non-streaming JSON response to SSE events.
 // Follows the same event structure as BuildSavingsResponse in monitoring/savings.go.
@@ -896,12 +1053,13 @@ func writeSSEEvent(b *strings.Builder, event string, data any) {
 }
 
 // getIntFromMap safely extracts an int from a map[string]any (JSON numbers are float64).
+// Uses an explicit int64 intermediate to prevent silent overflow on 32-bit systems.
 func getIntFromMap(m map[string]any, key string) int {
 	if m == nil {
 		return 0
 	}
 	if v, ok := m[key].(float64); ok {
-		return int(v)
+		return int(int64(v))
 	}
 	return 0
 }
@@ -909,10 +1067,10 @@ func getIntFromMap(m map[string]any, key string) int {
 // buildExpandAppendBody appends the assistant's expand_context tool call and the
 // tool results with expanded content to the request body. Uses sjson to append
 // messages at the end, preserving the entire KV-cache prefix.
-func buildExpandAppendBody(body []byte, expandCalls []tooloutput.ExpandContextCall, toolResults []map[string]any, isAnthropic bool) ([]byte, error) {
+func buildExpandAppendBody(body []byte, expandCalls []tooloutput.ExpandContextCall, toolResults []map[string]any, adapter adapters.Adapter) ([]byte, error) {
 	modified := body
 
-	if isAnthropic {
+	if adapter.Provider() == adapters.ProviderAnthropic || adapter.Provider() == adapters.ProviderBedrock {
 		// Anthropic: append assistant message with expand_context tool_use blocks
 		contentBlocks := make([]any, 0, len(expandCalls))
 		for _, ec := range expandCalls {
@@ -952,8 +1110,7 @@ func buildExpandAppendBody(body []byte, expandCalls []tooloutput.ExpandContextCa
 			}
 		}
 	} else {
-		// Detect Responses API: has "input" array but no "messages" array
-		isResponses := gjson.GetBytes(body, "input").Exists() && !gjson.GetBytes(body, "messages").Exists()
+		isResponses := isResponsesAPI(body)
 
 		if isResponses {
 			// Responses API: append function_call and function_call_output items to input[]
@@ -1055,8 +1212,7 @@ func removeToolFromRequest(body []byte, toolName string) []byte {
 		return body
 	}
 
-	// Check if format uses "input" (Responses API flat) or "messages" (Chat Completions nested)
-	isResponses := gjson.GetBytes(body, "input").Exists() && !gjson.GetBytes(body, "messages").Exists()
+	isResponses := isResponsesAPI(body)
 
 	var kept []byte
 	kept = append(kept, '[')

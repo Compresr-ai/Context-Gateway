@@ -1,20 +1,12 @@
 // Package compresr provides types for the Compresr API.
 package compresr
 
-// =============================================================================
-// API Response Types
-// =============================================================================
-
 // APIResponse is the generic wrapper for all Compresr API responses.
 type APIResponse[T any] struct {
 	Success bool   `json:"success"`
 	Message string `json:"message,omitempty"`
 	Data    T      `json:"data"`
 }
-
-// =============================================================================
-// Subscription & Pricing Types
-// =============================================================================
 
 // SubscriptionData contains subscription information from /pricing/subscription.
 type SubscriptionData struct {
@@ -66,10 +58,6 @@ type ModelPricingInfo struct {
 	MinSubscription  string  `json:"min_subscription"`    // Minimum subscription tier required
 }
 
-// =============================================================================
-// Tool Output Compression Types
-// =============================================================================
-
 // CompressToolOutputParams contains parameters for tool output compression.
 type CompressToolOutputParams struct {
 	ToolOutput             string  // The tool output content to compress (required, non-empty)
@@ -77,17 +65,13 @@ type CompressToolOutputParams struct {
 	ToolName               string  // Name of the tool that produced the output (required)
 	ModelName              string  // Compression model (default: "toc_latte_v1")
 	Source                 string  // Source identifier (e.g., "gateway:anthropic", "sdk:python")
-	TargetCompressionRatio float64 // Target compression ratio: 0-1 (strength) or >1 (factor). Sent to API.
+	TargetCompressionRatio float64 // Target compression ratio sent to API: 0.1 = least aggressive, 0.9 = most aggressive. 0 = API default.
 }
 
 // CompressToolOutputResponse contains the compressed output.
 type CompressToolOutputResponse struct {
 	CompressedOutput string `json:"compressed_output"`
 }
-
-// =============================================================================
-// Tool Discovery Types
-// =============================================================================
 
 // ToolDefinition represents a tool for discovery API requests.
 // NOTE: Backend expects 'parameters' field, not 'definition'.
@@ -112,10 +96,6 @@ type FilterToolsResponse struct {
 	RelevantTools []string `json:"relevant_tools"`
 }
 
-// =============================================================================
-// History Compression Types
-// =============================================================================
-
 // HistoryMessage represents a message in conversation history.
 type HistoryMessage struct {
 	Role    string `json:"role"`    // Message role: 'user', 'assistant', 'system', or 'tool'
@@ -137,23 +117,15 @@ type CompressHistoryResponse struct {
 	CompressedTokens   int     `json:"compressed_tokens"`
 	MessagesCompressed int     `json:"messages_compressed"`
 	MessagesKept       int     `json:"messages_kept"`
-	CompressionRatio   float64 `json:"compression_ratio"`
+	CompressionRatio   float64 `json:"compression_ratio"` // Fraction removed (0.8 = 80% compressed). Matches the gateway's tokenizer.CompressionRatio() convention.
 	DurationMS         int     `json:"duration_ms"`
 }
-
-// =============================================================================
-// Model With Availability (for UI display)
-// =============================================================================
 
 // ModelWithAvailability wraps ModelInfo with subscription availability.
 type ModelWithAvailability struct {
 	ModelInfo
 	Available bool // True if model is available for current subscription
 }
-
-// =============================================================================
-// Gateway Status Types (for CLI status bar)
-// =============================================================================
 
 // GatewayStatus contains usage status for display in the gateway CLI.
 // Returned by GET /api/gateway/status.

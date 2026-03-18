@@ -1,14 +1,4 @@
 // Package gateway implements the context compression proxy.
-//
-// DESIGN: Transparent proxy that compresses LLM requests to save tokens:
-//  1. Receive request from client (Claude Code, Cursor, etc.)
-//  2. Identify provider (OpenAI, Anthropic) from request format
-//  3. Route through compression pipe based on content type
-//  4. Forward to upstream LLM provider
-//  5. Handle expand_context loop if LLM needs full content
-//  6. Return response to client
-//
-// FILES: gateway.go (init), handler.go (HTTP), router.go (pipes), middleware.go (security)
 package gateway
 
 import (
@@ -20,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +24,6 @@ import (
 	"github.com/compresr/context-gateway/internal/costcontrol"
 	"github.com/compresr/context-gateway/internal/dashboard"
 	"github.com/compresr/context-gateway/internal/monitoring"
-	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 	"github.com/compresr/context-gateway/internal/postsession"
 	"github.com/compresr/context-gateway/internal/preemptive"
 	"github.com/compresr/context-gateway/internal/prompthistory"
@@ -42,10 +32,9 @@ import (
 
 // Header constants for gateway requests.
 const (
-	HeaderRequestID            = "X-Request-ID"
-	HeaderTargetURL            = "X-Target-URL"
-	HeaderProvider             = "X-Provider"
-	HeaderCompressionThreshold = "X-Compression-Threshold" // User-selectable: off, 256, 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k
+	HeaderRequestID = "X-Request-ID"
+	HeaderTargetURL = "X-Target-URL"
+	HeaderProvider  = "X-Provider"
 )
 
 // Re-export centralized defaults for backward compatibility within this package.
@@ -75,6 +64,8 @@ var allowedHosts = map[string]bool{
 	"openrouter.ai": true,
 
 	// Popular LLM providers
+	"api.minimax.io":        true,
+	"api.minimaxi.com":      true, // MiniMax China endpoint
 	"api.together.ai":       true,
 	"api.groq.com":          true,
 	"api.fireworks.ai":      true,
@@ -110,10 +101,16 @@ func init() {
 		var addedHosts []string
 		for _, host := range strings.Split(extra, ",") {
 			host = strings.TrimSpace(strings.ToLower(host))
-			if host != "" {
-				allowedHosts[host] = true
-				addedHosts = append(addedHosts, host)
+			if host == "" {
+				continue
 			}
+			// Validate entry is a proper hostname or CIDR to prevent accidental SSRF expansion.
+			if !isValidHostEntry(host) {
+				log.Warn().Str("entry", host).Msg("GATEWAY_ALLOWED_HOSTS: skipping invalid hostname/CIDR entry")
+				continue
+			}
+			allowedHosts[host] = true
+			addedHosts = append(addedHosts, host)
 		}
 		if len(addedHosts) > 0 {
 			log.Info().
@@ -121,6 +118,26 @@ func init() {
 				Msg("SSRF allowlist extended via GATEWAY_ALLOWED_HOSTS")
 		}
 	}
+}
+
+// validHostnameRE matches valid hostnames (e.g. api.openai.com) and bare labels (e.g. localhost).
+// Allows letters, digits, hyphens, and dots. Does not allow IP literals (handled by net.ParseCIDR).
+var validHostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9\.\-]*[a-z0-9])?$`)
+
+// isValidHostEntry returns true if entry is a valid hostname or CIDR range.
+// Invalid entries in GATEWAY_ALLOWED_HOSTS are logged and skipped to prevent
+// accidental SSRF allowlist expansion via typos or injection.
+func isValidHostEntry(entry string) bool {
+	// Accept CIDR ranges (e.g. 10.0.0.0/8)
+	if _, _, err := net.ParseCIDR(entry); err == nil {
+		return true
+	}
+	// Accept plain IP addresses
+	if net.ParseIP(entry) != nil {
+		return true
+	}
+	// Accept valid hostnames (lowercase enforced by caller)
+	return validHostnameRE.MatchString(entry)
 }
 
 // EnableLocalHostsForTesting adds localhost to the SSRF allowlist.
@@ -146,19 +163,21 @@ func registerBedrockHosts() {
 
 // Gateway is the main context compression gateway.
 type Gateway struct {
-	config           *config.Config
-	registry         *adapters.Registry
-	router           *Router
-	store            store.Store
-	tracker          *monitoring.Tracker
-	savings          *monitoring.SavingsTracker // Legacy: Real-time compression savings
-	aggregator       *monitoring.LogAggregator  // New: Background log aggregator (single source of truth)
-	trajectory       *monitoring.TrajectoryManager
-	httpClient       *http.Client
-	server           *http.Server
-	dashboardServer  *http.Server // Centralized dashboard on fixed port 18080
-	dashboardStarted bool         // Whether this instance owns the dashboard server
-	rateLimiter      *rateLimiter
+	config            *config.Config
+	registry          *adapters.Registry
+	router            *Router
+	store             store.Store
+	tracker           *monitoring.Tracker
+	savings           *monitoring.SavingsTracker // Legacy: Real-time compression savings
+	aggregator        *monitoring.LogAggregator  // New: Background log aggregator (single source of truth)
+	trajectory        *monitoring.TrajectoryStore
+	httpClient        *http.Client
+	peerHTTPClient    *http.Client // Short-timeout client for peer dashboard calls (loopback)
+	monitorHTTPClient *http.Client // Short-timeout client for monitor/sessions calls (loopback)
+	server            *http.Server
+	dashboardServer   *http.Server // Centralized dashboard on fixed port 18080
+	dashboardStarted  bool         // Whether this instance owns the dashboard server
+	rateLimiter       *rateLimiter
 
 	// Config hot-reload
 	configReloader *config.Reloader
@@ -177,8 +196,8 @@ type Gateway struct {
 	// Provider-specific auth handlers (subscription/fallback)
 	authRegistry *auth.Registry
 
-	// Expander rewrites compressed history for streaming expand_context
-	expander *tooloutput.Expander
+	// Build version string injected via -ldflags (used in /health response)
+	version string
 
 	// AWS Bedrock support
 	bedrockSigner *BedrockSigner
@@ -192,10 +211,20 @@ type Gateway struct {
 	// Persistent prompt history (SQLite)
 	promptHistory prompthistory.Store
 
-	// Main conversation session ID — only record prompts for this conversation.
-	// Set once from the first valid request; subagent requests have different IDs and are excluded.
+	// Main conversation stable fingerprint — hash of clean first user message text.
+	// Used to distinguish main conversation from subagents for savings and dashboard.
+	// Stable across requests (injected XML stripped before hashing).
 	mainConversationID string
-	mainConvOnce       sync.Once
+	mainConvMu         sync.Mutex
+	mainConvSet        bool
+
+	// Stable prompt conversation fingerprint — hash of CLEAN first user message text.
+	// Unlike mainConversationID (which hashes the full message including injected XML),
+	// this is stable across requests because injected content is stripped before hashing.
+	// Used exclusively by prompt recording to distinguish main conversation from subagents.
+	promptConvFingerprint    string
+	promptConvFingerprintMu  sync.Mutex
+	promptConvFingerprintSet bool
 
 	// Current session ID (for filtering dashboard/savings to current session)
 	currentSessionID   string
@@ -231,6 +260,11 @@ type Gateway struct {
 	lazySessionMu     sync.Mutex // Protects lazySessionPath during creation
 }
 
+// SetVersion stores the build version for the /health endpoint.
+func (g *Gateway) SetVersion(v string) {
+	g.version = v
+}
+
 // getCurrentSessionID returns the current session ID (thread-safe).
 func (g *Gateway) getCurrentSessionID() string {
 	g.currentSessionIDMu.RLock()
@@ -243,6 +277,50 @@ func (g *Gateway) setCurrentSessionID(id string) {
 	g.currentSessionIDMu.Lock()
 	defer g.currentSessionIDMu.Unlock()
 	g.currentSessionID = id
+}
+
+// setMainConversationOnce sets the main conversation ID from the first request.
+// Uses a mutex+bool instead of sync.Once so it can be reset across sessions.
+func (g *Gateway) setMainConversationOnce(conversationSessionID string) {
+	g.mainConvMu.Lock()
+	defer g.mainConvMu.Unlock()
+	if !g.mainConvSet {
+		g.mainConversationID = conversationSessionID
+		g.mainConvSet = true
+	}
+}
+
+// isMainConversation returns true if the given stable fingerprint matches the
+// main conversation. Uses fingerprint (hash of clean first user text) which is
+// stable across requests (unlike CostSessionID which changes due to injected XML).
+func (g *Gateway) isMainConversation(fingerprint string) bool {
+	g.mainConvMu.Lock()
+	id := g.mainConversationID
+	g.mainConvMu.Unlock()
+	if id == "" || fingerprint == "" {
+		return false
+	}
+	return fingerprint == id
+}
+
+// setPromptConvFingerprintOnce sets the prompt conversation fingerprint from the
+// first valid prompt recording. Subsequent calls are no-ops.
+func (g *Gateway) setPromptConvFingerprintOnce(fingerprint string) {
+	g.promptConvFingerprintMu.Lock()
+	defer g.promptConvFingerprintMu.Unlock()
+	if !g.promptConvFingerprintSet {
+		g.promptConvFingerprint = fingerprint
+		g.promptConvFingerprintSet = true
+	}
+}
+
+// isMainPromptConversation returns true if the fingerprint matches the main
+// prompt conversation. This filters out subagent prompts reliably.
+func (g *Gateway) isMainPromptConversation(fingerprint string) bool {
+	g.promptConvFingerprintMu.Lock()
+	fp := g.promptConvFingerprint
+	g.promptConvFingerprintMu.Unlock()
+	return fp != "" && fingerprint == fp
 }
 
 // StatusReporter allows the gateway to update a CLI status display.
@@ -276,21 +354,23 @@ func New(cfg *config.Config, configFilePath ...string) *Gateway {
 
 	// Initialize telemetry
 	tracker, err := monitoring.NewTracker(monitoring.TelemetryConfig{
-		Enabled:              cfg.Monitoring.TelemetryEnabled,
-		LogPath:              cfg.Monitoring.TelemetryPath,
-		LogToStdout:          cfg.Monitoring.LogToStdout,
-		VerbosePayloads:      cfg.Monitoring.VerbosePayloads,
-		CompressionLogPath:   cfg.Monitoring.CompressionLogPath,
-		ToolDiscoveryLogPath: cfg.Monitoring.ToolDiscoveryLogPath,
+		Enabled:                cfg.Monitoring.TelemetryEnabled,
+		LogPath:                cfg.Monitoring.TelemetryPath,
+		LogToStdout:            cfg.Monitoring.LogToStdout,
+		VerbosePayloads:        cfg.Monitoring.VerbosePayloads,
+		CompressionLogPath:     cfg.Monitoring.CompressionLogPath,
+		ToolDiscoveryLogPath:   cfg.Monitoring.ToolDiscoveryLogPath,
+		TaskOutputLogPath:      cfg.Monitoring.TaskOutputLogPath,
+		SessionToolsPath:       cfg.Monitoring.SessionToolsPath,
+		SessionStatsPath:       cfg.Monitoring.SessionStatsPath,
+		ExpandContextCallsPath: cfg.Monitoring.ExpandContextCallsPath,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to initialize telemetry")
 		tracker, _ = monitoring.NewTracker(monitoring.TelemetryConfig{Enabled: false})
 	}
-	tracker.RecordInit(buildInitEvent(cfg))
 
-	// Initialize trajectory manager (ATIF format) - separate files per session ID
-	// TrajectoryPath is treated as base directory for per-session files
+	// Initialize trajectory store (ATIF format) - per-session files in base directory
 	trajectoryBaseDir := cfg.Monitoring.TrajectoryPath
 	if trajectoryBaseDir != "" {
 		// If TrajectoryPath looks like a file path, use its directory
@@ -298,12 +378,10 @@ func New(cfg *config.Config, configFilePath ...string) *Gateway {
 			trajectoryBaseDir = filepath.Dir(trajectoryBaseDir)
 		}
 	}
-	trajectoryMgr := monitoring.NewTrajectoryManager(monitoring.TrajectoryManagerConfig{
-		Enabled:         cfg.Monitoring.TrajectoryEnabled,
-		BaseDir:         trajectoryBaseDir,
-		AgentName:       cfg.Monitoring.AgentName,
-		SessionTTL:      time.Hour,
-		CleanupInterval: 5 * time.Minute,
+	trajectoryStore := monitoring.NewTrajectoryStore(monitoring.TrajectoryStoreConfig{
+		Enabled:   cfg.Monitoring.TrajectoryEnabled,
+		BaseDir:   trajectoryBaseDir,
+		AgentName: cfg.Monitoring.AgentName,
 	})
 
 	// Use config write_timeout for upstream requests
@@ -352,11 +430,18 @@ func New(cfg *config.Config, configFilePath ...string) *Gateway {
 	var logsDir string
 	var currentSessionID string
 	if cfg.Monitoring.TelemetryPath != "" {
-		// TelemetryPath is like "logs/session_xxx/telemetry.jsonl"
-		// sessionDir = "logs/session_xxx", logsDir = "logs"
 		sessionDir := filepath.Dir(cfg.Monitoring.TelemetryPath)
-		logsDir = filepath.Dir(sessionDir)
-		currentSessionID = filepath.Base(sessionDir) // "session_xxx"
+		parentDir := filepath.Dir(sessionDir)
+		if parentDir == "." || parentDir == "" || parentDir == sessionDir {
+			// TelemetryPath is like "logs/telemetry.jsonl" — telemetry is directly in logs dir.
+			// Use sessionDir (e.g., "logs") as the root for all sessions.
+			logsDir = sessionDir
+		} else {
+			// TelemetryPath is like "logs/session_xxx/telemetry.jsonl" — named session.
+			// sessionDir = "logs/session_xxx", logsDir = "logs"
+			logsDir = parentDir
+			currentSessionID = filepath.Base(sessionDir) // "session_xxx"
+		}
 	} else {
 		logsDir = "logs"
 	}
@@ -369,7 +454,7 @@ func New(cfg *config.Config, configFilePath ...string) *Gateway {
 
 	// Initialize session monitoring dashboard
 	monitorHub := dashboard.NewHub()
-	monitorStore := dashboard.NewSessionStore(monitorHub)
+	monitorStore := dashboard.NewSessionStore(monitorHub, cfg.Dashboard.SessionIdleTimeout)
 
 	// Initialize prompt history store (SQLite)
 	promptHistoryStore, phErr := prompthistory.NewDefault()
@@ -378,35 +463,36 @@ func New(cfg *config.Config, configFilePath ...string) *Gateway {
 	}
 
 	g := &Gateway{
-		config:           cfg,
-		registry:         registry,
-		router:           r,
-		store:            st,
-		tracker:          tracker,
-		savings:          monitoring.NewSavingsTracker(),
-		aggregator:       aggregator,
-		trajectory:       trajectoryMgr,
-		expander:         tooloutput.NewExpander(st, tracker), // Legacy for streaming
-		httpClient:       &http.Client{Timeout: clientTimeout, Transport: transport},
-		rateLimiter:      newRateLimiter(DefaultRateLimit),
-		costTracker:      costcontrol.NewTracker(cfg.CostControl),
-		preemptive:       preemptive.NewManager(cfg.ResolvePreemptiveProviderWithLogging(cfg.Monitoring.TelemetryEnabled)),
-		toolSessions:     toolSessions,
-		authMode:         newAuthFallbackStore(time.Hour),
-		authRegistry:     authRegistry,
-		bedrockSigner:    bedrockSigner,
-		expandLog:        monitoring.NewExpandLog(),
-		searchLog:        monitoring.NewSearchLog(),
-		promptHistory:    promptHistoryStore,
-		currentSessionID: currentSessionID,
-		logger:           logger,
-		requestLogger:    requestLogger,
-		metrics:          metrics,
-		alerts:           alerts,
-		compresrClient:   compresr.NewClient("", ""), // Uses env vars COMPRESR_BASE_URL, COMPRESR_API_KEY
-		sessionCollector: postsession.NewSessionCollector(),
-		monitorHub:       monitorHub,
-		monitorStore:     monitorStore,
+		config:            cfg,
+		registry:          registry,
+		router:            r,
+		store:             st,
+		tracker:           tracker,
+		savings:           monitoring.NewSavingsTracker(),
+		aggregator:        aggregator,
+		trajectory:        trajectoryStore,
+		httpClient:        &http.Client{Timeout: clientTimeout, Transport: transport},
+		peerHTTPClient:    &http.Client{Timeout: 2 * time.Second},
+		monitorHTTPClient: &http.Client{Timeout: 3 * time.Second},
+		rateLimiter:       newRateLimiter(DefaultRateLimit),
+		costTracker:       costcontrol.NewTracker(cfg.CostControl),
+		preemptive:        preemptive.NewManager(cfg.ResolvePreemptiveProviderWithLogging(cfg.Monitoring.TelemetryEnabled)),
+		toolSessions:      toolSessions,
+		authMode:          newAuthFallbackStore(time.Hour),
+		authRegistry:      authRegistry,
+		bedrockSigner:     bedrockSigner,
+		expandLog:         monitoring.NewExpandLog(),
+		searchLog:         monitoring.NewSearchLog(),
+		promptHistory:     promptHistoryStore,
+		currentSessionID:  currentSessionID,
+		logger:            logger,
+		requestLogger:     requestLogger,
+		metrics:           metrics,
+		alerts:            alerts,
+		compresrClient:    compresr.NewClient("", ""), // Uses env vars COMPRESR_BASE_URL, COMPRESR_API_KEY
+		sessionCollector:  postsession.NewSessionCollector(),
+		monitorHub:        monitorHub,
+		monitorStore:      monitorStore,
 	}
 
 	// Initialize config reloader (hot-reload support)
@@ -466,6 +552,25 @@ func New(cfg *config.Config, configFilePath ...string) *Gateway {
 	// Only the first gateway instance wins; others skip gracefully.
 	g.tryStartDashboardServer()
 
+	// Non-owning instances watch for the dashboard port to become free
+	// (e.g. when the owning gateway shuts down) and claim it immediately.
+	if !g.dashboardStarted {
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-watchCtx.Done():
+					return
+				case <-ticker.C:
+					if !g.dashboardStarted {
+						g.tryStartDashboardServer()
+					}
+				}
+			}
+		}()
+	}
+
 	return g
 }
 
@@ -518,11 +623,24 @@ func (g *Gateway) SetDashboardFS(fsys fs.FS) {
 // SetLazySession configures lazy session creation.
 // The session directory is only created when the first LLM request arrives.
 // This prevents empty session folders when the gateway starts but receives no traffic.
-func (g *Gateway) SetLazySession(sessionPath string, configData []byte) {
+//
+// agentType is the human-readable agent name (e.g. "codex", "claude_code").
+// If non-empty, the session is pre-registered in the monitor store immediately with
+// StatusWaitingForHuman so it appears in the dashboard before any LLM requests arrive.
+// This is important for agents like Codex that don't fire an init request on startup.
+func (g *Gateway) SetLazySession(sessionPath string, configData []byte, agentType string) {
 	g.lazySessionMu.Lock()
 	defer g.lazySessionMu.Unlock()
 	g.lazySessionPath = sessionPath
 	g.lazySessionConfig = configData
+
+	// Pre-register the session so it shows in the dashboard immediately.
+	// EnsureSession() / Track() will reactivate it when the first request arrives.
+	if g.monitorStore != nil && sessionPath != "" {
+		sessionID := filepath.Base(sessionPath)
+		g.monitorStore.Track(sessionID, agentType)
+		g.monitorStore.SetStatus(sessionID, dashboard.StatusWaitingForHuman)
+	}
 }
 
 // EnsureSession writes the session config if it hasn't been written yet.
@@ -571,6 +689,12 @@ func (g *Gateway) EnsureSession() bool {
 // resetForNewSession zeros out all accumulated metrics and state
 // so that every variable starts at 0 for the new session.
 func (g *Gateway) resetForNewSession() {
+	// Reset main conversation ID so the new session's first request re-establishes it.
+	g.mainConvMu.Lock()
+	g.mainConversationID = ""
+	g.mainConvSet = false
+	g.mainConvMu.Unlock()
+
 	// Reset in-memory savings tracker
 	if g.savings != nil {
 		g.savings.Reset()
@@ -631,6 +755,8 @@ func (g *Gateway) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config", g.handleConfigAPI)
 	mux.HandleFunc("/api/prompts", g.handlePromptsAPI)
 	mux.HandleFunc("/api/prompts/erase", g.handleErasePrompts)
+	mux.HandleFunc("/api/prompts/", g.handleDeletePrompt)
+	mux.HandleFunc("/api/session", g.handleDeleteSession)
 	mux.HandleFunc("/api/compress/", g.handleCompressAPINotFound)
 	mux.HandleFunc("/stats", g.handleStats)
 	mux.HandleFunc("/v1/models", g.handleModels)
@@ -652,6 +778,8 @@ func (g *Gateway) setupDashboardRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config", g.handleConfigAPI)
 	mux.HandleFunc("/api/prompts", g.handlePromptsAPI)
 	mux.HandleFunc("/api/prompts/erase", g.handleErasePrompts)
+	mux.HandleFunc("/api/prompts/", g.handleDeletePrompt)
+	mux.HandleFunc("/api/session", g.handleDeleteSession)
 	mux.HandleFunc("/api/monitor", g.handleAggregatedMonitorAPI)
 	mux.HandleFunc("/api/monitor/rename", g.handleRenameInstance)
 	mux.HandleFunc("/api/instance/config", g.handleInstanceConfigProxy)
@@ -673,12 +801,14 @@ func (g *Gateway) handleCompressAPINotFound(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]string{
 			"message": "Compresr API endpoint not available on gateway. Use https://api.compresr.ai or check your COMPRESR_BASE_URL configuration.",
 			"type":    "configuration_error",
 		},
-	})
+	}); err != nil {
+		log.Warn().Err(err).Msg("handleCompresrAPIRejection: failed to encode JSON response")
+	}
 }
 
 // Start starts the gateway.
@@ -755,7 +885,7 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 
 	// Close all trajectory trackers (writes final trajectory files per session)
 	if g.trajectory != nil {
-		if err := g.trajectory.CloseAll(); err != nil {
+		if err := g.trajectory.Close(); err != nil {
 			log.Error().Err(err).Msg("failed to close trajectory trackers")
 		}
 	}
@@ -772,8 +902,12 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// Shutdown dashboard server if this instance owns it
-	if g.dashboardServer != nil {
+	// Shutdown dashboard server only when this is the last active instance.
+	// If other instances are still running they will detect the freed port
+	// (via their ownership watcher) and take over within a few seconds.
+	// ActiveCount() still includes this instance (deregister happens after Shutdown),
+	// so count <= 1 means "only us, no others alive".
+	if g.dashboardServer != nil && dashboard.ActiveCount() <= 1 {
 		if err := g.dashboardServer.Shutdown(ctx); err != nil {
 			log.Error().Err(err).Msg("dashboard server shutdown error")
 		}

@@ -44,6 +44,16 @@ const (
 	anthropicVersion = "2023-06-01"
 )
 
+// defaultHTTPClient is shared across CallLLM calls to enable connection pooling.
+// Timeout is managed via context, so no client-level timeout is set.
+var defaultHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 // CallLLMParams contains parameters for calling an LLM provider.
 type CallLLMParams struct {
 	// Provider overrides auto-detection. One of: "anthropic", "openai", "gemini", "bedrock".
@@ -140,7 +150,7 @@ func CallLLM(ctx context.Context, params CallLLMParams) (*CallLLMResult, error) 
 
 	httpClient := params.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{} // timeout via context, not client
+		httpClient = defaultHTTPClient // shared client enables connection pooling
 	}
 
 	validatedEndpoint := parsedEndpoint.String()
@@ -207,6 +217,8 @@ func DetectProvider(endpoint string) string {
 		return "anthropic"
 	case strings.Contains(endpoint, "generativelanguage.googleapis.com"):
 		return "gemini"
+	case strings.Contains(endpoint, ".openai.azure.com") || strings.Contains(endpoint, "azure"):
+		return "azure"
 	default:
 		return "openai"
 	}
@@ -215,6 +227,9 @@ func DetectProvider(endpoint string) string {
 func setAuthHeaders(req *http.Request, provider, apiKey, bearerToken string) {
 	switch provider {
 	case "anthropic":
+		// Anthropic supports two auth methods:
+		// 1. API key → x-api-key header
+		// 2. OAuth/subscription → Authorization: Bearer header
 		if apiKey != "" {
 			req.Header.Set("x-api-key", apiKey)
 		} else if bearerToken != "" {
@@ -225,10 +240,36 @@ func setAuthHeaders(req *http.Request, provider, apiKey, bearerToken string) {
 		// Bedrock auth is handled by SigV4 signing transport in the HTTPClient.
 		// No API key headers needed; the transport signs the request automatically.
 	case "gemini":
-		log.Debug().Str("provider", provider).Int("key_len", len(apiKey)).Str("key_prefix", safePrefix(apiKey, 10)).Msg("Setting Gemini auth header")
-		req.Header.Set("x-goog-api-key", apiKey)
-	default: // openai
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+		// Gemini uses x-goog-api-key header
+		// apiKey parameter takes precedence (direct API key users)
+		// bearerToken fallback supports subscription-like scenarios
+		key := apiKey
+		if key == "" {
+			key = bearerToken
+		}
+		if key != "" {
+			log.Debug().Str("provider", provider).Int("key_len", len(key)).Str("key_prefix", safePrefix(key, 10)).Msg("Setting Gemini auth header")
+			req.Header.Set("x-goog-api-key", key)
+		}
+	case "azure":
+		// Azure OpenAI uses different headers than OpenAI:
+		// 1. API key → api-key header (NOT Authorization)
+		// 2. OAuth (Microsoft Entra ID) → Authorization: Bearer header
+		if apiKey != "" {
+			req.Header.Set("api-key", apiKey)
+		} else if bearerToken != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", bearerToken))
+		}
+	default: // openai and compatible providers
+		// OpenAI uses Authorization: Bearer for all auth types
+		// (both direct API key users and subscription/OAuth users)
+		token := apiKey
+		if token == "" {
+			token = bearerToken
+		}
+		if token != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+		}
 	}
 }
 

@@ -19,7 +19,7 @@ import (
 // =============================================================================
 
 // TestIntegration_ToolDiscovery_FiltersByRelevance sends 20 tools with the
-// relevance strategy (min_tools=2, max_tools=5). Verifies the forwarded request
+// relevance strategy (token budget for 5 tools). Verifies the forwarded request
 // has fewer tools than the original 20.
 func TestIntegration_ToolDiscovery_FiltersByRelevance(t *testing.T) {
 	mock := newMockLLM(func(reqBody []byte, callNum int) []byte {
@@ -27,7 +27,7 @@ func TestIntegration_ToolDiscovery_FiltersByRelevance(t *testing.T) {
 	})
 	defer mock.close()
 
-	cfg := relevanceConfig(2, 5)
+	cfg := relevanceConfig(5)
 	gwServer := createGateway(cfg)
 	defer gwServer.Close()
 
@@ -50,12 +50,16 @@ func TestIntegration_ToolDiscovery_FiltersByRelevance(t *testing.T) {
 	forwardedBody := requests[0].Body
 	toolNames := extractToolNames(forwardedBody)
 
-	// With relevance strategy, max_tools=5, the forwarded request should have
-	// at most 5 tools (fewer than the original 20)
-	assert.Less(t, len(toolNames), 20,
-		"forwarded request should have fewer tools than original 20, got %d: %v", len(toolNames), toolNames)
-	assert.LessOrEqual(t, len(toolNames), 5,
-		"forwarded request should have at most max_tools=5 tools, got %d: %v", len(toolNames), toolNames)
+	// With relevance strategy and stub behavior: deferred tools remain as stubs.
+	// Count only effective (non-deferred) tools to verify filtering happened.
+	// Note: phantom tools (expand_context + gateway_search_tools) are always injected
+	// on top of the filtered set — add 2 to the expected max.
+	effectiveCount := countEffectiveToolNames(forwardedBody)
+	const phantomToolCount = 2
+	assert.Less(t, effectiveCount, 20+phantomToolCount,
+		"forwarded request should have fewer effective tools than original 20, got %d total: %v", len(toolNames), toolNames)
+	assert.LessOrEqual(t, effectiveCount, 5+phantomToolCount,
+		"forwarded request should have at most token_budget(5 tools) + %d phantom tools, got %d total: %v", phantomToolCount, len(toolNames), toolNames)
 }
 
 // =============================================================================
@@ -98,24 +102,29 @@ func TestIntegration_ToolDiscovery_ToolSearchReplacesAll(t *testing.T) {
 	assert.True(t, containsToolName(forwardedBody, "gateway_search_tools"),
 		"forwarded request should contain gateway_search_tools, got tools: %v", toolNames)
 
-	// Should have fewer tools than the original 20
-	assert.Less(t, len(toolNames), 20,
-		"forwarded request should have fewer tools than original 20, got %d: %v", len(toolNames), toolNames)
+	// With stub behavior: deferred tools remain as stubs + gateway_search_tools appended.
+	// Count only effective (non-deferred) tools — should be 1 (gateway_search_tools only).
+	effectiveCountSearch := countEffectiveToolNames(forwardedBody)
+	assert.Less(t, effectiveCountSearch, 20,
+		"forwarded request should have fewer effective tools than original 20, got %d total: %v", len(toolNames), toolNames)
 }
 
 // =============================================================================
-// TEST 3: Passthrough when below min_tools threshold
+// TEST 3: Passthrough when below token threshold
 // =============================================================================
 
 // TestIntegration_ToolDiscovery_PassthroughBelowThreshold sends 3 tools with
-// min_tools=5. Since 3 < 5, all tools should pass through unchanged.
+// a high token_threshold (99999) so filtering is skipped.
+// Phantom tools (expand_context, gateway_search_tools) are always injected
+// regardless of filtering status — this is the MCP-server pattern.
 func TestIntegration_ToolDiscovery_PassthroughBelowThreshold(t *testing.T) {
 	mock := newMockLLM(func(reqBody []byte, callNum int) []byte {
 		return anthropicTextResponse("I can help with that.")
 	})
 	defer mock.close()
 
-	cfg := relevanceConfig(5, 25)
+	// TokenThreshold=99999: 3 small tools are well below threshold → no filtering
+	cfg := relevanceConfigWithThreshold(25, 99999)
 	gwServer := createGateway(cfg)
 	defer gwServer.Close()
 
@@ -136,14 +145,22 @@ func TestIntegration_ToolDiscovery_PassthroughBelowThreshold(t *testing.T) {
 	require.GreaterOrEqual(t, len(requests), 1, "mock should have received at least 1 request")
 
 	forwardedBody := requests[0].Body
-	toolNames := extractToolNames(forwardedBody)
 
-	// 3 tools < min_tools=5, so all should pass through unchanged
-	// (no gateway_search_tools injected, all original tools preserved)
-	assert.Equal(t, 3, len(toolNames),
-		"all 3 tools should pass through unchanged when below min_tools threshold, got %d: %v", len(toolNames), toolNames)
+	// Filtering was skipped (below token threshold), so original 3 tools are intact.
+	// But phantom tools (expand_context + gateway_search_tools) are ALWAYS injected
+	// regardless of whether filtering ran — MCP-server pattern.
+	allToolNames := extractToolNames(forwardedBody)
+	assert.Equal(t, 5, len(allToolNames),
+		"3 original tools + 2 phantom tools should be present, got %d: %v", len(allToolNames), allToolNames)
 
-	// Verify no gateway phantom tools were added
-	assert.False(t, containsToolName(forwardedBody, "gateway_search_tools"),
-		"gateway_search_tools should NOT be injected when below min_tools threshold")
+	// Verify both phantom tools are present
+	assert.True(t, containsToolName(forwardedBody, "expand_context"),
+		"expand_context should always be injected (MCP-server pattern)")
+	assert.True(t, containsToolName(forwardedBody, "gateway_search_tools"),
+		"gateway_search_tools should always be injected (MCP-server pattern)")
+
+	// Verify original tools are not filtered/stubbed
+	effectiveCount := countEffectiveToolNames(forwardedBody)
+	assert.Equal(t, 5, effectiveCount, // 3 originals + 2 phantom tools = 5 effective
+		"original tools should not be stubbed when below token threshold")
 }

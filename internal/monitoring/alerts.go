@@ -1,10 +1,4 @@
 // Package monitoring - alerts.go flags anomalies and errors.
-//
-// DESIGN: AlertManager logs notable events at appropriate levels:
-//   - FlagHighLatency:       Warn when request exceeds threshold
-//   - FlagCompressionFailure: Error when compression pipe fails
-//   - FlagProviderError:     Warn on upstream 4xx/5xx responses
-//   - FlagPanic:             Error on recovered panics
 package monitoring
 
 import "time"
@@ -36,45 +30,29 @@ func (am *AlertManager) FlagHighLatency(requestID string, latency time.Duration,
 		Msg("high_latency")
 }
 
-// FlagCompressionFailure logs compression pipe failure.
-func (am *AlertManager) FlagCompressionFailure(requestID, pipe, strategy string, err error) {
-	am.logger.Error().
-		Str("request_id", requestID).
-		Str("pipe", pipe).
-		Err(err).
-		Msg("compression_failed")
-}
-
 // FlagProviderError logs upstream provider error.
 func (am *AlertManager) FlagProviderError(requestID, provider string, statusCode int, errorMsg string) {
 	am.logger.Warn().
 		Str("request_id", requestID).
 		Str("provider", provider).
 		Int("status", statusCode).
+		Str("error", errorMsg).
 		Msg("provider_error")
 }
 
 // FlagInvalidRequest logs invalid request.
-func (am *AlertManager) FlagInvalidRequest(requestID, reason string, details map[string]interface{}) {
+func (am *AlertManager) FlagInvalidRequest(requestID, reason string, details map[string]any) {
 	am.logger.Debug().
 		Str("request_id", requestID).
 		Str("reason", reason).
+		Fields(details).
 		Msg("invalid_request")
 }
 
 // FlagPanic logs recovered panic.
-func (am *AlertManager) FlagPanic(requestID string, panicValue interface{}, stack string) {
+func (am *AlertManager) FlagPanic(requestID string, panicValue any, stack string) {
 	am.logger.Error().
 		Str("request_id", requestID).
 		Interface("panic", panicValue).
 		Msg("panic_recovered")
-}
-
-// FlagUpstreamTimeout logs upstream timeout.
-func (am *AlertManager) FlagUpstreamTimeout(requestID, provider, targetURL string, timeout time.Duration) {
-	am.logger.Error().
-		Str("request_id", requestID).
-		Str("provider", provider).
-		Dur("timeout", timeout).
-		Msg("upstream_timeout")
 }

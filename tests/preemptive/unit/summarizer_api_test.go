@@ -78,7 +78,7 @@ func newAPISummarizer(serverURL string) *preemptive.Summarizer {
 		CompresrBaseURL: serverURL, // httptest server URL as base (like cfg.URLs.Compresr)
 		Compresr: &preemptive.CompresrConfig{
 			Endpoint:  "/api/compress/history/",
-			AuthParam: "cmp_test-key-12345",
+			APIKey: "cmp_test-key-12345",
 			Model:     "hcc_espresso_v1",
 			Timeout:   30 * time.Second,
 		},
@@ -269,7 +269,7 @@ func TestSummarizeViaAPI_KeepRecentDefaultsTo3(t *testing.T) {
 		CompresrBaseURL: server.URL,
 		Compresr: &preemptive.CompresrConfig{
 			Endpoint:  "/api/compress/history/",
-			AuthParam: "cmp_test-key",
+			APIKey: "cmp_test-key",
 			Model:     "hcc_espresso_v1",
 			Timeout:   30 * time.Second,
 		},
@@ -595,7 +595,7 @@ func TestSummarizeViaAPI_ModelNamePassedCorrectly(t *testing.T) {
 				CompresrBaseURL: server.URL,
 				Compresr: &preemptive.CompresrConfig{
 					Endpoint:  "/api/compress/history/",
-					AuthParam: "cmp_key",
+					APIKey: "cmp_key",
 					Model:     model,
 					Timeout:   30 * time.Second,
 				},

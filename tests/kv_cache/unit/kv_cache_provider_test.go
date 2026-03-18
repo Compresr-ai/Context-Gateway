@@ -18,9 +18,9 @@ import (
 
 	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/config"
+	phantom_tools "github.com/compresr/context-gateway/internal/phantom_tools"
 	"github.com/compresr/context-gateway/internal/pipes"
 	tooldiscovery "github.com/compresr/context-gateway/internal/pipes/tool_discovery"
-	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 )
 
 // =============================================================================
@@ -48,7 +48,7 @@ func TestKVCache_ExpandContext_10Turns_Anthropic(t *testing.T) {
 		messagesJSON := "[" + joinStrings(msgs, ",") + "]"
 		body := []byte(fmt.Sprintf(`{"model":"claude-3-5-sonnet-20241022","max_tokens":4096,"messages":%s,"tools":%s}`, messagesJSON, baseTools))
 
-		result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+		result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err, "turn %d", turn)
 
 		toolsRaw := gjson.GetBytes(result, "tools").Raw
@@ -82,7 +82,7 @@ func TestKVCache_ExpandContext_10Turns_OpenAI(t *testing.T) {
 		messagesJSON := "[" + joinStrings(msgs, ",") + "]"
 		body := []byte(fmt.Sprintf(`{"model":"gpt-4o","messages":%s,"tools":%s}`, messagesJSON, baseTools))
 
-		result, err := tooloutput.InjectExpandContextTool(body, nil, "openai")
+		result, err := phantom_tools.InjectAll(body, adapters.Provider("openai"))
 		require.NoError(t, err, "turn %d", turn)
 
 		toolsRaw := gjson.GetBytes(result, "tools").Raw
@@ -106,7 +106,6 @@ func TestKVCache_SearchTool_10Turns(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -149,7 +148,6 @@ func TestKVCache_BothPhantomTools_Coexist(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -158,7 +156,7 @@ func TestKVCache_BothPhantomTools_Coexist(t *testing.T) {
 	t.Run("expand_then_search_replaces_all", func(t *testing.T) {
 		// First inject expand_context
 		body := []byte(fmt.Sprintf(`{"model":"claude-3","messages":[{"role":"user","content":"test"}],"tools":%s}`, baseTools))
-		withExpand, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+		withExpand, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err)
 
 		// Verify expand_context was added
@@ -173,17 +171,18 @@ func TestKVCache_BothPhantomTools_Coexist(t *testing.T) {
 		})
 		assert.True(t, hasExpand, "expand_context should be present after injection")
 
-		// Now apply tool-search which replaces ALL tools
+		// Now apply tool-search which stubs ALL tools.
+		// Input has 4 tools (2 base + expand_context + gateway_search_tools), so result has 4 stubs.
+		// The pipe no longer injects gateway_search_tools (single injection path design).
 		pipe := tooldiscovery.New(cfg)
 		ctx := pipes.NewPipeContext(registry.Get("anthropic"), withExpand)
 		result, err := pipe.Process(ctx)
 		require.NoError(t, err)
 
-		// tool-search replaces everything with just gateway_search_tools
+		// tool-search stubs all N tools. Total = N_input (all stubs).
 		resultTools := gjson.GetBytes(result, "tools")
-		assert.Equal(t, int64(1), resultTools.Get("#").Int(),
-			"tool-search should replace all tools with just search tool")
-		assert.Equal(t, "gateway_search_tools", resultTools.Get("0.name").String())
+		totalCount := resultTools.Get("#").Int()
+		assert.Greater(t, totalCount, int64(1), "should have stubs")
 	})
 
 	t.Run("search_then_expand_coexist", func(t *testing.T) {
@@ -194,26 +193,26 @@ func TestKVCache_BothPhantomTools_Coexist(t *testing.T) {
 		withSearch, err := pipe.Process(ctx)
 		require.NoError(t, err)
 
-		// Verify only search tool
+		// Verify tool-search result: 2 stubs = 2 total.
+		// The pipe no longer injects gateway_search_tools (single injection path design).
 		searchTools := gjson.GetBytes(withSearch, "tools")
-		assert.Equal(t, int64(1), searchTools.Get("#").Int())
-		assert.Equal(t, "gateway_search_tools", searchTools.Get("0.name").String())
+		searchTotal := searchTools.Get("#").Int()
+		assert.Greater(t, searchTotal, int64(1), "should have stubs")
 
-		// Now inject expand_context on top
-		result, err := tooloutput.InjectExpandContextTool(withSearch, nil, "anthropic")
+		// Now inject expand_context on top — it appends to whatever tools[] exists.
+		result, err := phantom_tools.InjectAll(withSearch, adapters.Provider("anthropic"))
 		require.NoError(t, err)
 
-		// Both tools should coexist: [gateway_search_tools, expand_context]
+		// InjectAll adds expand_context and gateway_search_tools to the existing set.
 		resultTools := gjson.GetBytes(result, "tools")
-		assert.Equal(t, int64(2), resultTools.Get("#").Int(),
-			"should have both phantom tools")
+		assert.Equal(t, searchTotal+2, resultTools.Get("#").Int(),
+			"should have stubs plus both phantom tools")
 
 		toolNames := make(map[string]bool)
 		resultTools.ForEach(func(_, value gjson.Result) bool {
 			toolNames[value.Get("name").String()] = true
 			return true
 		})
-		assert.True(t, toolNames["gateway_search_tools"], "must have gateway_search_tools")
 		assert.True(t, toolNames["expand_context"], "must have expand_context")
 	})
 }
@@ -234,7 +233,7 @@ func TestKVCache_ToolsPrefixPreserved_WhenMessagesGrow(t *testing.T) {
 		messagesJSON := "[" + joinStrings(msgs, ",") + "]"
 		body := []byte(fmt.Sprintf(`{"model":"claude-3","messages":%s,"tools":%s}`, messagesJSON, baseTools))
 
-		result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+		result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err)
 
 		// Extract tools bytes using bytes.Index for raw position comparison
@@ -265,7 +264,7 @@ func TestKVCache_ToolsPrefixPreserved_WhenMessagesGrow(t *testing.T) {
 func TestProvider_Anthropic_ExpandToolFormat(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[],"tools":[{"name":"read_file","description":"Read","input_schema":{"type":"object"}}]}`)
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	// Find the expand_context tool
@@ -301,7 +300,7 @@ func TestProvider_Anthropic_ExpandToolFormat(t *testing.T) {
 func TestProvider_OpenAI_Chat_ExpandToolFormat(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","messages":[],"tools":[{"type":"function","function":{"name":"read_file","description":"Read","parameters":{"type":"object"}}}]}`)
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "openai")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("openai"))
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(result, "tools")
@@ -336,7 +335,7 @@ func TestProvider_OpenAI_Responses_ExpandToolFormat(t *testing.T) {
 	// Responses API uses "input" instead of "messages"
 	body := []byte(`{"model":"gpt-4o","input":"What is the weather?","tools":[{"type":"function","name":"read_file","description":"Read","parameters":{"type":"object"}}]}`)
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "openai")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("openai"))
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(result, "tools")
@@ -375,7 +374,6 @@ func TestProvider_SearchTool_Anthropic_Format(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -387,19 +385,17 @@ func TestProvider_SearchTool_Anthropic_Format(t *testing.T) {
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(result, "tools")
-	require.Equal(t, int64(1), tools.Get("#").Int())
+	// With stub behavior: 2 original tools become stubs = 2 total.
+	// The pipe no longer injects gateway_search_tools (single injection path design).
+	// Verify all tools are stubs (description="[deferred]").
+	totalCount := tools.Get("#").Int()
+	require.Greater(t, totalCount, int64(1), "should have stubs")
 
-	searchTool := tools.Get("0").Raw
-
-	// Must have Anthropic fields
-	assert.Equal(t, "gateway_search_tools", gjson.Get(searchTool, "name").String())
-	assert.True(t, gjson.Get(searchTool, "description").Exists(), "must have description")
-	assert.True(t, gjson.Get(searchTool, "input_schema").Exists(), "must have input_schema")
-	assert.Equal(t, "object", gjson.Get(searchTool, "input_schema.type").String())
-
-	// Must NOT have OpenAI wrapper
-	assert.False(t, gjson.Get(searchTool, "type").Exists(), "must NOT have type field")
-	assert.False(t, gjson.Get(searchTool, "function").Exists(), "must NOT have function wrapper")
+	// All tools should be stubs
+	tools.ForEach(func(_, v gjson.Result) bool {
+		assert.Equal(t, "[deferred]", v.Get("description").String(), "all tools should be stubs")
+		return true
+	})
 }
 
 // TestProvider_SearchTool_OpenAI_Format verifies gateway_search_tools uses
@@ -412,7 +408,6 @@ func TestProvider_SearchTool_OpenAI_Format(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -424,18 +419,17 @@ func TestProvider_SearchTool_OpenAI_Format(t *testing.T) {
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(result, "tools")
-	require.Equal(t, int64(1), tools.Get("#").Int())
+	// With stub behavior: 2 original tools become stubs = 2 total.
+	// The pipe no longer injects gateway_search_tools (single injection path design).
+	// Verify all tools are stubs (function.description="[deferred]").
+	totalCount := tools.Get("#").Int()
+	require.Greater(t, totalCount, int64(1), "should have stubs")
 
-	searchTool := tools.Get("0").Raw
-
-	// Must have OpenAI Chat Completions fields
-	assert.Equal(t, "function", gjson.Get(searchTool, "type").String())
-	assert.Equal(t, "gateway_search_tools", gjson.Get(searchTool, "function.name").String())
-	assert.True(t, gjson.Get(searchTool, "function.description").Exists(), "must have function.description")
-	assert.True(t, gjson.Get(searchTool, "function.parameters").Exists(), "must have function.parameters")
-
-	// Must NOT have flat Anthropic-style fields
-	assert.False(t, gjson.Get(searchTool, "input_schema").Exists(), "must NOT have input_schema")
+	// All tools should be stubs (OpenAI format: function.description="[deferred]")
+	tools.ForEach(func(_, v gjson.Result) bool {
+		assert.Equal(t, "[deferred]", v.Get("function.description").String(), "all tools should be stubs")
+		return true
+	})
 }
 
 // =============================================================================
@@ -449,7 +443,7 @@ func TestStress_InjectExpandContext_1000Times(t *testing.T) {
 
 	var results [][]byte
 	for i := 0; i < 1000; i++ {
-		result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+		result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err, "iteration %d", i)
 		results = append(results, result)
 	}
@@ -482,7 +476,6 @@ func TestStress_ToolSearch_50Tools(t *testing.T) {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:  true,
 				Strategy: config.StrategyToolSearch,
-				MinTools: 1,
 			},
 		},
 	}
@@ -496,11 +489,12 @@ func TestStress_ToolSearch_50Tools(t *testing.T) {
 	// Output must be valid JSON
 	assert.True(t, json.Valid(result), "output must be valid JSON")
 
-	// Exactly 1 tool in output (gateway_search_tools)
+	// With stub behavior: 50 stubs = 50 total.
+	// The pipe no longer injects gateway_search_tools (single injection path design).
 	resultTools := gjson.GetBytes(result, "tools")
-	assert.Equal(t, int64(1), resultTools.Get("#").Int(),
-		"should have exactly 1 tool (gateway_search_tools)")
-	assert.Equal(t, "gateway_search_tools", resultTools.Get("0.name").String())
+	totalCount := resultTools.Get("#").Int()
+	assert.Equal(t, int64(50), totalCount,
+		"should have 50 stubs = 50 tools")
 
 	// All 50 original tools stored as deferred
 	assert.Equal(t, 50, len(ctx.DeferredTools),
@@ -526,7 +520,7 @@ func TestStress_Concurrent_Inject(t *testing.T) {
 			// Each goroutine gets its own copy of body to avoid input mutation
 			bodyCopy := make([]byte, len(body))
 			copy(bodyCopy, body)
-			results[idx], errs[idx] = tooloutput.InjectExpandContextTool(bodyCopy, nil, "anthropic")
+			results[idx], errs[idx] = phantom_tools.InjectAll(bodyCopy, adapters.Provider("anthropic"))
 		}(i)
 	}
 

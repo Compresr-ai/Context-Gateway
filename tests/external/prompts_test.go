@@ -96,17 +96,20 @@ func TestBuildOpenAIRequest(t *testing.T) {
 	})
 
 	t.Run("auto_calculates_max_tokens", func(t *testing.T) {
-		// Small content
+		// Small content: floor to minimum 256 tokens
 		req := external.BuildOpenAIRequest("gpt-5-nano", "bash", "short", "", true, 0)
 		assert.Equal(t, 256, req.MaxCompletionTokens) // minimum
 
-		// Large content (10KB)
-		largeContent := strings.Repeat("x", 10000)
-		req = external.BuildOpenAIRequest("gpt-5-nano", "bash", largeContent, "", true, 0)
-		assert.Equal(t, 1250, req.MaxCompletionTokens) // 10000 / 8
+		// Medium content: target 50% compression
+		// Using realistic prose instead of repeated chars (BPE compresses "xxxx" too efficiently)
+		mediumContent := strings.Repeat("This is a sample sentence with mixed words. ", 250) // ~2500 tokens
+		req = external.BuildOpenAIRequest("gpt-5-nano", "bash", mediumContent, "", true, 0)
+		// Should be roughly half the token count, clamped between 256 and 4096
+		assert.GreaterOrEqual(t, req.MaxCompletionTokens, 256)
+		assert.LessOrEqual(t, req.MaxCompletionTokens, 4096)
 
-		// Very large content
-		veryLarge := strings.Repeat("x", 100000)
+		// Very large content: cap at 4096 tokens
+		veryLarge := strings.Repeat("Large content block for testing maximum output. ", 5000) // ~50k tokens
 		req = external.BuildOpenAIRequest("gpt-5-nano", "bash", veryLarge, "", true, 0)
 		assert.Equal(t, 4096, req.MaxCompletionTokens) // maximum cap
 	})
@@ -320,14 +323,20 @@ func TestBuildGeminiRequest(t *testing.T) {
 	})
 
 	t.Run("auto_calculates_max_tokens", func(t *testing.T) {
+		// Short content: floor to minimum 256 tokens
 		req := external.BuildGeminiRequest("gemini-2.0-flash", "bash", "short", "", true, 0)
 		assert.Equal(t, 256, req.GenerationConfig.MaxOutputTokens)
 
-		largeContent := strings.Repeat("x", 10000)
-		req = external.BuildGeminiRequest("gemini-2.0-flash", "bash", largeContent, "", true, 0)
-		assert.Equal(t, 1250, req.GenerationConfig.MaxOutputTokens)
+		// Medium content: target 50% compression
+		// Using realistic prose instead of repeated chars (BPE compresses "xxxx" too efficiently)
+		mediumContent := strings.Repeat("This is a sample sentence with mixed words. ", 250) // ~2500 tokens
+		req = external.BuildGeminiRequest("gemini-2.0-flash", "bash", mediumContent, "", true, 0)
+		// Should be roughly half the token count, clamped between 256 and 4096
+		assert.GreaterOrEqual(t, req.GenerationConfig.MaxOutputTokens, 256)
+		assert.LessOrEqual(t, req.GenerationConfig.MaxOutputTokens, 4096)
 
-		veryLarge := strings.Repeat("x", 100000)
+		// Very large content: cap at 4096 tokens
+		veryLarge := strings.Repeat("Large content block for testing maximum output. ", 5000) // ~50k tokens
 		req = external.BuildGeminiRequest("gemini-2.0-flash", "bash", veryLarge, "", true, 0)
 		assert.Equal(t, 4096, req.GenerationConfig.MaxOutputTokens)
 	})

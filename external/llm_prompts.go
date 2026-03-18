@@ -12,6 +12,8 @@ package external
 import (
 	"fmt"
 	"strings"
+
+	"github.com/compresr/context-gateway/internal/tokenizer"
 )
 
 // =============================================================================
@@ -124,14 +126,8 @@ func BuildOpenAIRequest(model, toolName, content, userQuery string, queryAgnosti
 
 	// Default max tokens based on content size
 	if maxTokens == 0 {
-		// Rough estimate: 1 token ≈ 4 chars, target 50% compression
-		maxTokens = len(content) / 8
-		if maxTokens < 256 {
-			maxTokens = 256
-		}
-		if maxTokens > 4096 {
-			maxTokens = 4096
-		}
+		// Target 50% compression: allow at most half the input token count as output
+		maxTokens = min(max(tokenizer.CountTokens(content)/2, 256), 4096)
 	}
 
 	return &OpenAIChatRequest{
@@ -159,14 +155,8 @@ func BuildAnthropicRequest(model, toolName, content, userQuery string, queryAgno
 
 	// Default max tokens based on content size
 	if maxTokens == 0 {
-		// Rough estimate: 1 token ≈ 4 chars, target 50% compression
-		maxTokens = len(content) / 8
-		if maxTokens < 256 {
-			maxTokens = 256
-		}
-		if maxTokens > 4096 {
-			maxTokens = 4096
-		}
+		// Target 50% compression: allow at most half the input token count as output
+		maxTokens = min(max(tokenizer.CountTokens(content)/2, 256), 4096)
 	}
 
 	return &AnthropicRequest{
@@ -193,13 +183,8 @@ func BuildGeminiRequest(model, toolName, content, userQuery string, queryAgnosti
 	}
 
 	if maxTokens == 0 {
-		maxTokens = len(content) / 8
-		if maxTokens < 256 {
-			maxTokens = 256
-		}
-		if maxTokens > 4096 {
-			maxTokens = 4096
-		}
+		// Target 50% compression: allow at most half the input token count as output
+		maxTokens = min(max(tokenizer.CountTokens(content)/2, 256), 4096)
 	}
 
 	return &GeminiRequest{

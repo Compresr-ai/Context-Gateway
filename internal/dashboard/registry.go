@@ -1,10 +1,4 @@
 // Instance registry for discovering all running gateway instances.
-//
-// DESIGN: Each gateway registers itself in a shared JSON file on startup
-// and deregisters on shutdown. The central dashboard reads this file to
-// discover all instances and poll their /monitor/api/sessions endpoints.
-//
-// File location: ~/.config/context-gateway/instances.json
 package dashboard
 
 import (
@@ -33,6 +27,9 @@ type Instance struct {
 	TTY         string    `json:"tty"`          // e.g. "/dev/ttys003"
 }
 
+// registryMu protects file operations across goroutines in the same process.
+var registryMu sync.Mutex
+
 // registryFile returns the path to the shared instances registry.
 func registryFile() string {
 	home, err := os.UserHomeDir()
@@ -56,19 +53,21 @@ func Register(port int, agentName, sessionDir string) {
 		TTY:         detectTTY(),
 	}
 
-	path := registryFile()
-	instances := readRegistry(path)
+	withFileLock(func() {
+		path := registryFile()
+		instances := readRegistryLocked(path)
 
-	// Remove stale entry for this port (if any)
-	filtered := make([]Instance, 0, len(instances))
-	for _, i := range instances {
-		if i.Port != port {
-			filtered = append(filtered, i)
+		// Remove stale entry for this port (if any)
+		filtered := make([]Instance, 0, len(instances))
+		for _, i := range instances {
+			if i.Port != port {
+				filtered = append(filtered, i)
+			}
 		}
-	}
-	filtered = append(filtered, inst)
+		filtered = append(filtered, inst)
 
-	writeRegistry(path, filtered)
+		writeRegistryLocked(path, filtered)
+	})
 	log.Debug().Int("port", port).Str("term", inst.TermProgram).Str("tty", inst.TTY).Msg("dashboard: registered instance")
 }
 
@@ -95,25 +94,42 @@ func detectTTY() string {
 
 // Deregister removes this gateway instance from the shared registry.
 func Deregister(port int) {
-	path := registryFile()
-	instances := readRegistry(path)
+	withFileLock(func() {
+		path := registryFile()
+		instances := readRegistryLocked(path)
 
-	filtered := make([]Instance, 0, len(instances))
-	for _, i := range instances {
-		if i.Port != port {
-			filtered = append(filtered, i)
+		filtered := make([]Instance, 0, len(instances))
+		for _, i := range instances {
+			if i.Port != port {
+				filtered = append(filtered, i)
+			}
 		}
-	}
 
-	writeRegistry(path, filtered)
+		writeRegistryLocked(path, filtered)
+	})
 	log.Debug().Int("port", port).Msg("dashboard: deregistered instance")
+}
+
+// ActiveCount returns the number of instances currently in the registry file.
+// Does not health-check — use DiscoverInstances for live checks.
+func ActiveCount() int {
+	var instances []Instance
+	withFileLock(func() {
+		instances = readRegistryLocked(registryFile())
+	})
+	return len(instances)
 }
 
 // DiscoverInstances reads the registry and returns all live instances.
 // It health-checks each one and removes dead entries.
 func DiscoverInstances() []Instance {
 	path := registryFile()
-	instances := readRegistry(path)
+
+	// Read registry under lock
+	var instances []Instance
+	withFileLock(func() {
+		instances = readRegistryLocked(path)
+	})
 
 	if len(instances) == 0 {
 		return nil
@@ -127,7 +143,7 @@ func DiscoverInstances() []Instance {
 	results := make(chan result, len(instances))
 	var wg sync.WaitGroup
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 	for _, inst := range instances {
 		wg.Add(1)
 		go func(i Instance) {
@@ -135,6 +151,9 @@ func DiscoverInstances() []Instance {
 			url := fmt.Sprintf("http://localhost:%d/health", i.Port)
 			resp, err := client.Get(url) // #nosec G107 -- localhost health check only
 			alive := err == nil && resp != nil && resp.StatusCode == http.StatusOK
+			if !alive {
+				log.Debug().Int("port", i.Port).Err(err).Msg("dashboard: health check failed for instance")
+			}
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
@@ -148,24 +167,46 @@ func DiscoverInstances() []Instance {
 	}()
 
 	var live []Instance
-	changed := false
+	var toRemove []int // ports of confirmed-dead instances to prune from registry
 	for r := range results {
 		if r.alive {
 			live = append(live, r.inst)
-		} else {
-			changed = true
+			continue
+		}
+		// Health check failed. Only remove from registry if the process PID is
+		// confirmed dead — this distinguishes crashed/stopped instances from
+		// transient network hiccups on a still-running gateway.
+		if !isPIDAlive(r.inst.PID) {
+			log.Debug().Int("port", r.inst.Port).Int("pid", r.inst.PID).
+				Msg("dashboard: removing dead instance from registry")
+			toRemove = append(toRemove, r.inst.Port)
 		}
 	}
 
-	// Clean up dead entries
-	if changed {
-		writeRegistry(path, live)
+	if len(toRemove) > 0 {
+		remove := make(map[int]bool, len(toRemove))
+		for _, p := range toRemove {
+			remove[p] = true
+		}
+		withFileLock(func() {
+			all := readRegistryLocked(path)
+			filtered := make([]Instance, 0, len(all))
+			for _, i := range all {
+				if !remove[i.Port] {
+					filtered = append(filtered, i)
+				}
+			}
+			writeRegistryLocked(path, filtered)
+		})
 	}
 
 	return live
 }
 
-func readRegistry(path string) []Instance {
+// isPIDAlive is defined in registry_unix.go (Unix) and registry_windows.go (Windows).
+
+// readRegistryLocked reads the registry file. Must be called with file lock held.
+func readRegistryLocked(path string) []Instance {
 	data, err := os.ReadFile(path) // #nosec G304 -- fixed config path
 	if err != nil {
 		return nil
@@ -179,23 +220,30 @@ func readRegistry(path string) []Instance {
 
 // RenameInstance updates the AgentName for the instance on the given port.
 func RenameInstance(port int, newName string) bool {
-	path := registryFile()
-	instances := readRegistry(path)
 	found := false
-	for i := range instances {
-		if instances[i].Port == port {
-			instances[i].AgentName = newName
-			found = true
-			break
+	withFileLock(func() {
+		path := registryFile()
+		instances := readRegistryLocked(path)
+		for i := range instances {
+			if instances[i].Port == port {
+				instances[i].AgentName = newName
+				found = true
+				break
+			}
 		}
-	}
-	if found {
-		writeRegistry(path, instances)
-	}
+		if found {
+			writeRegistryLocked(path, instances)
+		}
+	})
 	return found
 }
 
-func writeRegistry(path string, instances []Instance) {
+// writeRegistryLocked writes the registry file. Must be called with file lock held.
+func writeRegistryLocked(path string, instances []Instance) {
+	// Ensure we never write null - always write an empty array at minimum
+	if instances == nil {
+		instances = []Instance{}
+	}
 	data, err := json.MarshalIndent(instances, "", "  ")
 	if err != nil {
 		return

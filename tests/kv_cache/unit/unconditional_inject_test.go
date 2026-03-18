@@ -13,7 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
-	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
+	"github.com/compresr/context-gateway/internal/adapters"
+	phantom_tools "github.com/compresr/context-gateway/internal/phantom_tools"
 )
 
 // TestExpandContextInjected_EvenWithNilShadowRefs verifies injection happens
@@ -21,11 +22,11 @@ import (
 func TestExpandContextInjected_EvenWithNilShadowRefs(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[],"tools":[{"name":"read_file","description":"Read"}]}`)
 
-	result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(result, "tools")
-	assert.Equal(t, int64(2), tools.Get("#").Int(), "should have 2 tools (read_file + expand_context)")
+	assert.Equal(t, int64(3), tools.Get("#").Int(), "should have 3 tools (read_file + expand_context + gateway_search_tools)")
 	assert.Equal(t, "expand_context", tools.Get("1.name").String())
 }
 
@@ -33,9 +34,8 @@ func TestExpandContextInjected_EvenWithNilShadowRefs(t *testing.T) {
 // with empty (non-nil) shadow refs map.
 func TestExpandContextInjected_EvenWithEmptyShadowRefs(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[],"tools":[{"name":"read_file","description":"Read"}]}`)
-	shadowRefs := map[string]string{}
 
-	result, err := tooloutput.InjectExpandContextTool(body, shadowRefs, "anthropic")
+	result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	assert.Contains(t, string(result), "expand_context")
@@ -48,12 +48,11 @@ func TestExpandContextInjected_StableAcrossTurns(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[],"tools":[{"name":"read_file","description":"Read a file","input_schema":{"type":"object"}}]}`)
 
 	// Turn 1: no shadow refs (no compression happened yet)
-	turn1Result, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	turn1Result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
-	// Turn 2: has shadow refs (compression happened)
-	shadowRefs := map[string]string{"shadow_abc": "original content"}
-	turn2Result, err := tooloutput.InjectExpandContextTool(body, shadowRefs, "anthropic")
+	// Turn 2: shadow refs existed (compression happened) — InjectAll is agnostic to this
+	turn2Result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	// The tools[] portion must be byte-identical
@@ -84,8 +83,8 @@ func TestExpandContextInjected_StableAcrossMultipleTurns(t *testing.T) {
 	}
 
 	var allToolsRaw []string
-	for _, refs := range shadowRefVariants {
-		result, err := tooloutput.InjectExpandContextTool(body, refs, "anthropic")
+	for range shadowRefVariants {
+		result, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 		require.NoError(t, err)
 		allToolsRaw = append(allToolsRaw, gjson.GetBytes(result, "tools").Raw)
 	}
@@ -103,14 +102,14 @@ func TestExpandContextInjected_DeduplicationStillWorks(t *testing.T) {
 	body := []byte(`{"model":"claude-3","messages":[],"tools":[{"name":"read_file","description":"Read"}]}`)
 
 	// First injection
-	result1, err := tooloutput.InjectExpandContextTool(body, nil, "anthropic")
+	result1, err := phantom_tools.InjectAll(body, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
 	// Second injection on already-injected body
-	result2, err := tooloutput.InjectExpandContextTool(result1, nil, "anthropic")
+	result2, err := phantom_tools.InjectAll(result1, adapters.Provider("anthropic"))
 	require.NoError(t, err)
 
-	// Should still have exactly 2 tools (not 3)
+	// Should still have exactly 3 tools (not 4 or 5)
 	tools := gjson.GetBytes(result2, "tools")
-	assert.Equal(t, int64(2), tools.Get("#").Int(), "deduplication must prevent double injection")
+	assert.Equal(t, int64(3), tools.Get("#").Int(), "deduplication must prevent double injection")
 }

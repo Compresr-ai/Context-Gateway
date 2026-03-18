@@ -9,9 +9,7 @@ import (
 	"github.com/compresr/context-gateway/internal/config"
 )
 
-// =============================================================================
 // PROVIDER DEFINITIONS
-// =============================================================================
 
 // ProviderInfo contains information about a supported LLM provider.
 type ProviderInfo struct {
@@ -107,9 +105,7 @@ func loadProviders() []ProviderInfo {
 	return DefaultProviders
 }
 
-// =============================================================================
 // COMPRESR API MODELS
-// =============================================================================
 
 // CompresrModelInfo contains information about a Compresr API model.
 type CompresrModelInfo struct {

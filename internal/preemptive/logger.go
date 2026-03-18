@@ -22,22 +22,22 @@ type CompactionLogger struct {
 
 // CompactionEvent represents a log entry.
 type CompactionEvent struct {
-	Timestamp          string                 `json:"timestamp"`
-	Event              string                 `json:"event"`
-	SessionID          string                 `json:"session_id,omitempty"`
-	Model              string                 `json:"model,omitempty"`
-	DetectedBy         string                 `json:"detected_by,omitempty"`
-	Confidence         float64                `json:"confidence,omitempty"`
-	UsagePercent       float64                `json:"usage_percent,omitempty"`
-	Threshold          float64                `json:"threshold,omitempty"`
-	WasPrecomputed     bool                   `json:"was_precomputed,omitempty"`
-	MessagesSummarized int                    `json:"messages_summarized,omitempty"`
-	SummaryTokens      int                    `json:"summary_tokens,omitempty"`
-	DurationMs         int64                  `json:"duration_ms,omitempty"`
-	Error              string                 `json:"error,omitempty"`
-	Details            map[string]interface{} `json:"details,omitempty"`
-	OriginalContent    string                 `json:"original_content,omitempty"`
-	CompressedContent  string                 `json:"compressed_content,omitempty"`
+	Timestamp          string         `json:"timestamp"`
+	Event              string         `json:"event"`
+	SessionID          string         `json:"session_id,omitempty"`
+	Model              string         `json:"model,omitempty"`
+	DetectedBy         string         `json:"detected_by,omitempty"`
+	Confidence         float64        `json:"confidence,omitempty"`
+	UsagePercent       float64        `json:"usage_percent,omitempty"`
+	Threshold          float64        `json:"threshold,omitempty"`
+	WasPrecomputed     bool           `json:"was_precomputed,omitempty"`
+	MessagesSummarized int            `json:"messages_summarized,omitempty"`
+	SummaryTokens      int            `json:"summary_tokens,omitempty"`
+	DurationMs         int64          `json:"duration_ms,omitempty"`
+	Error              string         `json:"error,omitempty"`
+	Details            map[string]any `json:"details,omitempty"`
+	OriginalContent    string         `json:"original_content,omitempty"`
+	CompressedContent  string         `json:"compressed_content,omitempty"`
 }
 
 var (
@@ -74,7 +74,7 @@ func InitCompactionLoggerWithPath(logPath string) error {
 		}
 
 		compactionLogger = &CompactionLogger{file: file, path: path, enabled: true}
-		compactionLogger.Log(CompactionEvent{Event: "logger_initialized", Details: map[string]interface{}{"path": path}})
+		compactionLogger.Log(CompactionEvent{Event: "logger_initialized", Details: map[string]any{"path": path}})
 	})
 	return initErr
 }
@@ -84,7 +84,7 @@ func LogSessionConfig(configName, configSource string, summarizerProvider, summa
 	if l := GetCompactionLogger(); l != nil {
 		l.Log(CompactionEvent{
 			Event: "session_config",
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"config_name":         configName,
 				"config_source":       configSource,
 				"summarizer_provider": summarizerProvider,
@@ -123,7 +123,7 @@ func (cl *CompactionLogger) LogPreemptiveTrigger(sessionID, model string, msgCou
 		Model:        model,
 		UsagePercent: usage,
 		Threshold:    threshold,
-		Details: map[string]interface{}{
+		Details: map[string]any{
 			"message_count":       msgCount,
 			"summarizer_provider": summarizerProvider,
 			"summarizer_model":    summarizerModel,
@@ -140,7 +140,7 @@ func (cl *CompactionLogger) LogPreemptiveComplete(sessionID, model string, msgsS
 		MessagesSummarized: msgsSummarized,
 		SummaryTokens:      tokens,
 		DurationMs:         duration.Milliseconds(),
-		Details: map[string]interface{}{
+		Details: map[string]any{
 			"summarizer_provider": summarizerProvider,
 			"summarizer_model":    summarizerModel,
 		},
@@ -161,9 +161,9 @@ func (cl *CompactionLogger) LogCompactionDetected(sessionID, model, detectedBy s
 }
 
 // LogCompactionApplied logs when compaction is applied.
-func (cl *CompactionLogger) LogCompactionApplied(sessionID, model string, precomputed bool, msgsSummarized, tokens, size int, details map[string]interface{}, compressedContent string) {
+func (cl *CompactionLogger) LogCompactionApplied(sessionID, model string, precomputed bool, msgsSummarized, tokens, size int, details map[string]any, compressedContent string) {
 	if details == nil {
-		details = make(map[string]interface{})
+		details = make(map[string]any)
 	}
 	details["compacted_body_size"] = size
 	cl.Log(CompactionEvent{
@@ -184,12 +184,12 @@ func (cl *CompactionLogger) LogCompactionFallback(sessionID, model, reason strin
 		Event:     "compaction_fallback",
 		SessionID: sessionID,
 		Model:     model,
-		Details:   map[string]interface{}{"reason": reason},
+		Details:   map[string]any{"reason": reason},
 	})
 }
 
 // LogError logs an error.
-func (cl *CompactionLogger) LogError(sessionID, event string, err error, details map[string]interface{}) {
+func (cl *CompactionLogger) LogError(sessionID, event string, err error, details map[string]any) {
 	cl.Log(CompactionEvent{
 		Event:     event + "_error",
 		SessionID: sessionID,
@@ -199,9 +199,9 @@ func (cl *CompactionLogger) LogError(sessionID, event string, err error, details
 }
 
 // LogSkip logs when summarization is skipped (not an error, just not enough content).
-func (cl *CompactionLogger) LogSkip(sessionID, event, reason string, details map[string]interface{}) {
+func (cl *CompactionLogger) LogSkip(sessionID, event, reason string, details map[string]any) {
 	if details == nil {
-		details = make(map[string]interface{})
+		details = make(map[string]any)
 	}
 	details["reason"] = reason
 	cl.Log(CompactionEvent{
@@ -212,7 +212,7 @@ func (cl *CompactionLogger) LogSkip(sessionID, event, reason string, details map
 }
 
 // LogEvent logs a generic event.
-func (cl *CompactionLogger) LogEvent(event, sessionID, model string, err error, details map[string]interface{}) {
+func (cl *CompactionLogger) LogEvent(event, sessionID, model string, err error, details map[string]any) {
 	evt := CompactionEvent{Event: event, SessionID: sessionID, Model: model, Details: details}
 	if err != nil {
 		evt.Error = err.Error()

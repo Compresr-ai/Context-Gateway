@@ -1,12 +1,4 @@
 // Provider configuration for LLM services.
-//
-// DESIGN: Define providers once, reference everywhere.
-// Endpoints are auto-resolved from provider name + model.
-//
-// Supported providers:
-//   - anthropic: api.anthropic.com/v1/messages
-//   - gemini:    generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-//   - openai:    api.openai.com/v1/chat/completions
 package config
 
 import (

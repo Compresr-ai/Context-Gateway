@@ -53,6 +53,10 @@ func (t *Tracker) Close() {
 
 // CheckBudget checks whether a session can continue.
 // Enforces both per-session cap and global cap when Enabled.
+// Note: budget is checked before the request and cost is recorded after,
+// so a single request can overshoot the cap. This is inherent to pre-check
+// architecture and acceptable — the alternative (holding requests or estimating
+// cost up front) is complex and doesn't justify the marginal benefit.
 func (t *Tracker) CheckBudget(sessionID string) BudgetCheckResult {
 	sessionCap, globalCap := t.effectiveCaps()
 
@@ -186,18 +190,9 @@ func (t *Tracker) Config() CostControlConfig {
 	return cfg
 }
 
-// effectiveCaps returns normalized session/global caps.
-// Backward compatibility: historical wizard-generated configs stored "spend cap"
-// in session_cap even though users expected an aggregate cap. If global_cap is
-// unset and session_cap is set, treat it as a global cap.
+// effectiveCaps returns the configured session and global caps as-is.
 func (t *Tracker) effectiveCaps() (sessionCap, globalCap float64) {
-	sessionCap = t.config.SessionCap
-	globalCap = t.config.GlobalCap
-	if globalCap <= 0 && sessionCap > 0 {
-		globalCap = sessionCap
-		sessionCap = 0
-	}
-	return sessionCap, globalCap
+	return t.config.SessionCap, t.config.GlobalCap
 }
 
 func (t *Tracker) getOrCreateLocked(sessionID, model string) *CostSession {
@@ -225,8 +220,8 @@ func (t *Tracker) cleanup() {
 			now := time.Now()
 			for id, s := range t.sessions {
 				if now.Sub(s.LastUpdated) > sessionTTL {
-					costNano := int64(s.Cost * 1e9)
-					atomic.AddInt64(&t.globalCostNano, -costNano)
+					// Note: globalCostNano is NOT decremented — global cap is absolute
+					// for the gateway's lifetime. Use ResetGlobalCost() for explicit resets.
 					delete(t.sessions, id)
 				}
 			}

@@ -100,9 +100,9 @@ func passthroughConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "error",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }
@@ -111,8 +111,8 @@ func compressionConfig() *config.Config {
 	cfg := passthroughConfig()
 	cfg.Pipes.ToolOutput.Enabled = true
 	cfg.Pipes.ToolOutput.Strategy = "simple"
-	cfg.Pipes.ToolOutput.MinBytes = 100
-	cfg.Pipes.ToolOutput.MaxBytes = 65536
+	cfg.Pipes.ToolOutput.MinTokens = 25
+	cfg.Pipes.ToolOutput.MaxTokens = 16384
 	cfg.Pipes.ToolOutput.TargetCompressionRatio = 0.3
 	cfg.Pipes.ToolOutput.IncludeExpandHint = true
 	cfg.Pipes.ToolOutput.EnableExpandContext = true

@@ -1,17 +1,10 @@
 // Preemptive summarization configuration re-exports.
-//
-// DESIGN: Preemptive config is defined in internal/preemptive/types.go.
-// This file re-exports those types for use by the main Config struct.
 package config
 
 import "github.com/compresr/context-gateway/internal/preemptive"
 
 // CodexDetectorConfig is an alias for preemptive.CodexDetectorConfig.
 type CodexDetectorConfig = preemptive.CodexDetectorConfig
-
-// =============================================================================
-// RE-EXPORTS FROM preemptive PACKAGE
-// =============================================================================
 
 // PreemptiveConfig is an alias for preemptive.Config for use in main Config struct.
 type PreemptiveConfig = preemptive.Config

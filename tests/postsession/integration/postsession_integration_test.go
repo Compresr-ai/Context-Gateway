@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 	"github.com/compresr/context-gateway/internal/postsession"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,10 +30,10 @@ func TestIntegration_PostSession_CollectorCreated(t *testing.T) {
 	assert.Empty(t, sessionLog, "session log should be empty before any events")
 
 	// Auth should be empty
-	token, isXAPIKey, endpoint := collector.GetAuth()
-	assert.Empty(t, token, "auth token should be empty")
-	assert.False(t, isXAPIKey, "isXAPIKey should be false")
-	assert.Empty(t, endpoint, "auth endpoint should be empty")
+	auth := collector.GetAuth()
+	assert.Empty(t, auth.Token, "auth token should be empty")
+	assert.False(t, auth.IsXAPIKey, "isXAPIKey should be false")
+	assert.Empty(t, auth.Endpoint, "auth endpoint should be empty")
 }
 
 // TestIntegration_PostSession_DataCollected verifies that recording
@@ -68,7 +69,11 @@ func TestIntegration_PostSession_DataCollected(t *testing.T) {
 	collector.RecordAssistantContent("I've updated the configuration file as requested.")
 
 	// Capture auth credentials
-	collector.CaptureAuth("sk-ant-test-key-123", true, "https://api.anthropic.com/v1/messages")
+	collector.CaptureAuth(authtypes.CapturedAuth{
+		Token:     "sk-ant-test-key-123",
+		IsXAPIKey: true,
+		Endpoint:  "https://api.anthropic.com/v1/messages",
+	})
 
 	// Build the session log and verify contents
 	sessionLog := collector.BuildSessionLog()
@@ -93,10 +98,10 @@ func TestIntegration_PostSession_DataCollected(t *testing.T) {
 	assert.Contains(t, sessionLog, "compaction", "timeline should contain compaction events")
 
 	// Verify auth was captured
-	token, isXAPIKey, endpoint := collector.GetAuth()
-	assert.Equal(t, "sk-ant-test-key-123", token)
-	assert.True(t, isXAPIKey)
-	assert.Equal(t, "https://api.anthropic.com/v1/messages", endpoint)
+	auth := collector.GetAuth()
+	assert.Equal(t, "sk-ant-test-key-123", auth.Token)
+	assert.True(t, auth.IsXAPIKey)
+	assert.Equal(t, "https://api.anthropic.com/v1/messages", auth.Endpoint)
 }
 
 // TestIntegration_PostSession_CleanupOnShutdown verifies that the
@@ -133,7 +138,7 @@ func TestIntegration_PostSession_CleanupOnShutdown(t *testing.T) {
 	result, err := updater.Update(
 		context.Background(),
 		collector,
-		"sk-ant-test", true, "https://api.anthropic.com/v1/messages",
+		authtypes.CapturedAuth{Token: "sk-ant-test", IsXAPIKey: true, Endpoint: "https://api.anthropic.com/v1/messages"},
 	)
 	require.NoError(t, err, "disabled updater should not error")
 	require.NotNil(t, result)

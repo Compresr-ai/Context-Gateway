@@ -3,7 +3,7 @@ export interface Session {
   cost: number
   cap: number
   request_count: number
-  model: string
+  models: string[]
   created_at: string
   last_updated: string
   gateway_port?: number
@@ -21,6 +21,9 @@ export interface Savings {
   original_cost_usd: number
   compressed_cost_usd: number
   compression_ratio: number
+  user_turns?: number
+  compaction_triggers?: number
+  tool_search_calls?: number
   // Tool discovery
   tool_discovery_requests?: number
   original_tool_count?: number
@@ -62,6 +65,42 @@ export interface SearchContext {
   recent?: SearchEntry[]
 }
 
+export interface SearchLogEntry {
+  event_type: string
+  timestamp: string
+  request_id: string
+  session_id?: string
+  query: string
+  deferred_count: number
+  results_count: number
+  tools_provided: string[]
+  // Stage 1 (tool selection)
+  stage1_original_tokens?: number
+  stage1_compressed_tokens?: number
+  stage1_compression_ratio?: number
+  // Stage 2 (tool description compression)
+  stage2_original_tokens?: number
+  stage2_compressed_tokens?: number
+  stage2_compression_ratio?: number
+  stage2_strategy?: string
+  // End-to-end
+  end_to_end_original_tokens?: number
+  end_to_end_compression_ratio?: number
+}
+
+export interface InitAgentToolsEntry {
+  event_type: 'init_agent_tools'
+  timestamp: string
+  request_id: string
+  session_id?: string
+  tool_count: number
+  stub_count: number
+  tool_names: string[]
+  original_tokens: number
+  compressed_tokens: number
+  compression_ratio: number
+}
+
 export interface GatewayStats {
   uptime: string
   total_requests: number
@@ -72,13 +111,14 @@ export interface GatewayStats {
 }
 
 export interface DashboardData {
-  sessions: Session[] | null
+  sessions: Session[]
   total_cost: number
   total_requests: number
   session_cap: number
   global_cap: number
   enabled: boolean
   savings?: Savings
+  global_savings?: Savings
   expand?: ExpandContext
   search?: SearchContext
   gateway?: GatewayStats
@@ -104,6 +144,7 @@ export interface PromptEntry {
   model: string
   provider: string
   request_id: string
+  agent_name?: string
 }
 
 export interface FilterOptions {
@@ -157,16 +198,17 @@ export interface GatewayConfig {
     tool_output: {
       enabled: boolean
       strategy: string
-      min_bytes: number
+      min_tokens: number
       target_compression_ratio: number
     }
     tool_discovery: {
       enabled: boolean
       strategy: string
-      min_tools: number
-      max_tools: number
-      target_ratio: number
-      search_fallback: boolean
+      token_threshold: number
+      enable_tool_description_compression: boolean
+      search_result_compression: {
+        enabled: boolean
+      }
     }
   }
   cost_control: {

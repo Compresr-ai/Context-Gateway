@@ -1,11 +1,4 @@
-// Package monitoring - metrics.go provides simple counters.
-//
-// DESIGN: Lightweight in-memory counters for operational metrics:
-//   - requests/successes: Total and successful request counts
-//   - compressions:       Number of compression operations
-//   - cache_hits/misses:  Shadow context cache performance
-//
-// For production, export these to Prometheus or similar.
+// Package monitoring - metrics.go provides simple in-memory counters.
 package monitoring
 
 import (
@@ -17,6 +10,7 @@ import (
 type MetricsCollector struct {
 	requests     atomic.Int64
 	successes    atomic.Int64
+	userTurns    atomic.Int64 // New user prompts (human typed, not tool loops/subagents)
 	compressions atomic.Int64
 	cacheHits    atomic.Int64
 	cacheMisses  atomic.Int64
@@ -35,6 +29,9 @@ func (mc *MetricsCollector) RecordRequest(success bool, _ time.Duration) {
 	}
 }
 
+// RecordUserTurn records a new human-initiated prompt (not a tool loop or subagent).
+func (mc *MetricsCollector) RecordUserTurn() { mc.userTurns.Add(1) }
+
 // RecordCompression records a compression operation.
 func (mc *MetricsCollector) RecordCompression(_, _ int, _ bool) {
 	mc.compressions.Add(1)
@@ -51,6 +48,7 @@ func (mc *MetricsCollector) Stats() map[string]int64 {
 	return map[string]int64{
 		"requests":     mc.requests.Load(),
 		"successes":    mc.successes.Load(),
+		"user_turns":   mc.userTurns.Load(),
 		"compressions": mc.compressions.Load(),
 		"cache_hits":   mc.cacheHits.Load(),
 		"cache_misses": mc.cacheMisses.Load(),
@@ -61,6 +59,7 @@ func (mc *MetricsCollector) Stats() map[string]int64 {
 func (mc *MetricsCollector) Reset() {
 	mc.requests.Store(0)
 	mc.successes.Store(0)
+	mc.userTurns.Store(0)
 	mc.compressions.Store(0)
 	mc.cacheHits.Store(0)
 	mc.cacheMisses.Store(0)

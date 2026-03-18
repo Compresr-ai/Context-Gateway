@@ -1,22 +1,22 @@
-// Package monitoring - telemetry.go records events to JSONL files.
-//
-// DESIGN: Tracker writes structured events as JSONL (one JSON object per line):
-//   - RequestEvent:         Every request through the gateway
-//   - ExpandEvent:          Each expand_context call
-//   - CompressionComparison: Original vs compressed content (debug mode)
-//
-// Events are appended to files immediately after each event for real-time logging.
+// Package monitoring - telemetry.go records gateway events as JSONL files.
 package monitoring
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 )
+
+// bufPool is a package-level pool of *bytes.Buffer reused across JSONL write calls
+// to reduce allocations on the hot write path.
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 // Tracker handles telemetry event recording to file and stdout.
 type Tracker struct {
@@ -24,41 +24,49 @@ type Tracker struct {
 	requestLogPath       string
 	compressionLogPath   string
 	toolDiscoveryLogPath string
-	initLogPath          string
+	taskOutputLogPath    string // unified task output compression log
+	sessionToolsPath     string // path for session_tools.json (pretty-printed catalog)
+	requestLogFile       *os.File
+	compressionLogFile   *os.File
+	toolDiscoveryLogFile *os.File
+	taskOutputLogFile    *os.File
 	requestCount         int
 	compressionCount     int
 	toolDiscoveryCount   int
-	mu                   sync.Mutex
+	taskOutputCount      int
+	seenSessionTools     map[string]map[string]bool // sessionID → tool names already in session_tools.json
+	statsTracker         *SessionStatsTracker       // live session_stats.json writer
+	expandCallsLogger    *ExpandCallsLogger         // expand_context_calls.jsonl writer
+	// Per-file mutexes allow concurrent writes to different log files (P7).
+	muRequest       sync.Mutex // guards requestLogFile
+	muCompression   sync.Mutex // guards compressionLogFile
+	muToolDiscovery sync.Mutex // guards toolDiscoveryLogFile
+	muTaskOutput    sync.Mutex // guards taskOutputLogFile
+	muSessionTools  sync.Mutex // guards seenSessionTools + sessionToolsPath
 }
 
 // NewTracker creates a new telemetry tracker.
 func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 	t := &Tracker{
-		config: cfg,
+		config:           cfg,
+		seenSessionTools: make(map[string]map[string]bool),
 	}
 
 	if !cfg.Enabled {
 		return t, nil
 	}
 
-	// Store paths and ensure directories exist, create empty files
+	// Store paths and open persistent file handles
 	if cfg.LogPath != "" {
 		if err := os.MkdirAll(filepath.Dir(cfg.LogPath), 0750); err != nil {
 			return nil, err
 		}
 		t.requestLogPath = cfg.LogPath
-		t.initLogPath = filepath.Join(filepath.Dir(cfg.LogPath), "init.jsonl")
-		// Create empty file if it doesn't exist
-		if _, err := os.Stat(cfg.LogPath); os.IsNotExist(err) {
-			if f, err := os.OpenFile(cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
-				_ = f.Close()
-			}
+		f, err := os.OpenFile(cfg.LogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("open request log: %w", err)
 		}
-		if _, err := os.Stat(t.initLogPath); os.IsNotExist(err) {
-			if f, err := os.OpenFile(t.initLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
-				_ = f.Close()
-			}
-		}
+		t.requestLogFile = f
 	}
 
 	if cfg.CompressionLogPath != "" {
@@ -66,12 +74,11 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 			return nil, err
 		}
 		t.compressionLogPath = cfg.CompressionLogPath
-		// Create empty file if it doesn't exist
-		if _, err := os.Stat(cfg.CompressionLogPath); os.IsNotExist(err) {
-			if f, err := os.OpenFile(cfg.CompressionLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
-				_ = f.Close()
-			}
+		f, err := os.OpenFile(cfg.CompressionLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("open compression log: %w", err)
 		}
+		t.compressionLogFile = f
 	}
 
 	if cfg.ToolDiscoveryLogPath != "" {
@@ -79,43 +86,75 @@ func NewTracker(cfg TelemetryConfig) (*Tracker, error) {
 			return nil, err
 		}
 		t.toolDiscoveryLogPath = cfg.ToolDiscoveryLogPath
-		// Create empty file if it doesn't exist
-		if _, err := os.Stat(cfg.ToolDiscoveryLogPath); os.IsNotExist(err) {
-			if f, err := os.OpenFile(cfg.ToolDiscoveryLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
-				_ = f.Close()
-			}
+		f, err := os.OpenFile(cfg.ToolDiscoveryLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("open tool discovery log: %w", err)
 		}
+		t.toolDiscoveryLogFile = f
+	}
+
+	// Task output unified compression log: {base}_compression.jsonl
+	if cfg.TaskOutputLogPath != "" {
+		taskOutputCompLog := filepath.Clean(strings.TrimSuffix(cfg.TaskOutputLogPath, ".jsonl") + "_compression.jsonl")
+		if err := os.MkdirAll(filepath.Dir(taskOutputCompLog), 0750); err != nil {
+			return nil, err
+		}
+		t.taskOutputLogPath = taskOutputCompLog
+		f, err := os.OpenFile(taskOutputCompLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- path is from config, cleaned with filepath.Clean
+		if err != nil {
+			return nil, fmt.Errorf("open task output log: %w", err)
+		}
+		t.taskOutputLogFile = f
+	}
+
+	if cfg.SessionToolsPath != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.SessionToolsPath), 0750); err != nil {
+			return nil, err
+		}
+		t.sessionToolsPath = cfg.SessionToolsPath
+	}
+
+	if cfg.SessionStatsPath != "" {
+		t.statsTracker = NewSessionStatsTracker(cfg.SessionStatsPath, 3*time.Second)
+		t.statsTracker.Start()
+	}
+
+	if cfg.ExpandContextCallsPath != "" {
+		el, err := NewExpandCallsLogger(cfg.ExpandContextCallsPath)
+		if err != nil {
+			return nil, fmt.Errorf("open expand_context_calls log: %w", err)
+		}
+		t.expandCallsLogger = el
 	}
 
 	return t, nil
 }
 
-// appendJSONL appends a single JSON object as a line to the file.
-func appendJSONL(path string, event any) error {
-	data, err := json.Marshal(event)
-	if err != nil {
+// writeJSONL writes a single JSON object as a line to an open file handle.
+// Uses bufPool to reuse buffer allocations on the hot write path.
+func writeJSONL(f *os.File, event any) error {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	if err := json.NewEncoder(buf).Encode(event); err != nil {
+		bufPool.Put(buf)
 		return err
 	}
-	data = append(data, '\n')
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- user-configured telemetry path
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	_, err = f.Write(data)
+	_, err := f.Write(buf.Bytes())
+	bufPool.Put(buf)
 	return err
 }
 
 // RecordRequest records a request event.
 func (t *Tracker) RecordRequest(event *RequestEvent) {
+	// Stats are independent of telemetry enabled flag — update always.
+	t.statsTracker.RecordRequest(event)
+
 	if !t.config.Enabled {
 		return
 	}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	t.muRequest.Lock()
+	defer t.muRequest.Unlock()
 
 	// Log summary to stdout if enabled
 	if t.config.LogToStdout {
@@ -132,26 +171,12 @@ func (t *Tracker) RecordRequest(event *RequestEvent) {
 	}
 
 	// Append to JSONL file
-	if t.requestLogPath != "" {
-		if err := appendJSONL(t.requestLogPath, event); err != nil {
+	if t.requestLogFile != nil {
+		if err := writeJSONL(t.requestLogFile, event); err != nil {
 			log.Error().Err(err).Str("path", t.requestLogPath).Msg("telemetry: failed to write request event")
 		} else {
 			t.requestCount++
 		}
-	}
-}
-
-// RecordInit records a gateway initialization event to a dedicated init JSONL.
-func (t *Tracker) RecordInit(event *InitEvent) {
-	if !t.config.Enabled || t.initLogPath == "" || event == nil {
-		return
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if err := appendJSONL(t.initLogPath, event); err != nil {
-		log.Error().Err(err).Str("path", t.initLogPath).Msg("telemetry: failed to write init event")
 	}
 }
 
@@ -161,12 +186,12 @@ func (t *Tracker) RecordExpand(event *ExpandEvent) {
 		return
 	}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	t.muRequest.Lock()
+	defer t.muRequest.Unlock()
 
 	// Append to JSONL file
-	if t.requestLogPath != "" {
-		if err := appendJSONL(t.requestLogPath, event); err != nil {
+	if t.requestLogFile != nil {
+		if err := writeJSONL(t.requestLogFile, event); err != nil {
 			log.Error().Err(err).Str("path", t.requestLogPath).Msg("telemetry: failed to write expand event")
 		} else {
 			t.requestCount++
@@ -184,43 +209,245 @@ func (t *Tracker) ToolDiscoveryLogEnabled() bool {
 	return t.config.Enabled && t.toolDiscoveryLogPath != ""
 }
 
-// LogCompressionComparison logs a compression comparison for debugging.
-func (t *Tracker) LogCompressionComparison(comparison CompressionComparison) {
+// now returns the current UTC timestamp in RFC3339 format.
+func now() string { return time.Now().UTC().Format(time.RFC3339) }
+
+// LogCompressionComparison logs a tool-output compression event to tool_output_compression.jsonl.
+// Converts the internal CompressionComparison to a typed ToolOutputEntry before writing.
+func (t *Tracker) LogCompressionComparison(c CompressionComparison) {
+	// Stats are independent of JSONL file config — update always.
+	t.statsTracker.RecordToolOutput(c.Status, c.OriginalTokens, c.CompressedTokens, c.CacheHit)
+
 	if !t.CompressionLogEnabled() {
 		return
 	}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	ts := c.Timestamp
+	if ts == "" {
+		ts = now()
+	}
+	entry := ToolOutputEntry{
+		LogEntryBase:      LogEntryBase{RequestID: c.RequestID, EventType: c.EventType, SessionID: c.SessionID, Timestamp: ts},
+		IsMainAgent:       c.IsMainAgent,
+		ProviderModel:     c.ProviderModel,
+		ToolName:          c.ToolName,
+		ShadowID:          c.ShadowID,
+		StepID:            c.StepID,
+		OriginalTokens:    c.OriginalTokens,
+		CompressedTokens:  c.CompressedTokens,
+		CompressionRatio:  c.CompressionRatio,
+		CacheHit:          c.CacheHit,
+		IsLastTool:        c.IsLastTool,
+		Status:            c.Status,
+		MinThreshold:      c.MinThreshold,
+		MaxThreshold:      c.MaxThreshold,
+		CompressionModel:  c.CompressionModel,
+		Query:             c.Query,
+		QueryAgnostic:     c.QueryAgnostic,
+		OriginalContent:   c.OriginalContent,
+		CompressedContent: c.CompressedContent,
+	}
 
-	// Append to JSONL file
-	if err := appendJSONL(t.compressionLogPath, comparison); err != nil {
+	t.muCompression.Lock()
+	defer t.muCompression.Unlock()
+
+	if t.compressionLogFile == nil {
+		return
+	}
+	if err := writeJSONL(t.compressionLogFile, entry); err != nil {
 		log.Error().Err(err).Str("path", t.compressionLogPath).Msg("telemetry: failed to write compression event")
 	} else {
 		t.compressionCount++
 	}
 }
 
-// LogToolDiscoveryComparison logs a tool discovery comparison to a dedicated log.
-func (t *Tracker) LogToolDiscoveryComparison(comparison CompressionComparison) {
-	if !t.ToolDiscoveryLogEnabled() {
+// writeToolDiscovery is the single centralized write point for all tool_discovery.jsonl entries.
+// Caller must not hold t.mu. Sets t.toolDiscoveryCount and handles errors.
+func (t *Tracker) writeToolDiscovery(entry any) {
+	t.muToolDiscovery.Lock()
+	defer t.muToolDiscovery.Unlock()
+	if t.toolDiscoveryLogFile == nil {
 		return
 	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if err := appendJSONL(t.toolDiscoveryLogPath, comparison); err != nil {
+	if err := writeJSONL(t.toolDiscoveryLogFile, entry); err != nil {
 		log.Error().Err(err).Str("path", t.toolDiscoveryLogPath).Msg("telemetry: failed to write tool discovery event")
 	} else {
 		t.toolDiscoveryCount++
 	}
 }
 
-// Close is kept for interface compatibility.
+// LogLazyLoading logs a lazy-loading tool-filtering event to tool_discovery.jsonl.
+// Converts the internal CompressionComparison to a typed LazyLoadingEntry before writing.
+func (t *Tracker) LogLazyLoading(c CompressionComparison) {
+	// Stats are independent of JSONL file config — update always.
+	t.statsTracker.RecordLazyLoading(c.ToolCount, c.StubCount, c.PhantomCount, c.OriginalTokens, c.CompressedTokens, c.CacheHit)
+
+	if !t.ToolDiscoveryLogEnabled() {
+		return
+	}
+	ts := c.Timestamp
+	if ts == "" {
+		ts = now()
+	}
+	t.writeToolDiscovery(LazyLoadingEntry{
+		LogEntryBase:     LogEntryBase{RequestID: c.RequestID, EventType: c.EventType, SessionID: c.SessionID, Timestamp: ts},
+		IsMainAgent:      c.IsMainAgent,
+		OriginalTokens:   c.OriginalTokens,
+		CompressedTokens: c.CompressedTokens,
+		CompressionRatio: c.CompressionRatio,
+		CacheHit:         c.CacheHit,
+		Status:           c.Status,
+		ProviderModel:    c.ProviderModel,
+		CompressionModel: c.CompressionModel,
+		ToolCount:        c.ToolCount,
+		StubCount:        c.StubCount,
+		PhantomCount:     c.PhantomCount,
+	})
+}
+
+// TaskOutputLogEnabled returns true if task output logging is enabled.
+func (t *Tracker) TaskOutputLogEnabled() bool {
+	return t.config.Enabled && t.taskOutputLogPath != ""
+}
+
+// LogTaskOutputComparison logs a task-output event to task_output_compression.jsonl.
+// Converts the internal CompressionComparison to a typed TaskOutputEntry before writing.
+func (t *Tracker) LogTaskOutputComparison(c CompressionComparison) {
+	if !t.TaskOutputLogEnabled() {
+		return
+	}
+	ts := c.Timestamp
+	if ts == "" {
+		ts = now()
+	}
+	entry := TaskOutputEntry{
+		LogEntryBase:      LogEntryBase{RequestID: c.RequestID, EventType: c.EventType, SessionID: c.SessionID, Timestamp: ts},
+		IsMainAgent:       c.IsMainAgent,
+		ProviderModel:     c.ProviderModel,
+		ToolName:          c.ToolName,
+		OriginalTokens:    c.OriginalTokens,
+		CompressedTokens:  c.CompressedTokens,
+		CompressionRatio:  c.CompressionRatio,
+		Status:            c.Status,
+		CompressionModel:  c.CompressionModel,
+		OriginalContent:   c.OriginalContent,
+		CompressedContent: c.CompressedContent,
+	}
+
+	t.muTaskOutput.Lock()
+	defer t.muTaskOutput.Unlock()
+	if t.taskOutputLogFile == nil {
+		return
+	}
+	if err := writeJSONL(t.taskOutputLogFile, entry); err != nil {
+		log.Error().Err(err).Str("path", t.taskOutputLogPath).Msg("telemetry: failed to write task output event")
+	} else {
+		t.taskOutputCount++
+	}
+}
+
+// LogToolSearch logs a gateway_search_tools call to tool_discovery.jsonl.
+// entry.Timestamp is set to the current time if empty.
+func (t *Tracker) LogToolSearch(entry ToolSearchResult) {
+	// Stats are independent of JSONL file config — update always.
+	// Use end-to-end token counts when available, fall back to single-stage.
+	origTokens := entry.EndToEndOriginalTokens
+	if origTokens == 0 {
+		origTokens = entry.OriginalTokens
+	}
+	compTokens := entry.Stage2CompressedTokens
+	if compTokens == 0 {
+		compTokens = entry.CompressedTokens
+	}
+	t.statsTracker.RecordToolSearch(origTokens, compTokens)
+
+	if !t.ToolDiscoveryLogEnabled() {
+		return
+	}
+	if entry.Timestamp == "" {
+		entry.Timestamp = now()
+	}
+	t.writeToolDiscovery(entry)
+}
+
+// WriteSessionToolsCatalog writes a human-readable session_tools.json file.
+//
+// First call for a session: creates the file with all tools.
+// Subsequent calls: only tools not yet in the file are appended, then the file
+// is rewritten (so it stays valid JSON). This handles subagents that introduce
+// new tools mid-session without re-logging tools already present.
+//
+// The file is pretty-printed with 4-space indentation for human readability.
+func (t *Tracker) WriteSessionToolsCatalog(sessionID string, tools []SessionToolEntry) {
+	if t.sessionToolsPath == "" || sessionID == "" || len(tools) == 0 {
+		return
+	}
+
+	t.muSessionTools.Lock()
+	defer t.muSessionTools.Unlock()
+
+	seen, ok := t.seenSessionTools[sessionID]
+	if !ok {
+		seen = make(map[string]bool)
+		t.seenSessionTools[sessionID] = seen
+	}
+
+	var newTools []SessionToolEntry
+	for _, tool := range tools {
+		if !seen[tool.ToolName] {
+			seen[tool.ToolName] = true
+			newTools = append(newTools, tool)
+		}
+	}
+	if len(newTools) == 0 {
+		return
+	}
+
+	// Read existing catalog (if any) so we can append only the new tools.
+	var catalog SessionToolsCatalogFile
+	if data, err := os.ReadFile(t.sessionToolsPath); err == nil {
+		_ = json.Unmarshal(data, &catalog)
+	}
+
+	catalog.SessionID = sessionID
+	catalog.UpdatedAt = now()
+	catalog.Tools = append(catalog.Tools, newTools...)
+
+	data, err := json.MarshalIndent(catalog, "", "    ")
+	if err != nil {
+		log.Error().Err(err).Msg("session_tools: marshal failed")
+		return
+	}
+	if err := os.WriteFile(t.sessionToolsPath, data, 0600); err != nil {
+		log.Error().Err(err).Str("path", t.sessionToolsPath).Msg("session_tools: write failed")
+	}
+}
+
+// SetStatsSession sets the session ID on the live stats tracker.
+// Should be called once when a new session starts.
+func (t *Tracker) SetStatsSession(sessionID string) {
+	t.statsTracker.SetSession(sessionID)
+}
+
+// RecordPreemptiveStats records original and summarized token counts for one
+// preemptive summarization event. Called from handler.go alongside SavingsTracker.
+func (t *Tracker) RecordPreemptiveStats(origTokens, summarizedTokens int) {
+	t.statsTracker.RecordPreemptive(origTokens, summarizedTokens)
+}
+
+// Close syncs and closes all open file handles.
 func (t *Tracker) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	// Acquire all per-file locks in deterministic order to avoid deadlock.
+	t.muRequest.Lock()
+	defer t.muRequest.Unlock()
+	t.muCompression.Lock()
+	defer t.muCompression.Unlock()
+	t.muToolDiscovery.Lock()
+	defer t.muToolDiscovery.Unlock()
+	t.muTaskOutput.Lock()
+	defer t.muTaskOutput.Unlock()
+	t.muSessionTools.Lock()
+	defer t.muSessionTools.Unlock()
 
 	if t.requestLogPath != "" && t.requestCount > 0 {
 		log.Info().
@@ -229,12 +456,39 @@ func (t *Tracker) Close() error {
 			Msg("telemetry: session complete")
 	}
 
+	t.statsTracker.Stop()
+	t.expandCallsLogger.Close()
+
+	for _, f := range []*os.File{t.requestLogFile, t.compressionLogFile, t.toolDiscoveryLogFile, t.taskOutputLogFile} {
+		if f != nil {
+			_ = f.Sync()
+			_ = f.Close()
+		}
+	}
+	t.requestLogFile = nil
+	t.compressionLogFile = nil
+	t.toolDiscoveryLogFile = nil
+	t.taskOutputLogFile = nil
+
 	return nil
 }
 
-// ============================================================================
+// LogExpandContextCall appends an expand_context invocation to expand_context_calls.jsonl.
+// Only called when the LLM actually invokes expand_context — never for every compression.
+func (t *Tracker) LogExpandContextCall(entry ExpandContextCallEntry) {
+	t.expandCallsLogger.Log(entry)
+}
+
+// ExpandCallsLogger returns the logger for expand_context_calls.jsonl.
+// Returns nil if the feature is disabled. Used to wire ExpandContextHandler.
+func (t *Tracker) ExpandCallsLogger() *ExpandCallsLogger {
+	if t == nil {
+		return nil
+	}
+	return t.expandCallsLogger
+}
+
 // HELPERS FOR VERBOSE PAYLOADS
-// ============================================================================
 
 // SanitizeHeaders removes sensitive headers and returns a safe copy.
 func SanitizeHeaders(headers map[string]string) map[string]string {

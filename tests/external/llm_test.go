@@ -33,6 +33,10 @@ func TestDetectProvider(t *testing.T) {
 		{"localhost default", "http://localhost:8080/v1/chat/completions", "openai"},
 		{"custom proxy", "https://my-proxy.com/v1/chat", "openai"},
 		{"empty string", "", "openai"},
+		{"azure openai subdomain", "https://myresource.openai.azure.com/openai/deployments/gpt-4/chat/completions", "azure"},
+		{"azure in url", "https://proxy.example.com/azure/v1/chat", "azure"},
+		{"bedrock runtime", "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3/invoke", "bedrock"},
+		{"bedrock in url", "https://bedrock.us-east-1.amazonaws.com/invoke", "bedrock"},
 	}
 
 	for _, tt := range tests {
@@ -506,6 +510,256 @@ func TestCallLLM_ExtraHeaders_Nil(t *testing.T) {
 		SystemPrompt: "s",
 		UserPrompt:   "u",
 		ExtraHeaders: nil,
+	})
+	assert.NoError(t, err)
+}
+
+// =============================================================================
+// AZURE OPENAI AUTH
+// =============================================================================
+
+func TestCallLLM_Azure_APIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Azure uses api-key header, NOT Authorization: Bearer
+		assert.Equal(t, "my-azure-key", r.Header.Get("api-key"))
+		assert.Empty(t, r.Header.Get("Authorization"), "Authorization must be empty when api-key is set")
+		assert.Empty(t, r.Header.Get("x-api-key"), "x-api-key must not be used for Azure")
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]interface{}{"content": "azure response"}},
+			},
+			"usage": map[string]interface{}{"prompt_tokens": 30, "completion_tokens": 10},
+		})
+	}))
+	defer server.Close()
+
+	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "azure",
+		ProviderKey:  "my-azure-key",
+		Model:        "gpt-4",
+		SystemPrompt: "compress",
+		UserPrompt:   "content",
+		MaxTokens:    500,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "azure response", result.Content)
+	assert.Equal(t, "azure", result.Provider)
+}
+
+func TestCallLLM_Azure_BearerToken(t *testing.T) {
+	// Azure with Microsoft Entra ID (OAuth) uses Authorization: Bearer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer entra-oauth-token", r.Header.Get("Authorization"))
+		assert.Empty(t, r.Header.Get("api-key"), "api-key must be empty when bearer token is used")
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]interface{}{"content": "azure oauth response"}},
+			},
+			"usage": map[string]interface{}{"prompt_tokens": 40, "completion_tokens": 12},
+		})
+	}))
+	defer server.Close()
+
+	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "azure",
+		BearerAuth:   "entra-oauth-token",
+		Model:        "gpt-4",
+		SystemPrompt: "compress",
+		UserPrompt:   "content",
+		MaxTokens:    500,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "azure oauth response", result.Content)
+	assert.Equal(t, "azure", result.Provider)
+}
+
+func TestCallLLM_Azure_APIKey_Takes_Priority_Over_Bearer(t *testing.T) {
+	// When both are set, api-key wins (same precedence as Anthropic x-api-key)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "my-azure-key", r.Header.Get("api-key"))
+		assert.Empty(t, r.Header.Get("Authorization"))
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]interface{}{"content": "ok"}},
+			},
+			"usage": map[string]interface{}{},
+		})
+	}))
+	defer server.Close()
+
+	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "azure",
+		ProviderKey:  "my-azure-key",
+		BearerAuth:   "entra-token",
+		Model:        "gpt-4",
+		SystemPrompt: "s",
+		UserPrompt:   "u",
+		MaxTokens:    100,
+	})
+	assert.NoError(t, err)
+}
+
+func TestDetectProvider_Azure_AutoDetect(t *testing.T) {
+	// Auto-detection from URL (when Provider field is empty)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Must use api-key header (Azure auto-detected from URL)
+		assert.Equal(t, "my-azure-key", r.Header.Get("api-key"))
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]interface{}{"content": "ok"}},
+			},
+			"usage": map[string]interface{}{},
+		})
+	}))
+	defer server.Close()
+
+	// URL contains "azure" → auto-detected as azure provider
+	azureURL := server.URL + "/azure/openai/v1/chat"
+	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     azureURL,
+		ProviderKey:  "my-azure-key",
+		Model:        "gpt-4",
+		SystemPrompt: "s",
+		UserPrompt:   "u",
+		MaxTokens:    100,
+	})
+	assert.NoError(t, err)
+}
+
+// =============================================================================
+// BEDROCK AUTH (SigV4 — no API key headers)
+// =============================================================================
+
+func TestCallLLM_Bedrock_NoAuthHeaders(t *testing.T) {
+	// Bedrock uses SigV4 signing via HTTPClient transport — no auth headers in request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify no standard auth headers are set by the gateway
+		assert.Empty(t, r.Header.Get("x-api-key"), "bedrock must not set x-api-key")
+		assert.Empty(t, r.Header.Get("api-key"), "bedrock must not set api-key")
+		assert.Empty(t, r.Header.Get("Authorization"), "bedrock must not set Authorization")
+
+		// Bedrock uses Anthropic Messages format with anthropic_version in body
+		var req external.AnthropicRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "bedrock-2023-05-31", req.AnthropicVersion)
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": "bedrock response"}},
+			"usage":   map[string]interface{}{"input_tokens": 20, "output_tokens": 8},
+		})
+	}))
+	defer server.Close()
+
+	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "bedrock",
+		// ProviderKey intentionally empty — SigV4 handled by HTTPClient transport
+		Model:        "anthropic.claude-3-haiku-20240307-v1:0",
+		SystemPrompt: "compress",
+		UserPrompt:   "content",
+		MaxTokens:    500,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "bedrock response", result.Content)
+	assert.Equal(t, "bedrock", result.Provider)
+}
+
+func TestCallLLM_Bedrock_Validation_NoKeyRequired(t *testing.T) {
+	// Bedrock must pass validation even without ProviderKey or BearerAuth
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": "ok"}},
+			"usage":   map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
+		})
+	}))
+	defer server.Close()
+
+	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "bedrock",
+		Model:        "anthropic.claude-3-haiku",
+		SystemPrompt: "s",
+		UserPrompt:   "u",
+		MaxTokens:    100,
+	})
+	assert.NoError(t, err, "bedrock must not require ProviderKey or BearerAuth")
+}
+
+// =============================================================================
+// GEMINI BEARER FALLBACK
+// =============================================================================
+
+func TestCallLLM_Gemini_BearerFallback(t *testing.T) {
+	// When ProviderKey is empty, BearerAuth is used as the x-goog-api-key value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// BearerAuth should fall back to x-goog-api-key
+		assert.Equal(t, "gemini-subscription-token", r.Header.Get("x-goog-api-key"))
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"candidates": []map[string]interface{}{
+				{"content": map[string]interface{}{
+					"parts": []map[string]interface{}{{"text": "gemini bearer response"}},
+				}},
+			},
+			"usageMetadata": map[string]interface{}{"promptTokenCount": 10, "candidatesTokenCount": 5},
+		})
+	}))
+	defer server.Close()
+
+	result, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "gemini",
+		BearerAuth:   "gemini-subscription-token",
+		Model:        "gemini-2.0-flash",
+		SystemPrompt: "compress",
+		UserPrompt:   "content",
+		MaxTokens:    500,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "gemini bearer response", result.Content)
+	assert.Equal(t, "gemini", result.Provider)
+}
+
+func TestCallLLM_Gemini_APIKey_Takes_Priority_Over_Bearer(t *testing.T) {
+	// When both are set, ProviderKey (direct API key) wins
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "direct-api-key", r.Header.Get("x-goog-api-key"))
+
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"candidates": []map[string]interface{}{
+				{"content": map[string]interface{}{
+					"parts": []map[string]interface{}{{"text": "ok"}},
+				}},
+			},
+			"usageMetadata": map[string]interface{}{},
+		})
+	}))
+	defer server.Close()
+
+	_, err := external.CallLLM(context.Background(), external.CallLLMParams{
+		Endpoint:     server.URL,
+		Provider:     "gemini",
+		ProviderKey:  "direct-api-key",
+		BearerAuth:   "subscription-token",
+		Model:        "gemini-2.0-flash",
+		SystemPrompt: "s",
+		UserPrompt:   "u",
+		MaxTokens:    100,
 	})
 	assert.NoError(t, err)
 }

@@ -1,8 +1,4 @@
 // Monitoring configuration - telemetry and logging settings.
-//
-// DESIGN: Separates logging (zerolog) from telemetry (JSONL files).
-// Logging is for operators, telemetry is for analytics/debugging.
-// Trajectories capture complete agent interactions in ATIF format.
 package config
 
 // MonitoringConfig contains all monitoring settings.
@@ -18,13 +14,13 @@ type MonitoringConfig struct {
 	LogToStdout      bool   `yaml:"log_to_stdout"`     // Also log telemetry to stdout
 	VerbosePayloads  bool   `yaml:"verbose_payloads"`  // Log full request/response payloads
 
-	// Debug settings
-	DebugToolSchemas bool `yaml:"debug_tool_schemas"` // Log full tool schemas before/after filtering
-
 	// Additional log files
-	CompressionLogPath   string `yaml:"compression_log_path"`    // Log original vs compressed
-	ToolDiscoveryLogPath string `yaml:"tool_discovery_log_path"` // Log tool discovery filtering details
-	FailedRequestLogPath string `yaml:"failed_request_log_path"` // Log failed requests
+	CompressionLogPath     string `yaml:"compression_log_path"`      // Log original vs compressed
+	ToolDiscoveryLogPath   string `yaml:"tool_discovery_log_path"`   // Log tool discovery filtering details
+	TaskOutputLogPath      string `yaml:"task_output_log_path"`      // Base path for task/subagent output logs (per-provider)
+	SessionToolsPath       string `yaml:"session_tools_path"`        // Human-readable JSON catalog of all tools seen in the session
+	SessionStatsPath       string `yaml:"session_stats_path"`        // Live session_stats.json snapshot (rewritten every ~3s)
+	ExpandContextCallsPath string `yaml:"expand_context_calls_path"` // JSONL log of expand_context calls (original + compressed content)
 
 	// Trajectory logging (ATIF format)
 	TrajectoryEnabled bool   `yaml:"trajectory_enabled"` // Enable trajectory logging

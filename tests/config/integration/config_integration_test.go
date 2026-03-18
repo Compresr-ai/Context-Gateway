@@ -30,8 +30,8 @@ pipes:
     enabled: true
     strategy: "simple"
     fallback_strategy: "passthrough"
-    min_bytes: 2048
-    max_bytes: 65536
+    min_tokens: 512
+    max_tokens: 16384
     target_compression_ratio: 0.3
     include_expand_hint: true
     enable_expand_context: true
@@ -39,10 +39,6 @@ pipes:
     enabled: true
     strategy: "tool-search"
     fallback_strategy: "passthrough"
-    min_tools: 3
-    max_tools: 20
-    target_ratio: 0.5
-    enable_search_fallback: true
     max_search_results: 10
 
 store:
@@ -71,8 +67,8 @@ monitoring:
 	assert.True(t, cfg.Pipes.ToolOutput.Enabled)
 	assert.Equal(t, "simple", cfg.Pipes.ToolOutput.Strategy)
 	assert.Equal(t, "passthrough", cfg.Pipes.ToolOutput.FallbackStrategy)
-	assert.Equal(t, 2048, cfg.Pipes.ToolOutput.MinBytes)
-	assert.Equal(t, 65536, cfg.Pipes.ToolOutput.MaxBytes)
+	assert.Equal(t, 512, cfg.Pipes.ToolOutput.MinTokens)
+	assert.Equal(t, 16384, cfg.Pipes.ToolOutput.MaxTokens)
 	assert.InDelta(t, 0.3, cfg.Pipes.ToolOutput.TargetCompressionRatio, 0.001)
 	assert.True(t, cfg.Pipes.ToolOutput.IncludeExpandHint)
 	assert.True(t, cfg.Pipes.ToolOutput.EnableExpandContext)
@@ -80,10 +76,6 @@ monitoring:
 	// Tool discovery pipe
 	assert.True(t, cfg.Pipes.ToolDiscovery.Enabled)
 	assert.Equal(t, "tool-search", cfg.Pipes.ToolDiscovery.Strategy)
-	assert.Equal(t, 3, cfg.Pipes.ToolDiscovery.MinTools)
-	assert.Equal(t, 20, cfg.Pipes.ToolDiscovery.MaxTools)
-	assert.InDelta(t, 0.5, cfg.Pipes.ToolDiscovery.TargetRatio, 0.001)
-	assert.True(t, cfg.Pipes.ToolDiscovery.EnableSearchFallback)
 	assert.Equal(t, 10, cfg.Pipes.ToolDiscovery.MaxSearchResults)
 
 	// Store settings
@@ -167,12 +159,8 @@ monitoring:
 // that important default constants are defined in the config package.
 func TestIntegration_Config_DefaultValues(t *testing.T) {
 	// Verify default constants are accessible and correct
-	assert.Equal(t, 5, config.DefaultMinTools, "DefaultMinTools should be 5")
-	assert.Equal(t, 25, config.DefaultMaxTools, "DefaultMaxTools should be 25")
-	assert.InDelta(t, 0.8, config.DefaultTargetRatio, 0.001, "DefaultTargetRatio should be 0.8")
 	assert.Equal(t, 5, config.DefaultMaxSearchResults, "DefaultMaxSearchResults should be 5")
-	assert.Equal(t, 1024, config.DefaultMinBytes, "DefaultMinBytes should be 1024")
-	assert.Equal(t, 4, config.TokenEstimateRatio, "TokenEstimateRatio should be 4")
+	assert.Equal(t, 512, config.DefaultMinTokens, "DefaultMinTokens should be 512")
 
 	// Verify a minimal valid config loads and validates
 	minimalYAML := `

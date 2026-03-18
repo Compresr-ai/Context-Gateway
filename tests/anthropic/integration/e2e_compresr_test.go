@@ -58,14 +58,14 @@ func e2eFullConfig() *config.Config {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr,
 				FallbackStrategy:       "passthrough",
-				MinBytes:               500,
-				MaxBytes:               100000,
+				MinTokens:              125,
+				MaxTokens:              25000,
 				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:      true,
 				EnableExpandContext:    true,
 				Compresr: config.CompresrConfig{
 					Endpoint:  "/api/compress/tool-output/",
-					AuthParam: compresrKey,
+					APIKey: compresrKey,
 					Model:     "toc_latte_v1",
 					Timeout:   30 * time.Second,
 				},
@@ -74,13 +74,10 @@ func e2eFullConfig() *config.Config {
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
 				Enabled:              true,
 				Strategy:             config.StrategyCompresr,
-				MinTools:             3,
-				MaxTools:             10,
-				TargetRatio:          0.5,
 				EnableSearchFallback: true,
 				Compresr: config.CompresrConfig{
 					Endpoint:  "/api/compress/tool-discovery/",
-					AuthParam: compresrKey,
+					APIKey: compresrKey,
 					Model:     "tdc_coldbrew_v1",
 					Timeout:   30 * time.Second,
 				},
@@ -94,11 +91,10 @@ func e2eFullConfig() *config.Config {
 				Strategy: preemptive.StrategyCompresr,
 				Compresr: &preemptive.CompresrConfig{
 					Endpoint:  "/api/compress/history/",
-					AuthParam: compresrKey,
+					APIKey: compresrKey,
 					Model:     "hcc_espresso_v1",
 					Timeout:   60 * time.Second,
 				},
-				TokenEstimateRatio: 4,
 				KeepRecentCount:    2,
 			},
 			Session: preemptive.SessionConfig{
@@ -111,9 +107,9 @@ func e2eFullConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

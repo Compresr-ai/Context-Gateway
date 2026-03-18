@@ -1,20 +1,4 @@
-// Compaction request detection.
-//
-// DESIGN: Multi-layer detection for identifying compaction requests:
-//
-//	Layer 0 (Header):  GenericDetector checks X-Request-Compaction header
-//	Layer 1 (Path):    OpenAIDetector checks /compact URL path (Codex)
-//	Layer 2 (Prompt):  Pattern matching for Claude Code, Codex, OpenClaw
-//
-// Supported Agents:
-//   - Claude Code: Prompt pattern detection (Anthropic)
-//   - Codex: URL path /responses/compact + prompt patterns (OpenAI)
-//   - OpenClaw: Header detection + prompt patterns (fallback)
-//
-// Usage:
-//
-//	detector := GetDetector(adapters.ProviderAnthropic, config)
-//	result := detector.Detect(body)
+// Compaction request detection across multiple client agents (Claude Code, Codex, OpenClaw).
 package preemptive
 
 import (
@@ -24,18 +8,10 @@ import (
 	"github.com/compresr/context-gateway/internal/adapters"
 )
 
-// =============================================================================
-// DETECTOR INTERFACE
-// =============================================================================
-
 // CompactionDetector is the interface for provider-specific compaction detection.
 type CompactionDetector interface {
 	Detect(body []byte) DetectionResult
 }
-
-// =============================================================================
-// DETECTOR FACTORY
-// =============================================================================
 
 // GetDetector returns the appropriate detector for the given provider.
 func GetDetector(provider adapters.Provider, cfg DetectorsConfig) CompactionDetector {
@@ -60,10 +36,6 @@ func GetGenericDetector(cfg DetectorsConfig) *GenericDetector {
 	}
 }
 
-// =============================================================================
-// GENERIC DETECTOR (Header-based)
-// =============================================================================
-
 // GenericDetector detects compaction requests via HTTP header.
 // This is the primary detection method for agents like OpenClaw that don't
 // use specific prompt patterns but can send a header to signal compaction.
@@ -79,7 +51,7 @@ func (d *GenericDetector) DetectFromHeaders(headerValue string) DetectionResult 
 			IsCompactionRequest: true,
 			DetectedBy:          "generic_header",
 			Confidence:          1.0,
-			Details:             map[string]interface{}{"header": d.headerName},
+			Details:             map[string]any{"header": d.headerName},
 		}
 	}
 	return DetectionResult{}
@@ -89,10 +61,6 @@ func (d *GenericDetector) DetectFromHeaders(headerValue string) DetectionResult 
 func (d *GenericDetector) HeaderName() string {
 	return d.headerName
 }
-
-// =============================================================================
-// OPENAI DETECTOR (Codex, GPT, etc.)
-// =============================================================================
 
 // OpenAIDetector detects OpenAI-based compaction requests.
 type OpenAIDetector struct {
@@ -111,7 +79,7 @@ func (d *OpenAIDetector) DetectWithPath(body []byte, path string) DetectionResul
 			IsCompactionRequest: true,
 			DetectedBy:          "openai_path",
 			Confidence:          1.0,
-			Details:             map[string]interface{}{"path": path},
+			Details:             map[string]any{"path": path},
 		}
 	}
 
@@ -129,7 +97,7 @@ func (d *OpenAIDetector) DetectWithPath(body []byte, path string) DetectionResul
 						IsCompactionRequest: true,
 						DetectedBy:          "openai_prompt",
 						Confidence:          0.95,
-						Details:             map[string]interface{}{"matched_phrase": phrase},
+						Details:             map[string]any{"matched_phrase": phrase},
 					}
 				}
 			}
@@ -138,10 +106,6 @@ func (d *OpenAIDetector) DetectWithPath(body []byte, path string) DetectionResul
 	}
 	return DetectionResult{}
 }
-
-// =============================================================================
-// CLAUDE DETECTOR (Anthropic)
-// =============================================================================
 
 // ClaudeDetector detects Claude Code compaction requests.
 type ClaudeDetector struct {
@@ -164,7 +128,7 @@ func (d *ClaudeDetector) Detect(body []byte) DetectionResult {
 						IsCompactionRequest: true,
 						DetectedBy:          "claude_code_prompt",
 						Confidence:          0.95,
-						Details:             map[string]interface{}{"matched_phrase": phrase},
+						Details:             map[string]any{"matched_phrase": phrase},
 					}
 				}
 			}
@@ -175,13 +139,9 @@ func (d *ClaudeDetector) Detect(body []byte) DetectionResult {
 	return DetectionResult{}
 }
 
-// =============================================================================
-// SHARED TYPES
-// =============================================================================
-
 type requestBody struct {
 	Messages []struct {
-		Role    string      `json:"role"`
-		Content interface{} `json:"content"`
+		Role    string `json:"role"`
+		Content any    `json:"content"`
 	} `json:"messages"`
 }

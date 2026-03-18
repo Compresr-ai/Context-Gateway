@@ -139,13 +139,23 @@ func TestOpenAI_ApplyToolDiscovery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	require.Len(t, tools, 2)
+	// Array length preserved: 2 kept + 1 stub = 3 total
+	require.Len(t, tools, 3)
 
-	// Verify the right tools were kept
+	// Position 0: read_file (kept — full definition)
 	tool0 := tools[0].(map[string]any)["function"].(map[string]any)
-	tool1 := tools[1].(map[string]any)["function"].(map[string]any)
 	assert.Equal(t, "read_file", tool0["name"])
-	assert.Equal(t, "delete_file", tool1["name"])
+	assert.NotEqual(t, "[deferred]", tool0["description"])
+
+	// Position 1: write_file (deferred — stub with DeferredStubDescription)
+	tool1 := tools[1].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, "write_file", tool1["name"])
+	assert.Equal(t, adapters.DeferredStubDescription, tool1["description"])
+
+	// Position 2: delete_file (kept — full definition)
+	tool2 := tools[2].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, "delete_file", tool2["name"])
+	assert.NotEqual(t, "[deferred]", tool2["description"])
 }
 
 func TestOpenAI_ApplyToolDiscovery_EmptyResults(t *testing.T) {
@@ -297,12 +307,23 @@ func TestAnthropic_ApplyToolDiscovery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	require.Len(t, tools, 2)
+	// Array length preserved: 2 kept + 1 stub = 3 total
+	require.Len(t, tools, 3)
 
+	// Position 0: read_file (kept)
 	tool0 := tools[0].(map[string]any)
-	tool1 := tools[1].(map[string]any)
 	assert.Equal(t, "read_file", tool0["name"])
-	assert.Equal(t, "search_code", tool1["name"])
+	assert.NotEqual(t, adapters.DeferredStubDescription, tool0["description"])
+
+	// Position 1: write_file (deferred — stub)
+	tool1 := tools[1].(map[string]any)
+	assert.Equal(t, "write_file", tool1["name"])
+	assert.Equal(t, adapters.DeferredStubDescription, tool1["description"])
+
+	// Position 2: search_code (kept)
+	tool2 := tools[2].(map[string]any)
+	assert.Equal(t, "search_code", tool2["name"])
+	assert.NotEqual(t, adapters.DeferredStubDescription, tool2["description"])
 }
 
 func TestAnthropic_ApplyToolDiscovery_RemoveAll(t *testing.T) {
@@ -329,7 +350,12 @@ func TestAnthropic_ApplyToolDiscovery_RemoveAll(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	assert.Len(t, tools, 0)
+	// All tools become stubs — array length preserved, all have DeferredStubDescription
+	assert.Len(t, tools, 2)
+	for i, t2 := range tools {
+		tool := t2.(map[string]any)
+		assert.Equal(t, adapters.DeferredStubDescription, tool["description"], "tool[%d] should be a stub", i)
+	}
 }
 
 // =============================================================================
@@ -380,8 +406,18 @@ func TestBedrock_ApplyToolDiscovery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(modified, &req))
 
 	tools := req["tools"].([]any)
-	require.Len(t, tools, 1)
-	assert.Equal(t, "read_file", tools[0].(map[string]any)["name"])
+	// Array length preserved: 1 kept + 1 stub = 2 total
+	require.Len(t, tools, 2)
+
+	// Position 0: read_file (kept)
+	tool0 := tools[0].(map[string]any)
+	assert.Equal(t, "read_file", tool0["name"])
+	assert.NotEqual(t, adapters.DeferredStubDescription, tool0["description"])
+
+	// Position 1: list_dir (deferred — stub)
+	tool1 := tools[1].(map[string]any)
+	assert.Equal(t, "list_dir", tool1["name"])
+	assert.Equal(t, adapters.DeferredStubDescription, tool1["description"])
 }
 
 // =============================================================================

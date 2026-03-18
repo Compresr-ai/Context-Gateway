@@ -1,7 +1,4 @@
 // Registry manages adapter registration and lookup.
-//
-// DESIGN: Thread-safe map of provider name → Adapter.
-// Built-in adapters (OpenAI, Anthropic) are registered at startup.
 package adapters
 
 import (
@@ -27,6 +24,7 @@ func NewRegistry() *Registry {
 	r.Register(NewOllamaAdapter())
 	r.Register(NewLiteLLMAdapter())
 	r.Register(NewGeminiAdapter())
+	r.Register(NewMiniMaxAdapter())
 
 	return r
 }

@@ -1,16 +1,4 @@
 // Pipes configuration - compression pipeline settings.
-//
-// STATUS: All compression pipes are disabled in current release.
-// Only preemptive summarization is enabled.
-//
-// DESIGN: Two independent pipes process requests:
-//   - ToolOutput:    Compress tool results, store originals for expand_context
-//   - ToolDiscovery: Filter irrelevant tools
-//
-// Each pipe has a STRATEGY that controls how it processes requests.
-//
-// NOTE: This file defines pipe-specific configuration types.
-// The main Config struct in config/ imports and uses these types.
 package pipes
 
 import (
@@ -18,9 +6,26 @@ import (
 	"time"
 )
 
-// =============================================================================
+// COMPRESSION RATIO CONSTANTS
+
+// Compression ratio is the removed fraction: 1 - (compressedTokens / originalTokens).
+// Range 0.0–1.0 where 0 = no tokens removed, 1 = all tokens removed.
+// Higher = more aggressive compression. Matches the API's target_compression_ratio convention.
+const (
+	// DefaultTargetCompressionRatio is the default aggressiveness when not set in config.
+	// 0.5 = remove ~50% of tokens (medium aggressiveness).
+	DefaultTargetCompressionRatio = 0.5
+
+	// MinTargetCompressionRatio is the least aggressive value accepted by the API.
+	// 0.1 = remove at minimum 10% of tokens.
+	MinTargetCompressionRatio = 0.1
+
+	// MaxTargetCompressionRatio is the most aggressive value accepted by the API.
+	// 0.9 = remove up to 90% of tokens.
+	MaxTargetCompressionRatio = 0.9
+)
+
 // STRATEGY CONSTANTS
-// =============================================================================
 
 // Strategy constants for pipe execution.
 const (
@@ -33,6 +38,7 @@ const (
 	StrategyAPI      = "api"      // Call Compresr API (tool output compression)
 	StrategyCompresr = "compresr" // Alias for StrategyAPI (backward compat)
 	StrategySimple   = "simple"   // Simple compression (first N words)
+	StrategyTrimming = "trimming" // Tail-keep compression: discard head, keep only tail based on target_compression_ratio
 )
 
 // IsAPIStrategy returns true if the strategy is API-based (tool output only).
@@ -40,66 +46,13 @@ func IsAPIStrategy(strategy string) bool {
 	return strategy == StrategyAPI || strategy == StrategyCompresr
 }
 
-// =============================================================================
-// COMPRESSION THRESHOLDS
-// =============================================================================
-
-// CompressionThreshold represents user-selectable compression trigger thresholds.
-// Set via X-Compression-Threshold header.
-type CompressionThreshold string
-
-const (
-	ThresholdOff  CompressionThreshold = "off"  // No compression ever
-	Threshold256  CompressionThreshold = "256"  // Compress when > 256 tokens (default)
-	Threshold1K   CompressionThreshold = "1k"   // Compress when > 1,000 tokens
-	Threshold2K   CompressionThreshold = "2k"   // Compress when > 2,000 tokens
-	Threshold4K   CompressionThreshold = "4k"   // Compress when > 4,000 tokens
-	Threshold8K   CompressionThreshold = "8k"   // Compress when > 8,000 tokens
-	Threshold16K  CompressionThreshold = "16k"  // Compress when > 16,000 tokens
-	Threshold32K  CompressionThreshold = "32k"  // Compress when > 32,000 tokens
-	Threshold64K  CompressionThreshold = "64k"  // Compress when > 64,000 tokens
-	Threshold128K CompressionThreshold = "128k" // Compress when > 128,000 tokens
-)
-
-// ThresholdTokenCounts maps thresholds to token counts.
-var ThresholdTokenCounts = map[CompressionThreshold]int{
-	ThresholdOff: 0, Threshold256: 256, Threshold1K: 1000, Threshold2K: 2000, Threshold4K: 4000,
-	Threshold8K: 8000, Threshold16K: 16000, Threshold32K: 32000, Threshold64K: 64000, Threshold128K: 128000,
-}
-
-// DefaultThreshold is the default compression threshold when none specified.
-const DefaultThreshold = Threshold256
-
-// ParseCompressionThreshold parses a threshold string from header, returns default if invalid.
-func ParseCompressionThreshold(s string) CompressionThreshold {
-	switch CompressionThreshold(s) {
-	case ThresholdOff, Threshold256, Threshold1K, Threshold2K, Threshold4K, Threshold8K, Threshold16K, Threshold32K, Threshold64K, Threshold128K:
-		return CompressionThreshold(s)
-	default:
-		return DefaultThreshold
-	}
-}
-
-// TokenCount returns the token count for this threshold.
-// Returns -1 for ThresholdOff (meaning compression disabled).
-func (t CompressionThreshold) TokenCount() int {
-	if t == ThresholdOff {
-		return -1
-	}
-	if count, ok := ThresholdTokenCounts[t]; ok {
-		return count
-	}
-	return ThresholdTokenCounts[DefaultThreshold]
-}
-
-// =============================================================================
 // PIPES CONFIG - Root configuration for all pipes
-// =============================================================================
 
 // Config contains configuration for all compression pipes.
 type Config struct {
 	ToolOutput    ToolOutputConfig    `yaml:"tool_output"`    // Tool output compression
 	ToolDiscovery ToolDiscoveryConfig `yaml:"tool_discovery"` // Tool filtering
+	TaskOutput    TaskOutputConfig    `yaml:"task_output"`    // Task/subagent output handling
 }
 
 // Validate validates pipe configurations.
@@ -110,12 +63,13 @@ func (p *Config) Validate() error {
 	if err := p.ToolDiscovery.Validate(); err != nil {
 		return err
 	}
+	if err := p.TaskOutput.Validate(); err != nil {
+		return err
+	}
 	return nil
 }
 
-// =============================================================================
 // TOOL OUTPUT PIPE CONFIG
-// =============================================================================
 
 // ToolOutputConfig configures tool result compression.
 type ToolOutputConfig struct {
@@ -131,10 +85,11 @@ type ToolOutputConfig struct {
 	// Can be overridden by Provider reference
 	Compresr CompresrConfig `yaml:"compresr,omitempty"`
 
-	// Compression settings
-	MinBytes               int     `yaml:"min_bytes"`                // Below this size, no compression (default: 2048)
-	MaxBytes               int     `yaml:"max_bytes"`                // Above this size, skip compression (V2, default: 64KB)
-	TargetCompressionRatio float64 `yaml:"target_compression_ratio"` // Sent to API: 0-1 (strength) or >1 (factor). 0 = API default.
+	// Compression thresholds (in tokens)
+	MinTokens              int     `yaml:"min_tokens"`               // Below this token count, no compression (default: 512)
+	MaxTokens              int     `yaml:"max_tokens"`               // Above this token count, skip compression (default: 50000)
+	TargetCompressionRatio float64 `yaml:"target_compression_ratio"` // Sent to API: 0.1 = least aggressive, 0.9 = most aggressive. 0 = API default.
+	RefusalThreshold       float64 `yaml:"refusal_threshold"`        // Reject compression if token savings < this ratio (default: 0.05 = must save at least 5%)
 
 	// Expand context feature
 	EnableExpandContext bool `yaml:"enable_expand_context"` // Inject expand_context tool
@@ -144,8 +99,25 @@ type ToolOutputConfig struct {
 	// When false (default), cheap models (e.g. gpt-4o-mini) are skipped automatically.
 	BypassCostCheck bool `yaml:"bypass_cost_check"`
 
-	// Skip compression for specific tools (e.g., Read, Edit — needed for exact matching)
-	SkipTools []string `yaml:"skip_tools,omitempty"`
+	// Skip compression for specific tool categories (e.g., browser — real-time content)
+	SkipTools SkipToolsConfig `yaml:"skip_tools,omitempty"`
+
+	// ContentFormats controls which detected text formats are eligible for compression.
+	// Default: all text-based formats (text, json, markdown) are compressed.
+	ContentFormats ContentFormatsConfig `yaml:"content_formats,omitempty"`
+}
+
+// ContentFormatsConfig narrows which text formats are eligible for compression.
+// allowed restricts to a subset; forbidden removes formats; forbidden takes precedence.
+type ContentFormatsConfig struct {
+	// Allowed is an explicit list of formats to compress.
+	// If empty, all DefaultCompressibleFormats (text, json, markdown) are eligible.
+	// Values not in DefaultCompressibleFormats are ignored with a startup warning.
+	Allowed []string `yaml:"allowed,omitempty"`
+
+	// Forbidden is a list of formats to never compress, even if in the allowed list.
+	// Forbidden takes precedence over allowed.
+	Forbidden []string `yaml:"forbidden,omitempty"`
 }
 
 // Validate validates tool output pipe config.
@@ -153,10 +125,15 @@ func (t *ToolOutputConfig) Validate() error {
 	if !t.Enabled {
 		return nil // Disabled pipes don't need strategy
 	}
+	// Validate target_compression_ratio when explicitly set (0 = API default, skip check)
+	if t.TargetCompressionRatio != 0 && (t.TargetCompressionRatio < MinTargetCompressionRatio || t.TargetCompressionRatio > MaxTargetCompressionRatio) {
+		return fmt.Errorf("tool_output: target_compression_ratio must be between %.1f (least aggressive) and %.1f (most aggressive), got %.2f",
+			MinTargetCompressionRatio, MaxTargetCompressionRatio, t.TargetCompressionRatio)
+	}
 	if t.Strategy == "" || t.Strategy == StrategyPassthrough {
 		return nil
 	}
-	if t.Strategy == StrategySimple {
+	if t.Strategy == StrategySimple || t.Strategy == StrategyTrimming {
 		return nil
 	}
 	if IsAPIStrategy(t.Strategy) {
@@ -173,37 +150,46 @@ func (t *ToolOutputConfig) Validate() error {
 		}
 		return nil
 	}
-	return fmt.Errorf("tool_output: unknown strategy %q, must be 'passthrough', 'simple', 'compresr', or 'external_provider'", t.Strategy)
+	return fmt.Errorf("tool_output: unknown strategy %q, must be 'passthrough', 'simple', 'trimming', 'compresr', or 'external_provider'", t.Strategy)
 }
 
-// =============================================================================
 // TOOL DISCOVERY PIPE CONFIG
-// =============================================================================
 
 // ToolDiscoveryConfig configures tool filtering.
 type ToolDiscoveryConfig struct {
-	Enabled          bool   `yaml:"enabled"`           // Enable this pipe
-	Strategy         string `yaml:"strategy"`          // passthrough | relevance | tool-search
+	Enabled          bool   `yaml:"enabled"`           // Enable this pipe (enables lazy loading)
+	Strategy         string `yaml:"strategy"`          // passthrough | relevance | compresr | tool-search
 	FallbackStrategy string `yaml:"fallback_strategy"` // Fallback when primary fails
 
 	// Provider reference (preferred over inline Compresr config)
 	// References a provider defined in the top-level "providers" section.
 	Provider string `yaml:"provider,omitempty"`
 
-	// Compresr API config (used by tool-search strategy for API-backed search)
+	// ═══════════════════════════════════════════════════════════════════
+	// STAGE 1: Tool Discovery API (filter 70 → 5 tools)
+	// Uses /api/compress/tool-discovery/ with tdc_coldbrew_v1
+	// ═══════════════════════════════════════════════════════════════════
 	Compresr CompresrConfig `yaml:"compresr,omitempty"`
 
 	// Filtering settings
-	MinTools    int      `yaml:"min_tools"`    // Below this count, no filtering (default: 5)
-	MaxTools    int      `yaml:"max_tools"`    // Keep at most this many tools (default: 25)
-	TargetRatio float64  `yaml:"target_ratio"` // Keep this ratio of tools (e.g., 0.8 = 80%)
-	MinRemoval  int      `yaml:"min_removal"`  // Skip filtering if fewer than N tools removed (default: 3, 0 = always filter)
-	AlwaysKeep  []string `yaml:"always_keep"`  // Tool names to never filter out
+	AlwaysKeep     []string `yaml:"always_keep"`     // Tool names to never filter out
+	TokenThreshold int      `yaml:"token_threshold"` // Trigger filtering when total tool definition tokens > this (default: 512)
 
-	// Search fallback (allows LLM to request filtered-out tools via gateway_search_tools)
-	EnableSearchFallback bool   `yaml:"enable_search_fallback"` // Inject gateway_search_tools (default: true for tool-search)
+	// Lazy loading settings (when enabled, tools become [deferred] stubs)
+	EnableSearchFallback bool   `yaml:"enable_search_fallback"` // Inject gateway_search_tools (default: true)
 	SearchToolName       string `yaml:"search_tool_name"`       // Name of the search tool (default: "gateway_search_tools")
 	MaxSearchResults     int    `yaml:"max_search_results"`     // Max tools returned by search (default: 5)
+
+	// ═══════════════════════════════════════════════════════════════════
+	// STAGE 2: Schema Compression (compress each matched tool schema)
+	// Uses /api/compress/tool-output/ with toc_latte_v1
+	// Only applies when lazy loading is enabled
+	// ═══════════════════════════════════════════════════════════════════
+	SchemaCompression SchemaCompressionConfig `yaml:"schema_compression"`
+
+	// DEPRECATED: Use schema_compression instead
+	SearchResultCompression          SearchResultCompressionConfig `yaml:"search_result_compression"`
+	EnableToolDescriptionCompression bool                          `yaml:"enable_tool_description_compression"`
 }
 
 // Validate validates tool discovery pipe config.
@@ -225,16 +211,160 @@ func (d *ToolDiscoveryConfig) Validate() error {
 	}
 }
 
-// =============================================================================
 // STRATEGY-SPECIFIC CONFIGS
-// =============================================================================
+
+// SearchResultCompressionConfig configures compression of gateway_search_tools results.
+// This is separate from tool_output compression — it compresses the tool schemas
+// returned to the LLM when they search for tools.
+// Strategy is always "compresr" and token threshold is always 512.
+type SearchResultCompressionConfig struct {
+	Enabled bool `yaml:"enabled"` // Enable search result compression
+
+	// Compresr/external_provider settings (optional, falls back to parent Compresr config)
+	Endpoint string `yaml:"endpoint,omitempty"` // API endpoint URL
+	APIKey   string `yaml:"api_key,omitempty"`  // API authentication key
+}
+
+// Validate validates search result compression config.
+func (s *SearchResultCompressionConfig) Validate() error {
+	return nil
+}
+
+// SchemaCompressionConfig configures per-tool schema compression (Stage 2).
+// Compresses tool schemas returned by gateway_search_tools on-demand.
+// Only the tools Claude requests get compressed.
+//
+// Uses a different endpoint than Stage 1:
+// - Stage 1 (tool_discovery): /api/compress/tool-discovery/ with tdc_coldbrew_v1
+// - Stage 2 (schema_compression): /api/compress/tool-output/ with toc_latte_v1
+//
+// Benefits over combined-blob compression:
+// - Each tool compressed with query context (better relevance)
+// - Parallel compression reduces latency
+// - Better compression ratios on individual schemas
+type SchemaCompressionConfig struct {
+	// Enabled turns on per-tool schema compression (default: false)
+	Enabled bool `yaml:"enabled"`
+
+	// Compresr API settings for schema compression
+	// Uses tool-output endpoint (different from tool-discovery)
+	Endpoint string        `yaml:"endpoint,omitempty"` // Default: /api/compress/tool-output/
+	APIKey   string        `yaml:"api_key,omitempty"`  // Falls back to parent compresr.api_key
+	Model    string        `yaml:"model,omitempty"`    // Default: toc_latte_v1
+	Timeout  time.Duration `yaml:"timeout,omitempty"`  // Default: 10s
+
+	// TokenThreshold skips compression for tools below this token count (default: 200)
+	// Small tools don't benefit from compression and add latency.
+	TokenThreshold int `yaml:"token_threshold"`
+
+	// Parallel enables parallel compression of multiple tools (default: true)
+	// When false, tools are compressed sequentially.
+	Parallel bool `yaml:"parallel"`
+
+	// MaxConcurrent limits parallel compression workers (default: 5)
+	// Prevents overwhelming the API with too many concurrent requests.
+	MaxConcurrent int `yaml:"max_concurrent"`
+}
+
+// Validate validates schema compression config.
+func (s *SchemaCompressionConfig) Validate() error {
+	if s.TokenThreshold < 0 {
+		return fmt.Errorf("schema_compression: token_threshold must be >= 0")
+	}
+	if s.MaxConcurrent < 0 {
+		return fmt.Errorf("schema_compression: max_concurrent must be >= 0")
+	}
+	return nil
+}
+
+// SkipToolsConfig specifies tool categories to skip during compression.
+type SkipToolsConfig struct {
+	// Categories is a list of tool categories to skip (e.g., "browser").
+	// Real-time content (browser) should not be compressed.
+	Categories []string `yaml:"categories,omitempty"`
+}
 
 // CompresrConfig contains settings for calling the Compresr compression API.
 // Not used in current release - tool output compression is disabled.
 type CompresrConfig struct {
 	Endpoint      string        `yaml:"endpoint"`       // Compresr API endpoint URL
-	AuthParam     string        `yaml:"api_key"`        // API authentication key
+	APIKey        string        `yaml:"api_key"`        // API authentication key
 	Model         string        `yaml:"model"`          // Compression model to use
 	Timeout       time.Duration `yaml:"timeout"`        // Request timeout
 	QueryAgnostic bool          `yaml:"query_agnostic"` // If true, compression is context-agnostic
+}
+
+// TASK OUTPUT PIPE CONFIG
+
+// TaskOutputConfig configures handling of task/subagent outputs.
+//
+// Task outputs are tool results produced by subagent calls (Claude Code Agent/Task tool,
+// Codex wait_agent only, etc.). Detection is schema-driven:
+// the gateway auto-detects the AI client from request headers and uses the matching
+// ClientSchema to identify subagent tool names — no pattern configuration required.
+//
+// Modes:
+//   - passthrough:       Route task outputs without modification (just claim IDs).
+//   - external_provider: Compress each task output via an external LLM in parallel.
+type TaskOutputConfig struct {
+	Enabled  bool   `yaml:"enabled"`  // Enable this pipe
+	Strategy string `yaml:"strategy"` // passthrough | external_provider
+
+	// ClientOverride forces a specific client schema regardless of auto-detection.
+	// Valid values: "claude_code", "codex", "generic".
+	// Leave empty to use automatic detection from request headers (recommended).
+	ClientOverride string `yaml:"client_override,omitempty"`
+
+	// Provider reference for external_provider strategy.
+	// References a named provider in the top-level "providers" section.
+	Provider string `yaml:"provider,omitempty"`
+
+	// ExternalProvider contains inline LLM settings for strategy=external_provider.
+	// Used when Provider reference is not set.
+	ExternalProvider TaskExternalProviderConfig `yaml:"external_provider,omitempty"`
+
+	// MinTokens is the minimum token count below which task output is not compressed.
+	// Only applies to external_provider strategy. Default: 256.
+	MinTokens int `yaml:"min_tokens"`
+
+	// LogFile is the base path for per-provider JSONL event logs.
+	// Provider name is appended automatically: {log_file}_{provider}.jsonl
+	// Example: "/var/log/gw/task_output" → "/var/log/gw/task_output_anthropic.jsonl"
+	// If empty, task output events are not logged to a separate file.
+	LogFile string `yaml:"log_file,omitempty"`
+}
+
+// TaskExternalProviderConfig contains LLM settings for task output compression.
+type TaskExternalProviderConfig struct {
+	// Provider explicitly identifies the LLM provider for auth/format handling.
+	// One of: "anthropic", "openai", "gemini", "bedrock".
+	// If empty, provider is auto-detected from Endpoint URL.
+	Provider string        `yaml:"provider,omitempty"`
+	Endpoint string        `yaml:"endpoint"` // LLM API endpoint URL
+	APIKey   string        `yaml:"api_key"`  // API authentication key
+	Model    string        `yaml:"model"`    // LLM model identifier
+	Timeout  time.Duration `yaml:"timeout"`  // Request timeout (default: 30s)
+}
+
+// Validate validates the task output pipe config.
+func (t *TaskOutputConfig) Validate() error {
+	if !t.Enabled {
+		return nil
+	}
+	switch t.Strategy {
+	case "", StrategyPassthrough:
+		return nil
+	case StrategyExternalProvider:
+		if t.Provider == "" && t.ExternalProvider.Endpoint == "" {
+			return fmt.Errorf("task_output: provider or external_provider.endpoint required when strategy=external_provider")
+		}
+		if t.ExternalProvider.Endpoint != "" && t.ExternalProvider.Model == "" {
+			return fmt.Errorf("task_output: external_provider.model required when external_provider.endpoint is set")
+		}
+		// TODO: When Provider is a named reference, model is validated at request time via resolveExternalProvider.
+		// Consider injecting a resolver func here to catch misconfigurations at startup.
+		return nil
+	default:
+		return fmt.Errorf("task_output: unknown strategy %q, must be 'passthrough' or 'external_provider'", t.Strategy)
+	}
 }

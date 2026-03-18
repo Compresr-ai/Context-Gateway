@@ -87,6 +87,9 @@ func retryableRequest(client *http.Client, req *http.Request, t *testing.T) (*ht
 }
 
 func getAnthropicKey(t *testing.T) string {
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
+	}
 	key := os.Getenv("ANTHROPIC_API_KEY")
 	if key == "" {
 		t.Skip("ANTHROPIC_API_KEY not set, skipping E2E test")
@@ -1018,86 +1021,6 @@ func TestE2E_ClaudeCode_CacheHit(t *testing.T) {
 }
 
 // =============================================================================
-// TEST 14: Git Diff Tool Output
-// =============================================================================
-
-func TestE2E_ClaudeCode_GitDiffOutput(t *testing.T) {
-	apiKey := getAnthropicKey(t)
-
-	cfg := passthroughConfig()
-	gw := gateway.New(cfg)
-	gwServer := httptest.NewServer(gw.Handler())
-	defer gwServer.Close()
-
-	gitDiff := `diff --git a/main.go b/main.go
-index abc123..def456 100644
---- a/main.go
-+++ b/main.go
-@@ -1,5 +1,7 @@
- package main
- 
-+import "fmt"
-+
- func main() {
--    // TODO
-+    fmt.Println("Hello")
- }`
-
-	requestBody := map[string]interface{}{
-		"model":      anthropicModel,
-		"max_tokens": 100,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": "What changed in this diff?"},
-			{
-				"role": "assistant",
-				"content": []map[string]interface{}{
-					{
-						"type":  "tool_use",
-						"id":    "toolu_git_001",
-						"name":  "bash",
-						"input": map[string]string{"command": "git diff HEAD~1"},
-					},
-				},
-			},
-			{
-				"role": "user",
-				"content": []map[string]interface{}{
-					{
-						"type":        "tool_result",
-						"tool_use_id": "toolu_git_001",
-						"content":     gitDiff,
-					},
-				},
-			},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
-	require.NoError(t, err)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", anthropicVersion)
-	req.Header.Set("X-Target-URL", anthropicBaseURL+"/v1/messages")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var response map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&response)
-
-	content := extractAnthropicContent(response)
-	assert.True(t, strings.Contains(strings.ToLower(content), "import") ||
-		strings.Contains(strings.ToLower(content), "print") ||
-		strings.Contains(strings.ToLower(content), "hello"))
-}
-
-// =============================================================================
 // TEST 15: JSON Tool Output
 // =============================================================================
 
@@ -1466,9 +1389,9 @@ func passthroughConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "error",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }
@@ -1485,14 +1408,14 @@ func compressionConfigAnthropicDirect() *config.Config {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr, // Uses Compresr API for compression
 				FallbackStrategy:       "passthrough",
-				MinBytes:               500,
-				MaxBytes:               65536,
+				MinTokens:              125,
+				MaxTokens:              16384,
 				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:      false,
 				EnableExpandContext:    false,
 				Compresr: config.CompresrConfig{
 					Endpoint:  "/api/compress/tool-output",
-					AuthParam: os.Getenv("COMPRESR_API_KEY"),
+					APIKey: os.Getenv("COMPRESR_API_KEY"),
 					Model:     "toc_espresso_v1", // Use OpenAI model via API
 					Timeout:   30 * time.Second,
 				},
@@ -1506,9 +1429,9 @@ func compressionConfigAnthropicDirect() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

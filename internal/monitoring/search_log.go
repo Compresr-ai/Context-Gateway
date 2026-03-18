@@ -1,7 +1,4 @@
 // Package monitoring - search_log.go tracks gateway_search_tools calls in memory.
-//
-// DESIGN: Ring buffer of recent gateway_search_tools events for dashboard display.
-// Shows which tools the model discovered via search.
 package monitoring
 
 import "time"
@@ -61,18 +58,7 @@ func (l *SearchLog) Summary() SearchSummary {
 
 // RecentForSession returns the most recent N entries for a specific session (newest first).
 func (l *SearchLog) RecentForSession(sessionID string, n int) []SearchLogEntry {
-	entries := l.buf.All()
-	if n <= 0 || len(entries) == 0 {
-		return nil
-	}
-
-	var result []SearchLogEntry
-	for i := len(entries) - 1; i >= 0 && len(result) < n; i-- {
-		if entries[i].SessionID == sessionID {
-			result = append(result, entries[i])
-		}
-	}
-	return result
+	return l.buf.RecentWhere(n, func(e SearchLogEntry) bool { return e.SessionID == sessionID })
 }
 
 // SummaryForSession returns a summary for a specific session.

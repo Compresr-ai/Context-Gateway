@@ -1,9 +1,4 @@
 // Package monitoring - logger.go provides structured logging via zerolog.
-//
-// DESIGN: Thin wrapper around zerolog with:
-//   - Configurable level, format (json/console), output (stdout/file)
-//   - Global() sets the default logger for the entire application
-//   - Request ID context helpers for request tracing
 package monitoring
 
 import (
@@ -53,6 +48,8 @@ func New(cfg LoggerConfig) *Logger {
 		writer = os.Stdout
 	case "stderr":
 		writer = os.Stderr
+	case "discard":
+		writer = io.Discard
 	default:
 		f, err := os.OpenFile(cfg.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
@@ -78,6 +75,14 @@ func Global(cfg LoggerConfig) {
 	globalLoggerOnce.Do(func() {
 		logger := New(cfg)
 		log.Logger = logger.zl
+
+		// Also set global level to ensure direct log.Info() etc. calls respect the config
+		levelName := strings.ToLower(strings.TrimSpace(cfg.Level))
+		if levelName == "off" || levelName == "none" || levelName == "disabled" {
+			zerolog.SetGlobalLevel(zerolog.Disabled)
+		} else if parsed, err := zerolog.ParseLevel(cfg.Level); err == nil {
+			zerolog.SetGlobalLevel(parsed)
+		}
 	})
 }
 

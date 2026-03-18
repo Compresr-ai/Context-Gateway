@@ -50,16 +50,16 @@ func TestIntegration_ToolOutput_ExpandContextInjected(t *testing.T) {
 	// Verify: the response to the client should NOT contain expand_context
 	assert.NotContains(t, string(respBody), "expand_context",
 		"client response should not contain expand_context")
-	assert.NotContains(t, string(respBody), "<<<SHADOW:",
+	assert.NotContains(t, string(respBody), "[REF:",
 		"client response should not contain shadow markers")
 }
 
 // =============================================================================
-// TEST 2: Small output not compressed (below min_bytes)
+// TEST 2: Small output not compressed (below min_tokens)
 // =============================================================================
 
 // TestIntegration_ToolOutput_SmallOutputNotCompressed sends a request with a small
-// tool result (well below min_bytes threshold). Verifies the output passes through
+// tool result (well below min_tokens threshold). Verifies the output passes through
 // unchanged - no compression markers, no shadow IDs.
 func TestIntegration_ToolOutput_SmallOutputNotCompressed(t *testing.T) {
 	mock := newMockLLM(func(reqBody []byte, callNum int) []byte {
@@ -67,7 +67,7 @@ func TestIntegration_ToolOutput_SmallOutputNotCompressed(t *testing.T) {
 	})
 	defer mock.close()
 
-	cfg := highMinBytesConfig() // min_bytes=50000
+	cfg := highMinTokensConfig() // min_tokens=12500
 	gwServer := createGateway(cfg)
 	defer gwServer.Close()
 
@@ -85,14 +85,14 @@ func TestIntegration_ToolOutput_SmallOutputNotCompressed(t *testing.T) {
 	forwardedBody := requests[0].Body
 
 	// The small output should NOT have been compressed (no shadow markers in messages content).
-	// Note: the tool description for expand_context legitimately mentions "<<<SHADOW:shadow_xxx>>>"
+	// Note: the tool description for expand_context legitimately mentions "[REF:shadow_xxx]"
 	// so we check that no actual shadow IDs (hex format) appear in the messages content, not the
 	// tool definitions. Actual shadow IDs use hex chars (e.g. shadow_abc123), not "shadow_xxx".
 	var parsedBody map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(forwardedBody, &parsedBody))
 	messagesJSON, hasMsgs := parsedBody["messages"]
 	if hasMsgs {
-		assert.NotContains(t, string(messagesJSON), "<<<SHADOW:",
+		assert.NotContains(t, string(messagesJSON), "[REF:",
 			"small tool output should not be compressed (no shadow markers in messages)")
 	}
 

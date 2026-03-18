@@ -16,7 +16,6 @@ server:
   read_timeout: 30s
   write_timeout: 1000s
 urls:
-  gateway: "http://localhost:18081"
   compresr: "https://api.compresr.ai"
 store:
   type: memory
@@ -29,7 +28,7 @@ pipes:
   tool_output:
     enabled: true
     strategy: compresr
-    min_bytes: 2048
+    min_tokens: 512
     target_compression_ratio: 0.5
     compresr:
       endpoint: "https://api.compresr.ai/api/compress/tool-output/"
@@ -39,8 +38,6 @@ pipes:
   tool_discovery:
     enabled: true
     strategy: relevance
-    min_tools: 5
-    max_tools: 25
 preemptive:
   enabled: true
   trigger_threshold: 85.0
@@ -154,15 +151,13 @@ func TestReloaderUpdatePatchesPipes(t *testing.T) {
 	cfg := minimalConfig()
 	r := config.NewReloader(cfg, "")
 
+	// Pipes are always enabled by design (applyDefaults forces Enabled=true).
+	// Patching Enabled=false is overridden back to true on the next applyDefaults call.
 	disabled := false
-	minTools := 10
 	updated, err := r.Update(config.ConfigPatch{
 		Pipes: &config.PipesPatch{
 			ToolOutput: &config.ToolOutputPatch{
 				Enabled: &disabled,
-			},
-			ToolDiscovery: &config.ToolDiscoveryPatch{
-				MinTools: &minTools,
 			},
 		},
 	})
@@ -170,11 +165,8 @@ func TestReloaderUpdatePatchesPipes(t *testing.T) {
 		t.Fatalf("Update failed: %v", err)
 	}
 
-	if updated.Pipes.ToolOutput.Enabled {
-		t.Fatal("expected tool_output disabled")
-	}
-	if updated.Pipes.ToolDiscovery.MinTools != 10 {
-		t.Fatalf("expected min_tools=10, got %d", updated.Pipes.ToolDiscovery.MinTools)
+	if !updated.Pipes.ToolOutput.Enabled {
+		t.Fatal("expected tool_output enabled (pipes are always-on by design)")
 	}
 }
 

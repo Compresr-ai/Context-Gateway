@@ -57,14 +57,12 @@ Edge cases, complex scenarios, and real-world output formats.
 |-----------|-------------|
 | `TestHardIntegration_ThreeToolsOneLarge_OneExpandNeeded` | Mixed tool output sizes |
 | `TestHardIntegration_ThreeToolsAllLarge` | All large tool outputs |
-| `TestHardIntegration_MixedSuccessAndError` | Success and error tool results together |
 | `TestHardIntegration_LargeErrorMessage` | Large stack trace error handling |
 | `TestHardIntegration_RealWorld_GitLog` | Real git log output |
 | `TestHardIntegration_RealWorld_NPMInstall` | npm install output |
 | `TestHardIntegration_RealWorld_DockerBuild` | Docker build output |
 | `TestHardIntegration_EmptyToolResult` | Empty tool result handling |
 | `TestHardIntegration_SpecialCharactersInOutput` | Unicode, emoji, escape characters |
-| `TestHardIntegration_BinaryLikeContent` | Binary-like content detection |
 
 ## Running Tests
 

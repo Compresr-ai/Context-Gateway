@@ -59,7 +59,7 @@ func TestAnthropic_BytePreservation_MultiTurnPrefix(t *testing.T) {
 	turn1Body := []byte(`{"model":"claude-3","messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"long original content that gets compressed"}]}]}`)
 
 	turn1Results := []adapters.CompressedResult{
-		{ID: "t1", Compressed: "<<<SHADOW:shadow_abc>>>", MessageIndex: 2, BlockIndex: 0},
+		{ID: "t1", Compressed: "[REF:shadow_abc]", MessageIndex: 2, BlockIndex: 0},
 	}
 
 	turn1Modified, err := adapter.ApplyToolOutput(turn1Body, turn1Results)
@@ -69,7 +69,7 @@ func TestAnthropic_BytePreservation_MultiTurnPrefix(t *testing.T) {
 	turn2Body := []byte(`{"model":"claude-3","messages":[{"role":"user","content":"start"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"long original content that gets compressed"}]},{"role":"assistant","content":"I read the file"},{"role":"user","content":"now do something else"}]}`)
 
 	turn2Results := []adapters.CompressedResult{
-		{ID: "t1", Compressed: "<<<SHADOW:shadow_abc>>>", MessageIndex: 2, BlockIndex: 0},
+		{ID: "t1", Compressed: "[REF:shadow_abc]", MessageIndex: 2, BlockIndex: 0},
 	}
 
 	turn2Modified, err := adapter.ApplyToolOutput(turn2Body, turn2Results)

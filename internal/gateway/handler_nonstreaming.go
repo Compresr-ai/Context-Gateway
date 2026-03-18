@@ -3,6 +3,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -12,7 +13,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/compresr/context-gateway/internal/adapters"
-	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/monitoring"
 )
 
@@ -21,10 +21,10 @@ import (
 func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, forwardBody []byte,
 	pipeCtx *PipelineContext, requestID string, startTime time.Time, adapter adapters.Adapter,
 	pipeType PipeType, pipeStrategy string, originalBodySize int, compressionUsed bool,
-	compressLatency time.Duration, originalBody []byte, expandEnabled bool) {
+	compressLatency time.Duration, originalBody []byte, expandEnabled bool, initialUsage *adapters.UsageInfo,
+	compressedBodySize int) {
 
 	providerName := adapter.Name()
-	provider := adapter.Provider()
 	authMeta := forwardAuthMeta{}
 
 	forwardFunc := func(ctx context.Context, body []byte) (*http.Response, error) {
@@ -36,19 +36,17 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	}
 
 	// Build request-scoped phantom handlers to avoid cross-request state leakage.
-	// searchFallback is enabled for tool-search strategy (universal dispatcher)
-	searchFallbackEnabled := g.cfg().Pipes.ToolDiscovery.Enabled &&
-		(g.cfg().Pipes.ToolDiscovery.Strategy == config.StrategyToolSearch || g.cfg().Pipes.ToolDiscovery.EnableSearchFallback)
+	// Always enabled — phantom loop handles gateway_search_tools unconditionally (MCP-server pattern).
+	// InjectAll in handler.go already injects gateway_search_tools into every request; the loop must always handle it.
+	searchFallbackEnabled := true // Always enabled — phantom loop handles gateway_search_tools unconditionally (MCP-server pattern)
 	var requestPhantomLoop *PhantomLoop
 	var searchHandler *SearchToolHandler
+	var combinedDeferred []adapters.ExtractedContent
 	if expandEnabled || searchFallbackEnabled {
 		var handlers []PhantomToolHandler
 
 		if searchFallbackEnabled {
-			searchToolName := g.cfg().Pipes.ToolDiscovery.SearchToolName
-			if searchToolName == "" {
-				searchToolName = "gateway_search_tools"
-			}
+			searchToolName := g.searchToolName()
 			maxSearchResults := g.cfg().Pipes.ToolDiscovery.MaxSearchResults
 			if maxSearchResults <= 0 {
 				maxSearchResults = 5
@@ -60,31 +58,78 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 				AlwaysKeep: g.cfg().Pipes.ToolDiscovery.AlwaysKeep,
 			}
 
-			// Configure Compresr API endpoint for API-backed search
+			// Configure Stage 1: Tool Discovery API endpoint
 			apiEndpoint := g.cfg().Pipes.ToolDiscovery.Compresr.Endpoint
 			if apiEndpoint == "" && g.cfg().URLs.Compresr != "" {
+				// No endpoint configured, use default path with base URL
 				apiEndpoint = strings.TrimRight(g.cfg().URLs.Compresr, "/") + "/api/compress/tool-discovery/"
+			} else if strings.HasPrefix(apiEndpoint, "/") && g.cfg().URLs.Compresr != "" {
+				// Relative path configured — join with base URL
+				apiEndpoint = strings.TrimRight(g.cfg().URLs.Compresr, "/") + apiEndpoint
 			}
 			opts.APIEndpoint = apiEndpoint
-			opts.ProviderAuth = g.cfg().Pipes.ToolDiscovery.Compresr.AuthParam
+			opts.ProviderAuth = g.cfg().Pipes.ToolDiscovery.Compresr.APIKey
+			opts.APIModel = g.cfg().Pipes.ToolDiscovery.Compresr.Model
 			opts.APITimeout = g.cfg().Pipes.ToolDiscovery.Compresr.Timeout
+
+			// Configure Stage 2: Schema Compression (per-tool compression)
+			schemaCfg := g.cfg().Pipes.ToolDiscovery.SchemaCompression
+			schemaEndpoint := schemaCfg.Endpoint
+			if schemaEndpoint == "" && g.cfg().URLs.Compresr != "" {
+				schemaEndpoint = strings.TrimRight(g.cfg().URLs.Compresr, "/") + "/api/compress/tool-output/"
+			} else if strings.HasPrefix(schemaEndpoint, "/") && g.cfg().URLs.Compresr != "" {
+				schemaEndpoint = strings.TrimRight(g.cfg().URLs.Compresr, "/") + schemaEndpoint
+			}
+			schemaAPIKey := schemaCfg.APIKey
+			if schemaAPIKey == "" {
+				schemaAPIKey = g.cfg().Pipes.ToolDiscovery.Compresr.APIKey // Fall back to Stage 1 key
+			}
+			opts.SchemaCompression = SchemaCompressionOpts{
+				Enabled:        schemaCfg.Enabled,
+				Endpoint:       schemaEndpoint,
+				APIKey:         schemaAPIKey,
+				Model:          schemaCfg.Model,
+				Timeout:        schemaCfg.Timeout,
+				TokenThreshold: schemaCfg.TokenThreshold,
+				Parallel:       schemaCfg.Parallel,
+				MaxConcurrent:  schemaCfg.MaxConcurrent,
+			}
+			if opts.SchemaCompression.Enabled && g.compresrClient != nil {
+				opts.SchemaCompression.CompresrClient = g.compresrClient
+			}
 
 			searchHandler = NewSearchToolHandler(searchToolName, maxSearchResults, g.toolSessions, opts)
 			if g.searchLog != nil {
 				searchHandler.WithSearchLog(g.searchLog, requestID, pipeCtx.CostSessionID)
 			}
+			if g.tracker != nil {
+				searchHandler.WithTracker(g.tracker)
+			}
+			// Set isMainAgent for tool search logging
+			searchHandler.WithIsMainAgent(pipeCtx.Classification.IsMainAgent)
 
 			// Combine deferred tools from session (previous requests) AND current request.
 			// This ensures tools filtered in this request are searchable in the same turn.
+			// Current-request tools take precedence; session tools fill in the rest (dedup by name).
 			if pipeCtx.ToolSessionID != "" {
-				var combinedDeferred []adapters.ExtractedContent
+				seen := make(map[string]bool)
+				// Current request tools first (latest definition wins).
+				for _, t := range pipeCtx.DeferredTools {
+					if !seen[t.ToolName] {
+						seen[t.ToolName] = true
+						combinedDeferred = append(combinedDeferred, t)
+					}
+				}
+				// Session tools second (accumulated from previous requests, skip duplicates).
 				if session := g.toolSessions.Get(pipeCtx.ToolSessionID); session != nil {
-					combinedDeferred = append(combinedDeferred, session.DeferredTools...)
+					for _, t := range session.DeferredTools {
+						if !seen[t.ToolName] {
+							seen[t.ToolName] = true
+							combinedDeferred = append(combinedDeferred, t)
+						}
+					}
 				}
-				if len(pipeCtx.DeferredTools) > 0 {
-					combinedDeferred = append(combinedDeferred, pipeCtx.DeferredTools...)
-				}
-				searchHandler.SetRequestContext(pipeCtx.ToolSessionID, combinedDeferred)
+				searchHandler.SetRequestContext(r.Context(), pipeCtx.ToolSessionID, combinedDeferred, pipeCtx.CapturedAuth)
 			}
 			handlers = append(handlers, searchHandler)
 		}
@@ -94,7 +139,20 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 			if g.expandLog != nil {
 				ecHandler.WithExpandLog(g.expandLog, requestID, pipeCtx.CostSessionID)
 			}
+			ecHandler.WithExpandCallsLog(g.tracker.ExpandCallsLogger(), pipeCtx.ToolOutputCompressions)
 			handlers = append(handlers, ecHandler)
+		}
+
+		// Intercept direct calls to deferred (stubbed) tools.
+		// When the LLM bypasses gateway_search_tools and calls a deferred tool
+		// directly using training knowledge, this handler intercepts it, injects
+		// the full schema, and asks the LLM to retry with the schema now loaded.
+		if len(combinedDeferred) > 0 {
+			handlers = append(handlers, NewDeferredCallInterceptor(
+				combinedDeferred,
+				g.toolSessions,
+				pipeCtx.ToolSessionID,
+			))
 		}
 
 		if len(handlers) > 0 {
@@ -106,24 +164,40 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	var result *PhantomLoopResult
 	var err error
 	if requestPhantomLoop != nil {
-		result, err = requestPhantomLoop.Run(r.Context(), forwardFunc, forwardBody, provider)
+		result, err = requestPhantomLoop.Run(r.Context(), forwardFunc, forwardBody, adapter)
 	} else {
 		// Fallback: simple forward without phantom tool handling
 		resp, fwdErr := forwardFunc(r.Context(), forwardBody)
 		if fwdErr != nil {
 			err = fwdErr
 		} else {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
-			_ = resp.Body.Close()
-			result = &PhantomLoopResult{
-				ResponseBody: respBody,
-				Response:     resp,
+			// defer close so future refactors adding early returns don't leak
+			defer resp.Body.Close() //nolint:gocritic // not inside a loop
+			// surface read errors so caller gets 502, not a silent partial response
+			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
+			if readErr != nil {
+				err = fmt.Errorf("read upstream response: %w", readErr)
+			} else {
+				result = &PhantomLoopResult{
+					ResponseBody: respBody,
+					Response:     resp,
+				}
 			}
 		}
 	}
 
+	// Merge initial streaming usage (from search fallback path) into accumulated usage.
+	// The API bills for the initial streaming forward, so we must capture it.
+	if initialUsage != nil && result != nil {
+		result.AccumulatedUsage.InputTokens += initialUsage.InputTokens
+		result.AccumulatedUsage.OutputTokens += initialUsage.OutputTokens
+		result.AccumulatedUsage.CacheCreationInputTokens += initialUsage.CacheCreationInputTokens
+		result.AccumulatedUsage.CacheReadInputTokens += initialUsage.CacheReadInputTokens
+		result.AccumulatedUsage.TotalTokens += initialUsage.TotalTokens
+	}
+
 	if err != nil || result == nil || result.Response == nil {
-		g.logToolDiscoveryAPIFallbacks(requestID, searchHandler, pipeCtx.Model, pipeCtx.ToolDiscoveryModel)
+		g.logToolDiscoveryAPIFallbacks(requestID, pipeCtx.CostSessionID, searchHandler, pipeCtx.Model, pipeCtx.ToolDiscoveryModel, pipeCtx.Classification.IsMainAgent)
 		var forwardLatency time.Duration
 		if result != nil {
 			forwardLatency = result.ForwardLatency
@@ -134,7 +208,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 			provider: providerName, pipeType: pipeType, pipeStrategy: pipeStrategy, originalBodySize: originalBodySize,
 			compressionUsed: compressionUsed, statusCode: 502, errorMsg: "phantom loop failed",
 			compressLatency: compressLatency, forwardLatency: forwardLatency, pipeCtx: pipeCtx,
-			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody,
+			adapter: adapter, requestBody: originalBody, forwardBody: forwardBody, compressedBodySize: compressedBodySize,
 			authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
 			requestHeaders: r.Header, responseHeaders: nil, upstreamURL: "", fallbackReason: "",
 		})
@@ -143,7 +217,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	}
 
 	responseBody := result.ResponseBody
-	g.logToolDiscoveryAPIFallbacks(requestID, searchHandler, pipeCtx.Model, pipeCtx.ToolDiscoveryModel)
+	g.logToolDiscoveryAPIFallbacks(requestID, pipeCtx.CostSessionID, searchHandler, pipeCtx.Model, pipeCtx.ToolDiscoveryModel, pipeCtx.Classification.IsMainAgent)
 
 	// Update pipeCtx with loop usage for logging
 	pipeCtx.ExpandLoopCount = result.LoopCount
@@ -156,6 +230,24 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 			Msg("phantom_loop: completed")
 	}
 
+	// Query expand log for this request's expand_context stats and penalty counts
+	var expandCallsFound, expandCallsNotFound, expandPenaltyTokens int
+	if g.expandLog != nil {
+		summary, contentTokens := g.expandLog.SummaryForRequest(requestID)
+		expandCallsFound = summary.Found
+		expandCallsNotFound = summary.NotFound
+		expandPenaltyTokens = contentTokens
+	}
+
+	// Pass accumulated phantom loop usage when loop ran (LoopCount > 0) or when
+	// initialUsage was provided (search fallback path), so telemetry captures
+	// costs from ALL API calls, not just the final response.
+	var phantomUsage *adapters.UsageInfo
+	if result.AccumulatedUsage.TotalTokens > 0 &&
+		(result.LoopCount > 0 || initialUsage != nil) {
+		phantomUsage = &result.AccumulatedUsage
+	}
+
 	// Record telemetry with usage extraction
 	g.recordRequestTelemetry(telemetryParams{
 		requestID: requestID, startTime: startTime, method: r.Method, path: r.URL.Path,
@@ -163,11 +255,21 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 		provider: providerName, pipeType: pipeType, pipeStrategy: pipeStrategy, originalBodySize: originalBodySize,
 		compressionUsed: compressionUsed, statusCode: result.Response.StatusCode,
 		compressLatency: compressLatency, forwardLatency: result.ForwardLatency,
-		expandLoops: result.LoopCount, pipeCtx: pipeCtx,
-		adapter: adapter, requestBody: originalBody, responseBody: result.ResponseBody,
-		forwardBody:     forwardBody,
-		authModeInitial: authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
-		requestHeaders: r.Header, responseHeaders: result.Response.Header, upstreamURL: result.Response.Request.URL.String(), fallbackReason: "",
+		expandLoops:      result.LoopCount,
+		expandCallsFound: expandCallsFound, expandCallsNotFound: expandCallsNotFound,
+		expandPenaltyTokens: expandPenaltyTokens,
+		pipeCtx:             pipeCtx,
+		adapter:             adapter, requestBody: originalBody, responseBody: result.ResponseBody,
+		phantomLoopUsage:   phantomUsage,
+		forwardBody:        forwardBody,
+		compressedBodySize: compressedBodySize,
+		authModeInitial:    authMeta.InitialMode, authModeEffective: authMeta.EffectiveMode, authFallbackUsed: authMeta.FallbackUsed,
+		requestHeaders: r.Header, responseHeaders: result.Response.Header, upstreamURL: func() string {
+			if result.Response.Request != nil {
+				return result.Response.Request.URL.String()
+			}
+			return ""
+		}(), fallbackReason: "",
 	})
 
 	// Log provider errors and compression details
@@ -175,12 +277,18 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 		g.alerts.FlagProviderError(requestID, providerName, result.Response.StatusCode,
 			string(responseBody[:min(500, len(responseBody))]))
 	}
-	// Log for each pipe that ran
-	if len(pipeCtx.ToolOutputCompressions) > 0 || pipeCtx.OutputCompressed {
+	// Log for each pipe that ran; always write session tool catalog regardless of pipes.
+	toolOutputRan := len(pipeCtx.ToolOutputCompressions) > 0 || pipeCtx.OutputCompressed
+	toolDiscoveryRan := pipeCtx.KeptToolCount > 0 || pipeCtx.ToolsFiltered || pipeCtx.ToolDiscoverySkipReason != ""
+	if toolOutputRan {
 		g.logCompressionDetails(pipeCtx, requestID, string(PipeToolOutput), originalBody, forwardBody)
 	}
-	if pipeCtx.FilteredToolCount > 0 || pipeCtx.ToolsFiltered {
+	if toolDiscoveryRan {
 		g.logCompressionDetails(pipeCtx, requestID, string(PipeToolDiscovery), originalBody, forwardBody)
+	}
+	if !toolOutputRan && !toolDiscoveryRan {
+		// No pipe ran (e.g., all pipes disabled) — still record session_tools.json.
+		g.ensureSessionToolsCatalog(pipeCtx, forwardBody)
 	}
 
 	// Write response — explicitly set Content-Type to prevent browser MIME sniffing (XSS mitigation).
@@ -197,7 +305,7 @@ func (g *Gateway) handleNonStreaming(w http.ResponseWriter, r *http.Request, for
 	_, _ = w.Write(responseBody) //nolint:gosec // G705: Content-Type and X-Content-Type-Options: nosniff set above
 }
 
-func (g *Gateway) logToolDiscoveryAPIFallbacks(requestID string, searchHandler *SearchToolHandler, providerModel, toolDiscoveryModel string) {
+func (g *Gateway) logToolDiscoveryAPIFallbacks(requestID, sessionID string, searchHandler *SearchToolHandler, providerModel, toolDiscoveryModel string, isMainAgent bool) {
 	if searchHandler == nil || !g.tracker.ToolDiscoveryLogEnabled() {
 		return
 	}
@@ -209,23 +317,43 @@ func (g *Gateway) logToolDiscoveryAPIFallbacks(requestID string, searchHandler *
 			status = status + "_" + evt.Reason
 		}
 
-		comparison := monitoring.CompressionComparison{
-			RequestID:         requestID,
-			ProviderModel:     providerModel,
-			ToolName:          searchHandler.Name(),
-			OriginalBytes:     evt.DeferredCount,
-			CompressedBytes:   evt.ReturnedCount,
-			CompressionRatio:  float64(max(evt.ReturnedCount, 1)) / float64(max(evt.DeferredCount, 1)),
-			OriginalContent:   evt.Query,
-			CompressedContent: truncateLogValue(evt.Detail, 500),
-			Status:            status,
-			CompressionModel:  toolDiscoveryModel,
+		entry := monitoring.ToolSearchResult{
+			LogEntryBase: monitoring.LogEntryBase{
+				RequestID: requestID,
+				EventType: monitoring.EventTypeToolSearchResult,
+				SessionID: sessionID,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			},
+			IsMainAgent:      isMainAgent,
+			Query:            evt.Query,
+			DeferredCount:    evt.DeferredCount,
+			ResultsCount:     evt.ReturnedCount,
+			OriginalTokens:   evt.OriginalPoolTokens,
+			CompressedTokens: evt.OriginalPoolTokens, // fallback kept all tools (regex ran instead of API)
+			CompressionRatio: 0,                      // 0 = nothing removed
+			Status:           status,
+			ProviderModel:    providerModel,
+			CompressionModel: toolDiscoveryModel,
+			ErrorDetail:      truncateLogValue(evt.Detail, 500),
 		}
-		g.tracker.LogToolDiscoveryComparison(comparison)
+		g.tracker.LogToolSearch(entry)
 
 		// Record to savings tracker (API fallback = tools still filtered)
+		// Use CompressionComparison for the savings tracker since it expects that type.
 		if g.savings != nil {
-			g.savings.RecordToolDiscovery(comparison, "")
+			comparison := monitoring.CompressionComparison{
+				RequestID:        requestID,
+				EventType:        monitoring.EventTypeToolSearchResult,
+				SessionID:        sessionID,
+				IsMainAgent:      isMainAgent,
+				ProviderModel:    providerModel,
+				OriginalTokens:   evt.OriginalPoolTokens,
+				CompressedTokens: evt.OriginalPoolTokens, // fallback kept all tools
+				CompressionRatio: 0,                      // 0 = nothing removed
+				Status:           status,
+				CompressionModel: toolDiscoveryModel,
+			}
+			g.savings.RecordToolDiscovery(comparison, "", isMainAgent)
 		}
 	}
 }

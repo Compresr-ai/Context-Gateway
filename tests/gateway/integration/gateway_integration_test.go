@@ -75,16 +75,19 @@ func TestIntegration_Gateway_ParallelPipes(t *testing.T) {
 	forwardedBody := requests[0].Body
 	toolNames := extractToolNames(forwardedBody)
 
-	// Tool discovery pipe should have filtered: fewer than 20 original tools
-	assert.Less(t, len(toolNames), 20,
-		"tool_discovery should have filtered tools from 20 to fewer, got %d: %v", len(toolNames), toolNames)
+	// Tool discovery pipe should have filtered: fewer than 20 effective (non-stub) tools.
+	// Stubs preserve the tools[] array length for KV-cache stability, so total len may
+	// exceed 20 (N stubs + gateway_search_tools). Count only non-deferred tools.
+	effectiveCount := countEffectiveToolNames(forwardedBody)
+	assert.Less(t, effectiveCount, 20,
+		"tool_discovery should have filtered effective tools from 20 to fewer, got %d total tools: %v", len(toolNames), toolNames)
 
 	// Tool-search strategy should inject gateway_search_tools
 	assert.True(t, containsToolName(forwardedBody, "gateway_search_tools"),
 		"forwarded request should contain gateway_search_tools")
 
 	// Tool output pipe: check for compression markers or expand_context injection
-	hasCompression := bytes.Contains(forwardedBody, []byte("<<<SHADOW:"))
+	hasCompression := bytes.Contains(forwardedBody, []byte("[REF:"))
 	if hasCompression {
 		t.Log("Tool output compression detected (shadow markers present)")
 	}

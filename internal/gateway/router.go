@@ -1,11 +1,4 @@
 // Router routes requests to compression pipes based on content analysis.
-//
-// DESIGN: Content-based routing (no thresholds - intercept ALL):
-//  1. Tool outputs (role: "tool") -> ToolOutputPipe
-//  2. Tools present              -> ToolDiscoveryPipe
-//
-// Uses worker pools for concurrent pipe execution.
-// Threshold logic (min bytes) is handled INSIDE each pipe.
 package gateway
 
 import (
@@ -16,9 +9,11 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
+	"github.com/compresr/context-gateway/internal/adapters"
 	"github.com/compresr/context-gateway/internal/config"
 	"github.com/compresr/context-gateway/internal/monitoring"
 	"github.com/compresr/context-gateway/internal/pipes"
+	taskoutput "github.com/compresr/context-gateway/internal/pipes/task_output"
 	tooldiscovery "github.com/compresr/context-gateway/internal/pipes/tool_discovery"
 	tooloutput "github.com/compresr/context-gateway/internal/pipes/tool_output"
 	"github.com/compresr/context-gateway/internal/store"
@@ -32,13 +27,19 @@ const (
 	PipeNone          = monitoring.PipeNone
 	PipeToolOutput    = monitoring.PipeToolOutput
 	PipeToolDiscovery = monitoring.PipeToolDiscovery
+	PipeTaskOutput    = monitoring.PipeTaskOutput
 )
 
 // Router routes requests to the appropriate pipe based on content analysis.
 type Router struct {
+	mu                sync.RWMutex
 	config            *config.Config
+	taskOutputPool    *Pool // task output pipe (runs before tool_output)
 	toolOutputPool    *Pool
 	toolDiscoveryPool *Pool
+	taskOutputLogger  *taskoutput.Logger // shared logger for all task_output pool workers
+	store             store.Store        // kept for pool rebuild on config reload
+	poolSize          int
 }
 
 // Pool manages workers for a pipe type.
@@ -62,8 +63,15 @@ func (p *Pool) release(pipe pipes.Pipe) { p.workers <- pipe }
 func NewRouter(cfg *config.Config, st store.Store) *Router {
 	poolSize := 10
 
+	logger := taskoutput.NewLogger(cfg.Pipes.TaskOutput.LogFile)
 	return &Router{
-		config: cfg,
+		config:           cfg,
+		store:            st,
+		poolSize:         poolSize,
+		taskOutputLogger: logger,
+		taskOutputPool: newPool(poolSize, func() pipes.Pipe {
+			return taskoutput.New(cfg, logger)
+		}),
 		toolOutputPool: newPool(poolSize, func() pipes.Pipe {
 			return tooloutput.New(cfg, st)
 		}),
@@ -73,33 +81,92 @@ func NewRouter(cfg *config.Config, st store.Store) *Router {
 	}
 }
 
-// UpdateConfig swaps the router's config reference (hot-reload).
-// Pipe settings (enabled, strategy, thresholds) take effect on next request.
+// Close releases resources held by the router (log file descriptors, etc.).
+func (r *Router) Close() error {
+	r.mu.Lock()
+	logger := r.taskOutputLogger
+	r.mu.Unlock()
+	if logger != nil {
+		return logger.Close()
+	}
+	return nil
+}
+
+// UpdateConfig swaps the router's config and rebuilds pipe pools (hot-reload).
+// New pools are built before acquiring the lock so in-flight requests on the old
+// pools complete normally — old pool workers are released back to the old pool
+// channel and garbage-collected once no references remain.
+// The old logger is closed after the lock is released to avoid holding the lock
+// during I/O.
 func (r *Router) UpdateConfig(cfg *config.Config) {
+	newLogger := taskoutput.NewLogger(cfg.Pipes.TaskOutput.LogFile)
+	newTA := newPool(r.poolSize, func() pipes.Pipe {
+		return taskoutput.New(cfg, newLogger)
+	})
+	newTO := newPool(r.poolSize, func() pipes.Pipe {
+		return tooloutput.New(cfg, r.store)
+	})
+	newTD := newPool(r.poolSize, func() pipes.Pipe {
+		return tooldiscovery.New(cfg)
+	})
+
+	r.mu.Lock()
+	oldLogger := r.taskOutputLogger
 	r.config = cfg
+	r.taskOutputLogger = newLogger
+	r.taskOutputPool = newTA
+	r.toolOutputPool = newTO
+	r.toolDiscoveryPool = newTD
+	r.mu.Unlock()
+
+	// Close old logger after releasing the lock to avoid holding the lock during I/O.
+	if oldLogger != nil {
+		if err := oldLogger.Close(); err != nil {
+			log.Warn().Err(err).Msg("router: failed to close old task_output logger on config reload")
+		}
+	}
+}
+
+// snapshot returns a consistent read of config + pools under a short RLock.
+// Callers use the returned values for the duration of one request so they
+// see a coherent config snapshot even if UpdateConfig fires concurrently.
+func (r *Router) snapshot() (*config.Config, *Pool, *Pool, *Pool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.config, r.taskOutputPool, r.toolOutputPool, r.toolDiscoveryPool
 }
 
 // RouteResult indicates which pipes should run on this request.
 type RouteResult struct {
+	TaskOutput    bool // task output pipe (runs before tool_output)
 	ToolOutput    bool
 	ToolDiscovery bool
 }
 
 // RouteFlags returns which pipes should run on this request.
-func (r *Router) RouteFlags(ctx *PipelineContext) RouteResult {
+func (r *Router) RouteFlags(ctx *PipelineContext, cfg *config.Config) RouteResult {
 	result := RouteResult{}
 	if ctx == nil || ctx.Adapter == nil || len(ctx.OriginalRequest) == 0 {
 		return result
 	}
 
-	// Check for tool outputs
-	if r.config.Pipes.ToolOutput.Enabled {
-		contents, err := ctx.Adapter.ExtractToolOutput(ctx.OriginalRequest)
-		result.ToolOutput = err == nil && len(contents) > 0
+	// Extract tool outputs once for both task_output and tool_output checks.
+	var toolOutputs []adapters.ExtractedContent
+	if cfg.Pipes.TaskOutput.Enabled || cfg.Pipes.ToolOutput.Enabled {
+		toolOutputs, _ = ctx.Adapter.ExtractToolOutput(ctx.OriginalRequest)
 	}
 
+	// Check for task outputs (enabled + tool results present).
+	// Patterns are optional — with no patterns configured the pipe runs in passthrough
+	// and claims nothing (tool_output still processes all outputs). The pipe itself
+	// handles empty-patterns gracefully.
+	result.TaskOutput = cfg.Pipes.TaskOutput.Enabled && len(toolOutputs) > 0
+
+	// Check for tool outputs.
+	result.ToolOutput = cfg.Pipes.ToolOutput.Enabled && len(toolOutputs) > 0
+
 	// Check for tool discovery
-	if r.config.Pipes.ToolDiscovery.Enabled {
+	if cfg.Pipes.ToolDiscovery.Enabled {
 		contents, err := ctx.Adapter.ExtractToolDiscovery(ctx.OriginalRequest, nil)
 		if err == nil {
 			ctx.ToolDiscoveryToolCount = len(contents)
@@ -116,25 +183,47 @@ func (r *Router) RouteFlags(ctx *PipelineContext) RouteResult {
 }
 
 // ProcessAll processes the request through ALL applicable pipes.
-// When both pipes are active, they run in PARALLEL since they modify
-// non-overlapping JSON paths (tool_output: messages[], tool_discovery: tools[]).
-// Results are merged via sjson: messages from tool_output + tools from tool_discovery.
+//
+// Execution order:
+//  1. task_output (sequential) — claims subagent tool result IDs, optionally compresses them.
+//  2. tool_output + tool_discovery (parallel) — skips IDs claimed by task_output.
+//
+// tool_output (messages[]) and tool_discovery (tools[]) modify non-overlapping JSON
+// paths so they can run concurrently. Results are merged via sjson.
 func (r *Router) ProcessAll(ctx *PipelineContext) ([]byte, RouteResult, error) {
-	flags := r.RouteFlags(ctx)
+	// Take a consistent snapshot so config changes mid-request don't produce torn reads.
+	cfg, taPool, toPool, tdPool := r.snapshot()
+
+	flags := r.RouteFlags(ctx, cfg)
 	body := ctx.OriginalRequest
 
-	runTO := flags.ToolOutput && r.config.Pipes.ToolOutput.Strategy != config.StrategyPassthrough
-	runTD := flags.ToolDiscovery && r.config.Pipes.ToolDiscovery.Strategy != config.StrategyPassthrough
+	// Phase 1: task_output runs first (sequential).
+	// It populates ctx.TaskOutputHandledIDs so tool_output can skip claimed IDs.
+	// Skip passthrough with no active client: GenericSchema matches nothing, so
+	// running the pipe would be pure overhead.
+	effectiveClient := ctx.ClientAgent
+	if cfg.Pipes.TaskOutput.ClientOverride != "" {
+		effectiveClient = cfg.Pipes.TaskOutput.ClientOverride
+	}
+	runTA := flags.TaskOutput &&
+		(cfg.Pipes.TaskOutput.Strategy != config.StrategyPassthrough ||
+			effectiveClient != "")
+	if runTA {
+		body = r.runPipe(taPool, ctx, body, "task_output")
+	}
+
+	runTO := flags.ToolOutput && cfg.Pipes.ToolOutput.Strategy != config.StrategyPassthrough
+	runTD := flags.ToolDiscovery && cfg.Pipes.ToolDiscovery.Strategy != config.StrategyPassthrough
 
 	// Fast path: only one pipe active — no parallelization overhead
 	if !runTO && !runTD {
 		return body, flags, nil
 	}
 	if runTO && !runTD {
-		return r.runPipe(r.toolOutputPool, ctx, body, "tool_output"), flags, nil
+		return r.runPipe(toPool, ctx, body, "tool_output"), flags, nil
 	}
 	if !runTO && runTD {
-		return r.runPipe(r.toolDiscoveryPool, ctx, body, "tool_discovery"), flags, nil
+		return r.runPipe(tdPool, ctx, body, "tool_discovery"), flags, nil
 	}
 
 	// Both pipes active — run in parallel.
@@ -163,8 +252,8 @@ func (r *Router) ProcessAll(ctx *PipelineContext) ([]byte, RouteResult, error) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		worker := r.toolOutputPool.acquire()
-		defer r.toolOutputPool.release(worker) // Release even on panic
+		worker := toPool.acquire()
+		defer toPool.release(worker) // Release even on panic
 		defer func() {
 			if r := recover(); r != nil {
 				toErr = fmt.Errorf("tool_output panic: %v", r)
@@ -176,8 +265,8 @@ func (r *Router) ProcessAll(ctx *PipelineContext) ([]byte, RouteResult, error) {
 	}()
 	go func() {
 		defer wg.Done()
-		worker := r.toolDiscoveryPool.acquire()
-		defer r.toolDiscoveryPool.release(worker) // Release even on panic
+		worker := tdPool.acquire()
+		defer tdPool.release(worker) // Release even on panic
 		defer func() {
 			if r := recover(); r != nil {
 				tdErr = fmt.Errorf("tool_discovery panic: %v", r)
@@ -192,7 +281,7 @@ func (r *Router) ProcessAll(ctx *PipelineContext) ([]byte, RouteResult, error) {
 	ctx.ToolsFiltered = tdCtx.ToolsFiltered
 	ctx.DeferredTools = tdCtx.DeferredTools
 	ctx.OriginalToolCount = tdCtx.OriginalToolCount
-	ctx.FilteredToolCount = tdCtx.FilteredToolCount
+	ctx.KeptToolCount = tdCtx.KeptToolCount
 	ctx.ToolDiscoveryModel = tdCtx.ToolDiscoveryModel
 	ctx.ToolDiscoverySkipReason = tdCtx.ToolDiscoverySkipReason
 

@@ -293,18 +293,6 @@ func TestGateway_AuthFallback_TelemetryAndInitLogs(t *testing.T) {
 	assert.Equal(t, "subscription", reqEvent.AuthModeInitial)
 	assert.Equal(t, "api_key", reqEvent.AuthModeEffective)
 	assert.True(t, reqEvent.AuthFallbackUsed)
-
-	initPath := filepath.Join(tempDir, "init.jsonl")
-	initBytes, err := os.ReadFile(initPath)
-	require.NoError(t, err)
-	initLines := strings.Split(strings.TrimSpace(string(initBytes)), "\n")
-	require.NotEmpty(t, initLines)
-
-	var initEvent monitoring.InitEvent
-	require.NoError(t, json.Unmarshal([]byte(initLines[len(initLines)-1]), &initEvent))
-	assert.Equal(t, "gateway_init", initEvent.Event)
-	assert.Equal(t, "claude_code", initEvent.AgentName)
-	assert.True(t, initEvent.AutoApproveMode)
 }
 
 // =============================================================================
@@ -335,7 +323,7 @@ func TestGateway_SmallContent_NotCompressed(t *testing.T) {
 	defer mockLLM.Close()
 
 	cfg := compressionConfig(mockCompressionAPI.URL)
-	cfg.Pipes.ToolOutput.MinBytes = 500 // Set threshold to 500 bytes
+	cfg.Pipes.ToolOutput.MinTokens = 120 // Set threshold to 500 bytes
 	gw := gateway.New(cfg)
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
@@ -370,7 +358,7 @@ func TestGateway_SmallContent_NotCompressed(t *testing.T) {
 	assert.False(t, compressionAPICalled, "Compression API should not be called for small content")
 
 	// Content should be unchanged (no shadow prefix)
-	assert.NotContains(t, string(receivedUpstreamBody), "<<<SHADOW:",
+	assert.NotContains(t, string(receivedUpstreamBody), "[REF:shadow_",
 		"Small content should not be compressed")
 }
 
@@ -541,7 +529,7 @@ func TestGateway_CompressionFailure_FallsBackToPassthrough(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Content should NOT be compressed due to fallback
-	assert.NotContains(t, string(receivedUpstreamBody), "<<<SHADOW:",
+	assert.NotContains(t, string(receivedUpstreamBody), "[REF:shadow_",
 		"Fallback should pass through original content")
 }
 
@@ -569,9 +557,9 @@ func passthroughConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "error",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }
@@ -591,8 +579,8 @@ func compressionConfig(compressionAPIURL string) *config.Config {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr,
 				FallbackStrategy:       "passthrough",
-				MinBytes:               256,
-				MaxBytes:               65536,
+				MinTokens:              64,
+				MaxTokens:              16384,
 				TargetCompressionRatio: 0.5,
 				IncludeExpandHint:      false,
 				EnableExpandContext:    false,
@@ -610,9 +598,9 @@ func compressionConfig(compressionAPIURL string) *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "error",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

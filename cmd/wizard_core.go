@@ -28,10 +28,7 @@ type ConfigState struct {
 	CostCap                     float64 // USD aggregate spend cap. 0 = unlimited (disabled).
 	ToolDiscoveryEnabled        bool
 	ToolDiscoveryStrategy       string
-	ToolDiscoveryMinTools       int
-	ToolDiscoveryMaxTools       int
-	ToolDiscoveryTargetRatio    float64
-	ToolDiscoverySearchFallback bool
+	ToolDiscoveryTokenThreshold int    // Trigger filtering when tool tokens > this; 0 = default (512)
 	ToolDiscoveryModel          string // Model for API strategy
 	// Tool Output Compression settings
 	ToolOutputEnabled     bool
@@ -39,8 +36,8 @@ type ConfigState struct {
 	ToolOutputProvider    tui.ProviderInfo // Provider for compression (external_provider strategy)
 	ToolOutputModel       string           // Model for compression
 	ToolOutputAPIKey      string           //nolint:gosec // config template placeholder, not a secret
-	ToolOutputMinBytes    int              // Minimum bytes to trigger compression
-	ToolOutputTargetRatio float64          // Target compression ratio
+	ToolOutputMinTokens   int              // Minimum bytes to trigger compression
+	ToolOutputTargetRatio float64          // Target compression ratio: 0.1 = least aggressive (remove 10%), 0.9 = most aggressive (remove 90%). 0 = API default.
 	// Compact (preemptive summarization) strategy settings
 	CompactStrategy      string // "compresr" or "external_provider" (LLM)
 	CompactCompresrModel string // HCC model when using compresr strategy
@@ -87,17 +84,13 @@ func runConfigCreationWizard(agentName string, ac *AgentConfig) string {
 	state.CompactCompresrModel = tui.CompresrModels.History.DefaultModel
 	state.ToolDiscoveryEnabled = true
 	state.ToolDiscoveryStrategy = pipes.StrategyCompresr
-	state.ToolDiscoveryMinTools = 5
-	state.ToolDiscoveryMaxTools = 25
-	state.ToolDiscoveryTargetRatio = 0.8
-	state.ToolDiscoverySearchFallback = true
 	state.ToolDiscoveryModel = tui.CompresrModels.ToolDiscovery.DefaultModel
 	// Tool Output Compression defaults
 	state.ToolOutputEnabled = true
 	state.ToolOutputStrategy = pipes.StrategyCompresr
 	state.ToolOutputModel = tui.CompresrModels.ToolOutput.DefaultModel
-	state.ToolOutputMinBytes = 2048
-	state.ToolOutputTargetRatio = 0.5
+	state.ToolOutputMinTokens = 2048
+	state.ToolOutputTargetRatio = pipes.DefaultTargetCompressionRatio
 	// Fallback external provider settings (used if user switches to external_provider)
 	state.ToolOutputProvider = tui.SupportedProviders[1] // gemini
 	state.ToolOutputAPIKey = "${" + state.ToolOutputProvider.EnvVar + ":-}"
@@ -282,7 +275,7 @@ func toolDiscoverySummary(state *ConfigState) string {
 	if state.ToolDiscoveryStrategy == pipes.StrategyCompresr {
 		return fmt.Sprintf("● %s / %s", state.ToolDiscoveryStrategy, state.ToolDiscoveryModel)
 	}
-	return fmt.Sprintf("● %s (min=%d max=%d)", state.ToolDiscoveryStrategy, state.ToolDiscoveryMinTools, state.ToolDiscoveryMaxTools)
+	return fmt.Sprintf("● %s", state.ToolDiscoveryStrategy)
 }
 
 // deleteConfig shows a menu to select and delete a user config
@@ -293,9 +286,25 @@ func deleteConfig() {
 		return
 	}
 
+	// Filter out protected configs (fast_setup is the default and cannot be deleted)
+	protectedConfigs := map[string]bool{
+		"fast_setup": true,
+	}
+	var deletableConfigs []string
+	for _, c := range userConfigs {
+		if !protectedConfigs[c] {
+			deletableConfigs = append(deletableConfigs, c)
+		}
+	}
+
+	if len(deletableConfigs) == 0 {
+		fmt.Printf("  %s·%s No custom configurations to delete (fast_setup is protected)\n", tui.ColorDim, tui.ColorReset)
+		return
+	}
+
 	// Build menu
 	items := []tui.MenuItem{}
-	for _, c := range userConfigs {
+	for _, c := range deletableConfigs {
 		items = append(items, tui.MenuItem{Label: c, Value: c})
 	}
 	items = append(items, tui.MenuItem{Label: "← Cancel", Value: "__cancel__"})
@@ -341,8 +350,10 @@ func editConfig(agentName string) {
 		desc := ""
 		if isUserConfig(c) {
 			desc = "custom"
+		} else if c == "fast_setup" {
+			desc = "default (protected) — will save as copy"
 		} else {
-			desc = "predefined"
+			desc = "predefined — will save as copy"
 		}
 		items = append(items, tui.MenuItem{Label: c, Description: desc, Value: c})
 	}
@@ -415,28 +426,46 @@ func loadConfigToState(configName string) *ConfigState {
 		Name: configName,
 	}
 
-	// Extract provider info
+	// Extract provider info — find the first non-oauth, non-bedrock provider
+	// (oauth/bedrock providers have no api_key and don't need to be loaded into state).
 	if providers, ok := cfg["providers"].(map[string]interface{}); ok {
 		for providerName, providerData := range providers {
-			if pd, ok := providerData.(map[string]interface{}); ok {
-				// Find matching provider
-				for _, p := range tui.SupportedProviders {
-					if p.Name == providerName {
-						state.Provider = p
-						break
-					}
-				}
-				if model, ok := pd["model"].(string); ok {
-					state.Model = model
-				}
-				if apiKey, ok := pd["api_key"].(string); ok {
-					state.APIKey = apiKey
-					// Check if using subscription (env var) or explicit key
-					state.UseSubscription = strings.Contains(apiKey, "${") || apiKey == ""
+			pd, ok := providerData.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			// Skip oauth and bedrock auth providers — they have no api_key
+			if auth, ok := pd["auth"].(string); ok && (auth == "oauth" || auth == "bedrock") {
+				continue
+			}
+			// Find matching supported provider
+			for _, p := range tui.SupportedProviders {
+				if p.Name == providerName {
+					state.Provider = p
+					break
 				}
 			}
-			break // Only process first provider
+			if model, ok := pd["model"].(string); ok {
+				state.Model = model
+			}
+			if apiKey, ok := pd["api_key"].(string); ok {
+				state.APIKey = apiKey
+				// Check if using subscription (env var) or explicit key
+				state.UseSubscription = strings.Contains(apiKey, "${") || apiKey == ""
+			}
+			break // Only process first matching provider
 		}
+	}
+
+	// Extract top-level compresr credentials (new centralized format).
+	if compresrSection, ok := cfg["compresr"].(map[string]interface{}); ok {
+		if apiKey, ok := compresrSection["api_key"].(string); ok && apiKey != "" {
+			state.CompresrAPIKey = apiKey
+		}
+	}
+	// Default — backward-compat fallback from per-pipe section is handled in the pipes block below.
+	if state.CompresrAPIKey == "" {
+		state.CompresrAPIKey = "${COMPRESR_API_KEY:-}"
 	}
 
 	// Extract slack settings
@@ -503,30 +532,33 @@ func loadConfigToState(configName string) *ConfigState {
 					}
 				}
 			}
-			// Extract min_bytes (handles both int and float64 from YAML)
-			if minBytes, ok := toolOutput["min_bytes"].(int); ok {
-				state.ToolOutputMinBytes = minBytes
-			} else if minBytesF, ok := toolOutput["min_bytes"].(float64); ok {
-				state.ToolOutputMinBytes = int(minBytesF)
+			// Extract min_tokens
+			if minTokens, ok := toolOutput["min_tokens"].(int); ok {
+				state.ToolOutputMinTokens = minTokens
+			} else if minTokensF, ok := toolOutput["min_tokens"].(float64); ok {
+				state.ToolOutputMinTokens = int(minTokensF)
 			}
 			// Extract target_compression_ratio
 			if targetRatio, ok := toolOutput["target_compression_ratio"].(float64); ok {
 				state.ToolOutputTargetRatio = targetRatio
 			}
-			// Extract model from compresr section (or legacy api section)
+			// Extract model from compresr section (or legacy api section).
+			// Note: api_key is NOT extracted here — compresr keys live in the top-level
+			// compresr section (state.CompresrAPIKey), and external-provider keys live
+			// in the providers section (state.ToolOutputAPIKey via defaults below).
 			if compresrCfg, ok := toolOutput["compresr"].(map[string]interface{}); ok {
 				if model, ok := compresrCfg["model"].(string); ok {
 					state.ToolOutputModel = model
 				}
-				if apiKey, ok := compresrCfg["api_key"].(string); ok {
-					state.ToolOutputAPIKey = apiKey
+				// Backward compat: if older config has api_key here, treat it as CompresrAPIKey
+				if state.CompresrAPIKey == "${COMPRESR_API_KEY:-}" {
+					if apiKey, ok := compresrCfg["api_key"].(string); ok && apiKey != "" {
+						state.CompresrAPIKey = apiKey
+					}
 				}
 			} else if api, ok := toolOutput["api"].(map[string]interface{}); ok {
 				if model, ok := api["model"].(string); ok {
 					state.ToolOutputModel = model
-				}
-				if apiKey, ok := api["api_key"].(string); ok {
-					state.ToolOutputAPIKey = apiKey
 				}
 			}
 		}
@@ -538,23 +570,6 @@ func loadConfigToState(configName string) *ConfigState {
 			}
 			if strategy, ok := toolDiscovery["strategy"].(string); ok {
 				state.ToolDiscoveryStrategy = strategy
-			}
-			// Handle both int and float64 (YAML parsing quirks)
-			if minTools, ok := toolDiscovery["min_tools"].(int); ok {
-				state.ToolDiscoveryMinTools = minTools
-			} else if minToolsF, ok := toolDiscovery["min_tools"].(float64); ok {
-				state.ToolDiscoveryMinTools = int(minToolsF)
-			}
-			if maxTools, ok := toolDiscovery["max_tools"].(int); ok {
-				state.ToolDiscoveryMaxTools = maxTools
-			} else if maxToolsF, ok := toolDiscovery["max_tools"].(float64); ok {
-				state.ToolDiscoveryMaxTools = int(maxToolsF)
-			}
-			if targetRatio, ok := toolDiscovery["target_ratio"].(float64); ok {
-				state.ToolDiscoveryTargetRatio = targetRatio
-			}
-			if searchFallback, ok := toolDiscovery["enable_search_fallback"].(bool); ok {
-				state.ToolDiscoverySearchFallback = searchFallback
 			}
 			// Extract model from compresr section (or legacy api section)
 			if compresrCfg, ok := toolDiscovery["compresr"].(map[string]interface{}); ok {
@@ -572,12 +587,12 @@ func loadConfigToState(configName string) *ConfigState {
 	if state.ToolOutputStrategy == "" {
 		state.ToolOutputStrategy = pipes.StrategyCompresr
 	}
-	// Set min_bytes and target_compression_ratio defaults
-	if state.ToolOutputMinBytes == 0 {
-		state.ToolOutputMinBytes = 2048
+	// Set min_tokens and target_compression_ratio defaults
+	if state.ToolOutputMinTokens == 0 {
+		state.ToolOutputMinTokens = 256 // Default: 256 tokens (field name is historical)
 	}
 	if state.ToolOutputTargetRatio == 0 {
-		state.ToolOutputTargetRatio = 0.5
+		state.ToolOutputTargetRatio = pipes.DefaultTargetCompressionRatio
 	}
 	// Set model based on strategy
 	if state.ToolOutputModel == "" {
@@ -598,15 +613,6 @@ func loadConfigToState(configName string) *ConfigState {
 	// Set tool_discovery defaults if not found
 	if state.ToolDiscoveryStrategy == "" {
 		state.ToolDiscoveryStrategy = pipes.StrategyRelevance
-	}
-	if state.ToolDiscoveryMinTools == 0 {
-		state.ToolDiscoveryMinTools = 5
-	}
-	if state.ToolDiscoveryMaxTools == 0 {
-		state.ToolDiscoveryMaxTools = 25
-	}
-	if state.ToolDiscoveryTargetRatio == 0 {
-		state.ToolDiscoveryTargetRatio = 0.8
 	}
 	if state.ToolDiscoveryModel == "" {
 		state.ToolDiscoveryModel = tui.CompresrModels.ToolDiscovery.DefaultModel

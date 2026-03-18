@@ -1,10 +1,4 @@
-// HTTP middleware for security, logging, and rate limiting.
-//
-// DESIGN: Middleware chain (applied in order):
-//  1. panicRecovery:    Catch panics, return 500, log stack trace
-//  2. rateLimit:        Per-IP token bucket rate limiting
-//  3. loggingMiddleware: Log request/response with timing
-//  4. security:         Security headers, CORS, SSRF protection
+// middleware.go provides HTTP middleware for security, logging, and rate limiting.
 package gateway
 
 import (
@@ -12,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -161,7 +156,7 @@ func (rl *rateLimiter) Stop() {
 func (g *Gateway) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		requestID := r.Header.Get(HeaderRequestID)
+		requestID := sanitizeRequestID(r.Header.Get(HeaderRequestID))
 		if requestID == "" {
 			requestID = uuid.New().String()
 		}
@@ -172,10 +167,7 @@ func (g *Gateway) loggingMiddleware(next http.Handler) http.Handler {
 		r = r.WithContext(ctx)
 
 		// Log incoming request
-		bodySize := int(r.ContentLength)
-		if bodySize < 0 {
-			bodySize = 0
-		}
+		bodySize := max(0, int(r.ContentLength))
 		reqInfo := monitoring.NewRequestInfo(r, requestID, bodySize)
 		g.requestLogger.LogIncoming(reqInfo)
 
@@ -236,8 +228,27 @@ func (g *Gateway) panicRecovery(next http.Handler) http.Handler {
 }
 
 // rateLimit middleware enforces per-IP rate limiting.
+// Internal dashboard and API management paths are exempt — they are read-only
+// endpoints polled by the browser and by the aggregation handler itself (which
+// makes loopback sub-calls), so counting them against the LLM-proxy bucket
+// causes spurious 429s during active sessions.
 func (g *Gateway) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Exempt internal management endpoints from rate limiting.
+		// These paths are explicitly registered management routes (see setupRoutes /
+		// setupDashboardRoutes) — not LLM proxy traffic. The dashboard aggregator also
+		// makes loopback sub-calls to /api/dashboard on the proxy port, so exempting
+		// /api/* prevents those internal calls from consuming the proxy's rate-limit bucket.
+		p := r.URL.Path
+		if strings.HasPrefix(p, "/api/") ||
+			strings.HasPrefix(p, "/dashboard") ||
+			strings.HasPrefix(p, "/monitor") ||
+			p == "/health" ||
+			p == "/expand" ||
+			p == "/stats" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		ip := g.getClientIP(r)
 		if !g.rateLimiter.allow(ip) {
 			log.Warn().Str("ip", ip).Msg("rate limit exceeded")
@@ -286,9 +297,18 @@ func (g *Gateway) security(next http.Handler) http.Handler {
 }
 
 // isAllowedOrigin checks if origin is permitted for CORS.
+// Uses URL parsing to prevent bypass via http://localhost.evil.com style origins.
+// Accepts both http:// and https:// schemes for localhost origins.
 func (g *Gateway) isAllowedOrigin(origin string) bool {
-	// Default: allow localhost for development
-	return strings.HasPrefix(origin, "http://localhost") || strings.HasPrefix(origin, "http://127.0.0.1")
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname() // strips port number
+	return host == "localhost" || host == "127.0.0.1"
 }
 
 // getClientIP extracts the client IP address from the request.
@@ -297,8 +317,8 @@ func (g *Gateway) getClientIP(r *http.Request) string {
 	// Only trust X-Forwarded-For from localhost (reverse proxy)
 	if remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr); remoteIP == "127.0.0.1" || remoteIP == "::1" {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if idx := strings.Index(xff, ","); idx != -1 {
-				return strings.TrimSpace(xff[:idx])
+			if first, _, ok := strings.Cut(xff, ","); ok {
+				return strings.TrimSpace(first)
 			}
 			return strings.TrimSpace(xff)
 		}
@@ -310,10 +330,37 @@ func (g *Gateway) getClientIP(r *http.Request) string {
 	return ip
 }
 
+// sanitizeRequestID strips control characters and non-ASCII runes from a
+// client-supplied request ID to prevent log injection and Unicode homoglyph
+// injection in console-formatted log output.
+// Caps at 128 characters to prevent log amplification DoS.
+func sanitizeRequestID(id string) string {
+	const maxLen = 128
+	sanitized := strings.Map(func(r rune) rune {
+		// Allow only ASCII printable characters (0x20–0x7e).
+		// r < 0x20 strips control characters; r >= 0x7f strips DEL and all non-ASCII.
+		if r < 0x20 || r >= 0x7f {
+			return -1
+		}
+		return r
+	}, id)
+	if len(sanitized) > maxLen {
+		return sanitized[:maxLen]
+	}
+	return sanitized
+}
+
 // isLoopback returns true if the remote address is a loopback (localhost) connection.
+// Uses net.ParseIP().IsLoopback() to cover the full 127.0.0.0/8 subnet,
+// IPv6 loopback (::1), and IPv6-mapped IPv4 loopback (::ffff:127.0.0.1).
 func isLoopback(remoteAddr string) bool {
-	ip, _, _ := net.SplitHostPort(remoteAddr)
-	return ip == "127.0.0.1" || ip == "::1"
+	ip, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// remoteAddr has no port (e.g. raw IP string)
+		ip = remoteAddr
+	}
+	parsed := net.ParseIP(ip)
+	return parsed != nil && parsed.IsLoopback()
 }
 
 // isAllowedHost checks if the host is in the allowlist for SSRF protection.

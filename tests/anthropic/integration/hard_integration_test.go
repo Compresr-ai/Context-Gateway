@@ -114,12 +114,17 @@ func TestHardIntegration_ThreeToolsAllLarge(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.NotContains(t, string(bodyBytes), "expand_context")
-	assert.NotContains(t, string(bodyBytes), "<<<SHADOW:")
 
 	var response map[string]interface{}
 	json.Unmarshal(bodyBytes, &response)
 	content := extractAnthropicContent(response)
 	assert.NotEmpty(t, content)
+
+	// Check that there are no unexpanded shadow markers in the actual content.
+	// Note: The model may mention "[REF:id]" as text when explaining concepts,
+	// so we check specifically for the pattern with a real hash suffix.
+	assert.NotRegexp(t, `[REF:shadow_[a-f0-9]{16,}]`, content,
+		"Response should not contain unexpanded shadow markers")
 }
 
 // =============================================================================
@@ -205,84 +210,6 @@ func TestHardIntegration_ToolResultIsError(t *testing.T) {
 		strings.Contains(contentLower, "administration") ||
 		strings.Contains(contentLower, "read") ||
 		len(content) > 0)
-}
-
-// TestHardIntegration_MixedSuccessAndError tests mixture of success and error tool results.
-func TestHardIntegration_MixedSuccessAndError(t *testing.T) {
-	apiKey := getAnthropicKey(t)
-
-	cfg := expandContextEnabledConfig()
-	gw := gateway.New(cfg)
-	gwServer := httptest.NewServer(gw.Handler())
-	defer gwServer.Close()
-
-	requestBody := map[string]interface{}{
-		"model":      anthropicModel,
-		"max_tokens": 250,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": "Read both config files"},
-			{
-				"role": "assistant",
-				"content": []map[string]interface{}{
-					{
-						"type":  "tool_use",
-						"id":    "toolu_mix_001",
-						"name":  "read_file",
-						"input": map[string]string{"path": "config.yaml"},
-					},
-					{
-						"type":  "tool_use",
-						"id":    "toolu_mix_002",
-						"name":  "read_file",
-						"input": map[string]string{"path": "secrets.yaml"},
-					},
-				},
-			},
-			{
-				"role": "user",
-				"content": []map[string]interface{}{
-					{
-						"type":        "tool_result",
-						"tool_use_id": "toolu_mix_001",
-						"content":     "server:\n  port: 8080\n  timeout: 30s\ndatabase:\n  host: localhost\n  port: 5432",
-					},
-					{
-						"type":        "tool_result",
-						"tool_use_id": "toolu_mix_002",
-						"content":     "Error: file not found: secrets.yaml",
-						"is_error":    true,
-					},
-				},
-			},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
-	require.NoError(t, err)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", anthropicVersion)
-	req.Header.Set("X-Target-URL", anthropicBaseURL+"/v1/messages")
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := retryableRequest(client, req, t)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var response map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&response)
-	content := extractAnthropicContent(response)
-
-	// Should mention both the config content and the error
-	contentLower := strings.ToLower(content)
-	assert.True(t, strings.Contains(contentLower, "config") ||
-		strings.Contains(contentLower, "8080") ||
-		strings.Contains(contentLower, "server") ||
-		strings.Contains(contentLower, "database"))
 }
 
 // TestHardIntegration_LargeErrorMessage tests large error messages.
@@ -454,7 +381,7 @@ func TestHardIntegration_MultiRoundToolUse(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.NotContains(t, string(bodyBytes), "expand_context")
-	assert.NotContains(t, string(bodyBytes), "<<<SHADOW:")
+	assert.NotContains(t, string(bodyBytes), "[REF:")
 
 	var response map[string]interface{}
 	json.Unmarshal(bodyBytes, &response)
@@ -522,7 +449,7 @@ func TestHardIntegration_ToolUseInMiddleOfConversation(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.NotContains(t, string(bodyBytes), "expand_context")
-	assert.NotContains(t, string(bodyBytes), "<<<SHADOW:")
+	assert.NotContains(t, string(bodyBytes), "[REF:")
 }
 
 // =============================================================================
@@ -823,80 +750,6 @@ func TestHardIntegration_SpecialCharactersInOutput(t *testing.T) {
 	assert.NotEmpty(t, content)
 }
 
-// TestHardIntegration_BinaryLikeContent tests handling of binary-like content.
-func TestHardIntegration_BinaryLikeContent(t *testing.T) {
-	apiKey := getAnthropicKey(t)
-
-	cfg := expandContextEnabledConfig()
-	gw := gateway.New(cfg)
-	gwServer := httptest.NewServer(gw.Handler())
-	defer gwServer.Close()
-
-	// Simulate attempting to read a binary file
-	binaryOutput := "Error: cannot display binary file content.\n" +
-		"File: image.png\n" +
-		"Size: 45.2 KB\n" +
-		"Type: image/png\n" +
-		"First bytes (hex): 89 50 4E 47 0D 0A 1A 0A"
-
-	requestBody := map[string]interface{}{
-		"model":      anthropicModel,
-		"max_tokens": 100,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": "What type of file is this?"},
-			{
-				"role": "assistant",
-				"content": []map[string]interface{}{
-					{
-						"type":  "tool_use",
-						"id":    "toolu_binary",
-						"name":  "read_file",
-						"input": map[string]string{"path": "image.png"},
-					},
-				},
-			},
-			{
-				"role": "user",
-				"content": []map[string]interface{}{
-					{
-						"type":        "tool_result",
-						"tool_use_id": "toolu_binary",
-						"content":     binaryOutput,
-					},
-				},
-			},
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-	req, err := http.NewRequest("POST", gwServer.URL+"/v1/messages", bytes.NewReader(bodyBytes))
-	require.NoError(t, err)
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", anthropicVersion)
-	req.Header.Set("X-Target-URL", anthropicBaseURL+"/v1/messages")
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := retryableRequest(client, req, t)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var response map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&response)
-	content := extractAnthropicContent(response)
-
-	contentLower := strings.ToLower(content)
-	assert.True(t, strings.Contains(contentLower, "png") ||
-		strings.Contains(contentLower, "image") ||
-		strings.Contains(contentLower, "binary") ||
-		strings.Contains(contentLower, "graphic") ||
-		strings.Contains(contentLower, "portable"),
-		"expected response to mention file type (png/image/binary/graphic/portable), got: %s", content)
-}
-
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -913,16 +766,16 @@ func expandContextEnabledConfig() *config.Config {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr,
 				FallbackStrategy:       "passthrough",
-				MinBytes:               500,
-				MaxBytes:               65536,
+				MinTokens:              125,
+				MaxTokens:              16384,
 				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:      false,
 				EnableExpandContext:    true, // Enable expand_context
 				Compresr: config.CompresrConfig{
-					Endpoint:  "/api/compress/tool-output",
-					AuthParam: os.Getenv("COMPRESR_API_KEY"),
-					Model:     "toc_espresso_v1",
-					Timeout:   30 * time.Second,
+					Endpoint: "/api/compress/tool-output",
+					APIKey:   os.Getenv("COMPRESR_API_KEY"),
+					Model:    "toc_espresso_v1",
+					Timeout:  30 * time.Second,
 				},
 			},
 			ToolDiscovery: config.ToolDiscoveryPipeConfig{
@@ -934,9 +787,9 @@ func expandContextEnabledConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

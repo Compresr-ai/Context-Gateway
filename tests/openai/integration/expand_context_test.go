@@ -71,7 +71,7 @@ func TestExpandContext_OpenAI_RealAPI(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotContains(t, string(bodyBytes), "expand_context")
-	assert.NotContains(t, string(bodyBytes), "<<<SHADOW:")
+	assert.NotContains(t, string(bodyBytes), "[REF:")
 
 	content := extractOpenAIContent(response)
 	t.Logf("GPT response: %s", content)
@@ -124,7 +124,7 @@ func TestExpandContext_Trajectory_OpenAI(t *testing.T) {
 	t.Log("=== EXPAND_CONTEXT TRAJECTORY TEST (OPENAI) ===")
 
 	cfg := fixtures.SimpleCompressionConfig()
-	t.Logf("Step 1: Gateway configured with simple compression (min_bytes=100, expand_context=enabled)")
+	t.Logf("Step 1: Gateway configured with simple compression (min_tokens=25, expand_context=enabled)")
 
 	gw := gateway.New(cfg)
 	gwServer := httptest.NewServer(gw.Handler())
@@ -163,7 +163,7 @@ func TestExpandContext_Trajectory_OpenAI(t *testing.T) {
 	t.Log("=== TRAJECTORY COMPLETE ===")
 
 	assert.NotContains(t, string(bodyBytes), "expand_context")
-	assert.NotContains(t, string(bodyBytes), "<<<SHADOW:")
+	assert.NotContains(t, string(bodyBytes), "[REF:")
 
 	var response map[string]interface{}
 	json.Unmarshal(bodyBytes, &response)

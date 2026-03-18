@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/compresr/context-gateway/internal/costcontrol"
 )
 
@@ -49,7 +51,9 @@ func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Warn().Err(err).Msg("handleModels: failed to encode JSON response")
+	}
 }
 
 // inferOwnedBy returns the provider name based on model ID prefix.

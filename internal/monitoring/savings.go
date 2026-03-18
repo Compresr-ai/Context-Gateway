@@ -1,13 +1,4 @@
 // Package monitoring - savings.go tracks compression savings in real-time.
-//
-// DESIGN: Follows the same pattern as costcontrol/tracker.go:
-//   - Mutex-protected per-session map
-//   - Background cleanup goroutine (10 min tick, 24h TTL)
-//   - Reset() for new sessions
-//   - Single computeReport() function for all report generation
-//
-// The SavingsTracker only tracks compression savings (tokens saved, cost saved).
-// Actual API spend is tracked by costcontrol.Tracker — not duplicated here.
 package monitoring
 
 import (
@@ -18,6 +9,7 @@ import (
 	"time"
 
 	"github.com/compresr/context-gateway/internal/costcontrol"
+	"github.com/compresr/context-gateway/internal/tokenizer"
 )
 
 const savingsSessionTTL = 24 * time.Hour
@@ -45,16 +37,16 @@ type savingsData struct {
 	CompressedTokens int
 
 	// Tool discovery
-	ToolDiscoveryRequests int
-	OriginalToolCount     int
-	FilteredToolCount     int
-	ToolDiscoveryBytes    int
-	FilteredToolBytes     int
+	ToolDiscoveryRequests   int
+	OriginalToolCount       int
+	KeptToolCount           int
+	OrigToolDiscoveryTokens int
+	CompToolDiscoveryTokens int
 
 	// Preemptive summarization
 	PreemptiveSummarizationRequests int
-	PreemptiveSummarizationBytes    int // Original bytes before summarization
-	PreemptiveSummarizedBytes       int // Bytes after summarization
+	PreemptiveSummarizationTokens   int // Original tokens before summarization
+	PreemptiveSummarizedTokens      int // Tokens after summarization
 
 	// Expand penalty
 	ExpandPenaltyTokens int
@@ -87,7 +79,7 @@ type SavingsReport struct {
 	// Tool Discovery (tool filtering)
 	ToolDiscoveryRequests int
 	OriginalToolCount     int
-	FilteredToolCount     int
+	KeptToolCount         int
 	ToolDiscoveryTokens   int
 	ToolDiscoveryCostUSD  float64
 	ToolDiscoveryPct      float64
@@ -117,7 +109,12 @@ type SavingsReport struct {
 	CostSavedUSD      float64
 	CostSavedPct      float64
 
-	AvgCompressionRatio float64
+	AvgCompressionRatio float64 // Removed fraction: 1 - compressed/original (higher = more aggressive; 0.9 = 90% removed)
+
+	// Session activity counters
+	UserTurns          int `json:"user_turns"`
+	CompactionTriggers int `json:"compaction_triggers"`
+	ToolSearchCalls    int `json:"tool_search_calls"`
 }
 
 // SavingsTracker accumulates compression savings in memory.
@@ -158,8 +155,10 @@ func (t *SavingsTracker) Reset() {
 
 // RecordRequest records API-returned token counts for cost calculation.
 // sessionID may be empty for global-only tracking.
+// Only records main agent (user) requests — subagent requests are excluded
+// so that dashboard metrics reflect the user's actual requests.
 func (t *SavingsTracker) RecordRequest(event *RequestEvent, sessionID string) {
-	if event == nil {
+	if event == nil || !event.IsMainAgent {
 		return
 	}
 
@@ -178,9 +177,13 @@ func (t *SavingsTracker) RecordRequest(event *RequestEvent, sessionID string) {
 }
 
 // RecordToolOutputCompression records tool output compression savings.
-func (t *SavingsTracker) RecordToolOutputCompression(c CompressionComparison, sessionID string) {
-	bytesSaved := c.OriginalBytes - c.CompressedBytes
-	if bytesSaved <= 0 {
+// Only records main agent (user) requests when isMainAgent is true.
+func (t *SavingsTracker) RecordToolOutputCompression(c CompressionComparison, sessionID string, isMainAgent bool) {
+	origTokens := c.OriginalTokens
+	compTokens := c.CompressedTokens
+
+	tokensSaved := origTokens - compTokens
+	if tokensSaved <= 0 || !isMainAgent {
 		return
 	}
 
@@ -192,14 +195,19 @@ func (t *SavingsTracker) RecordToolOutputCompression(c CompressionComparison, se
 		model = "unknown"
 	}
 
-	recordCompressionInto(t.global, c, model)
+	recordCompressionInto(t.global, c, model, origTokens, compTokens)
 	if sessionID != "" {
-		recordCompressionInto(t.getOrCreate(sessionID), c, model)
+		recordCompressionInto(t.getOrCreate(sessionID), c, model, origTokens, compTokens)
 	}
 }
 
 // RecordToolDiscovery records tool discovery (filtering) savings.
-func (t *SavingsTracker) RecordToolDiscovery(c CompressionComparison, sessionID string) {
+// Only records main agent (user) requests when isMainAgent is true.
+func (t *SavingsTracker) RecordToolDiscovery(c CompressionComparison, sessionID string, isMainAgent bool) {
+	if !isMainAgent {
+		return
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -215,10 +223,11 @@ func (t *SavingsTracker) RecordToolDiscovery(c CompressionComparison, sessionID 
 }
 
 // RecordPreemptiveSummarization records preemptive summarization (history compaction) savings.
-// originalBytes is the request body size before summarization, compressedBytes is after.
-func (t *SavingsTracker) RecordPreemptiveSummarization(originalBytes, compressedBytes int, model, sessionID string) {
-	bytesSaved := originalBytes - compressedBytes
-	if bytesSaved <= 0 {
+// originalTokens and compressedTokens are pre-computed token counts (via tokenizer).
+// Only records main agent (user) requests when isMainAgent is true.
+func (t *SavingsTracker) RecordPreemptiveSummarization(originalTokens, compressedTokens int, model, sessionID string, isMainAgent bool) {
+	tokensSaved := originalTokens - compressedTokens
+	if tokensSaved <= 0 || !isMainAgent {
 		return
 	}
 
@@ -229,22 +238,35 @@ func (t *SavingsTracker) RecordPreemptiveSummarization(originalBytes, compressed
 		model = "unknown"
 	}
 
-	recordPreemptiveInto(t.global, originalBytes, compressedBytes, model)
+	recordPreemptiveInto(t.global, originalTokens, compressedTokens, model)
 	if sessionID != "" {
-		recordPreemptiveInto(t.getOrCreate(sessionID), originalBytes, compressedBytes, model)
+		recordPreemptiveInto(t.getOrCreate(sessionID), originalTokens, compressedTokens, model)
 	}
 }
 
 // RecordExpandPenalty records tokens re-sent due to expand_context calls.
-func (t *SavingsTracker) RecordExpandPenalty(penaltyTokens int, sessionID string) {
+// model is needed so per-model cost can be computed (ExpandPenaltyCostUSD).
+func (t *SavingsTracker) RecordExpandPenalty(penaltyTokens int, model, sessionID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	if model == "" {
+		model = "unknown"
+	}
+
 	t.global.ExpandPenaltyTokens += penaltyTokens
+	t.global.LastUpdated = time.Now()
+	gStats := t.global.ModelUsage[model]
+	gStats.ExpandPenaltyTokens += penaltyTokens
+	t.global.ModelUsage[model] = gStats
+
 	if sessionID != "" {
 		sd := t.getOrCreate(sessionID)
 		sd.ExpandPenaltyTokens += penaltyTokens
 		sd.LastUpdated = time.Now()
+		stats := sd.ModelUsage[model]
+		stats.ExpandPenaltyTokens += penaltyTokens
+		sd.ModelUsage[model] = stats
 	}
 }
 
@@ -282,44 +304,7 @@ func (t *SavingsTracker) GetCostBreakdown() (float64, float64, float64) {
 // GetCompressionStats returns compression and tool discovery statistics.
 func (t *SavingsTracker) GetCompressionStats() (int, int, int, int, int) {
 	r := t.GetReport()
-	return r.CompressedRequests, r.TotalRequests, r.ToolDiscoveryRequests, r.OriginalToolCount, r.FilteredToolCount
-}
-
-// SessionIDs returns all session IDs that have recorded data.
-func (t *SavingsTracker) SessionIDs() []string {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	ids := make([]string, 0, len(t.sessions))
-	for id := range t.sessions {
-		ids = append(ids, id)
-	}
-	return ids
-}
-
-// RecordRequestWithSession records a request event for both global and session tracking.
-// This is an alias for RecordRequest(event, sessionID).
-func (t *SavingsTracker) RecordRequestWithSession(event *RequestEvent, sessionID string) {
-	t.RecordRequest(event, sessionID)
-}
-
-// GetDetailedSummary returns the full savings report (alias for GetReport).
-func (t *SavingsTracker) GetDetailedSummary() SavingsReport {
-	return t.GetReport()
-}
-
-// FormatReport returns a formatted savings report string.
-func (t *SavingsTracker) FormatReport() string {
-	return FormatUnifiedReportFromReport(t.GetReport(), UnifiedReportData{})
-}
-
-// FormatUnifiedReport returns a formatted savings report string with extra data.
-func (t *SavingsTracker) FormatUnifiedReport(extra UnifiedReportData) string {
-	return FormatUnifiedReportFromReport(t.GetReport(), extra)
-}
-
-// FormatUnifiedReportForSession returns a formatted savings report for a specific session.
-func (t *SavingsTracker) FormatUnifiedReportForSession(sessionID string, extra UnifiedReportData) string {
-	return FormatUnifiedReportFromReport(t.GetReportForSession(sessionID), extra)
+	return r.CompressedRequests, r.TotalRequests, r.ToolDiscoveryRequests, r.OriginalToolCount, r.KeptToolCount
 }
 
 // --- Internal helpers ---
@@ -354,12 +339,12 @@ func (t *SavingsTracker) cleanup() {
 }
 
 // recordRequestInto accumulates request data into a savingsData. Caller holds lock.
+// NOTE: Does NOT add OriginalTokens/CompressedTokens here — those are recorded
+// per-tool via RecordToolOutputCompression to avoid double-counting.
 func recordRequestInto(sd *savingsData, event *RequestEvent, model string) {
 	sd.TotalRequests++
 	if event.CompressionUsed {
 		sd.CompressedRequests++
-		sd.OriginalTokens += event.OriginalTokens
-		sd.CompressedTokens += event.CompressedTokens
 	}
 	stats := sd.ModelUsage[model]
 	stats.InputTokens += event.InputTokens
@@ -372,10 +357,11 @@ func recordRequestInto(sd *savingsData, event *RequestEvent, model string) {
 }
 
 // recordCompressionInto accumulates tool output compression data. Caller holds lock.
-func recordCompressionInto(sd *savingsData, c CompressionComparison, model string) {
-	tokensSaved := (c.OriginalBytes - c.CompressedBytes) / 4
-	sd.OriginalTokens += c.OriginalBytes / 4
-	sd.CompressedTokens += c.CompressedBytes / 4
+// origTokens and compTokens are pre-calculated from CompressionComparison (preferring tokens over bytes).
+func recordCompressionInto(sd *savingsData, _ CompressionComparison, model string, origTokens, compTokens int) {
+	tokensSaved := origTokens - compTokens
+	sd.OriginalTokens += origTokens
+	sd.CompressedTokens += compTokens
 	stats := sd.ModelUsage[model]
 	stats.TokensSaved += tokensSaved
 	sd.ModelUsage[model] = stats
@@ -386,29 +372,33 @@ func recordCompressionInto(sd *savingsData, c CompressionComparison, model strin
 func recordDiscoveryInto(sd *savingsData, c CompressionComparison, model string) {
 	sd.ToolDiscoveryRequests++
 	sd.OriginalToolCount += len(c.AllTools)
-	sd.FilteredToolCount += len(c.SelectedTools)
-	sd.ToolDiscoveryBytes += c.OriginalBytes
-	sd.FilteredToolBytes += c.CompressedBytes
+	sd.KeptToolCount += len(c.SelectedTools)
 
-	bytesSaved := c.OriginalBytes - c.CompressedBytes
-	if bytesSaved > 0 {
+	origTokens := c.OriginalTokens
+	compTokens := c.CompressedTokens
+	sd.OrigToolDiscoveryTokens += origTokens
+	sd.CompToolDiscoveryTokens += compTokens
+
+	tokensSaved := origTokens - compTokens
+	if tokensSaved > 0 {
 		stats := sd.ModelUsage[model]
-		stats.ToolDiscoveryTokens += bytesSaved / 4
+		stats.ToolDiscoveryTokens += tokensSaved
 		sd.ModelUsage[model] = stats
 	}
 	sd.LastUpdated = time.Now()
 }
 
 // recordPreemptiveInto accumulates preemptive summarization data. Caller holds lock.
-func recordPreemptiveInto(sd *savingsData, originalBytes, compressedBytes int, model string) {
+// originalTokens and compressedTokens are pre-computed token counts.
+func recordPreemptiveInto(sd *savingsData, originalTokens, compressedTokens int, model string) {
 	sd.PreemptiveSummarizationRequests++
-	sd.PreemptiveSummarizationBytes += originalBytes
-	sd.PreemptiveSummarizedBytes += compressedBytes
+	sd.PreemptiveSummarizationTokens += originalTokens
+	sd.PreemptiveSummarizedTokens += compressedTokens
 
-	bytesSaved := originalBytes - compressedBytes
-	if bytesSaved > 0 {
+	tokensSaved := originalTokens - compressedTokens
+	if tokensSaved > 0 {
 		stats := sd.ModelUsage[model]
-		stats.PreemptiveSummarizationSaved += bytesSaved / 4
+		stats.PreemptiveSummarizationSaved += tokensSaved
 		sd.ModelUsage[model] = stats
 	}
 	sd.LastUpdated = time.Now()
@@ -424,10 +414,7 @@ func computeReport(data *savingsData) SavingsReport {
 
 	origTokens := data.OriginalTokens
 	compTokens := data.CompressedTokens
-	tokensSaved := origTokens - compTokens
-	if tokensSaved < 0 {
-		tokensSaved = 0
-	}
+	tokensSaved := max(0, origTokens-compTokens)
 
 	report := SavingsReport{
 		TotalRequests:                   data.TotalRequests,
@@ -438,41 +425,37 @@ func computeReport(data *savingsData) SavingsReport {
 		TokensSaved:                     tokensSaved,
 		ToolDiscoveryRequests:           data.ToolDiscoveryRequests,
 		OriginalToolCount:               data.OriginalToolCount,
-		FilteredToolCount:               data.FilteredToolCount,
+		KeptToolCount:                   data.KeptToolCount,
 		PreemptiveSummarizationRequests: data.PreemptiveSummarizationRequests,
 	}
 
 	// Tool discovery percentage
-	if data.ToolDiscoveryBytes > 0 {
-		report.ToolDiscoveryTokens = (data.ToolDiscoveryBytes - data.FilteredToolBytes) / 4
-		report.ToolDiscoveryPct = float64(data.ToolDiscoveryBytes-data.FilteredToolBytes) / float64(data.ToolDiscoveryBytes) * 100
+	if data.OrigToolDiscoveryTokens > 0 {
+		report.ToolDiscoveryTokens = data.OrigToolDiscoveryTokens - data.CompToolDiscoveryTokens
+		report.ToolDiscoveryPct = float64(data.OrigToolDiscoveryTokens-data.CompToolDiscoveryTokens) / float64(data.OrigToolDiscoveryTokens) * 100
 	}
 
 	// Preemptive summarization percentage
-	if data.PreemptiveSummarizationBytes > 0 {
-		report.PreemptiveSummarizationTokens = (data.PreemptiveSummarizationBytes - data.PreemptiveSummarizedBytes) / 4
-		report.PreemptiveSummarizationPct = float64(data.PreemptiveSummarizationBytes-data.PreemptiveSummarizedBytes) / float64(data.PreemptiveSummarizationBytes) * 100
+	if data.PreemptiveSummarizationTokens > 0 {
+		report.PreemptiveSummarizationTokens = data.PreemptiveSummarizationTokens - data.PreemptiveSummarizedTokens
+		report.PreemptiveSummarizationPct = float64(data.PreemptiveSummarizationTokens-data.PreemptiveSummarizedTokens) / float64(data.PreemptiveSummarizationTokens) * 100
 	}
 
 	// Token saved percentage and compression ratio
+	// AvgCompressionRatio = 1 - compressedTokens/originalTokens (removed fraction; higher = more aggressive)
 	if origTokens > 0 {
 		report.TokenSavedPct = float64(tokensSaved) / float64(origTokens) * 100
-		if compTokens > 0 {
-			report.AvgCompressionRatio = float64(origTokens) / float64(compTokens)
-		}
+		report.AvgCompressionRatio = tokenizer.CompressionRatio(origTokens, compTokens)
 	}
 
 	// Expand penalty
 	report.ExpandPenaltyTokens = data.ExpandPenaltyTokens
 
 	// Total tokens saved = compression + tool discovery + preemptive summarization - expand penalty
-	report.TotalTokensSaved = tokensSaved + report.ToolDiscoveryTokens + report.PreemptiveSummarizationTokens - data.ExpandPenaltyTokens
-	if report.TotalTokensSaved < 0 {
-		report.TotalTokensSaved = 0
-	}
+	report.TotalTokensSaved = max(0, tokensSaved+report.ToolDiscoveryTokens+report.PreemptiveSummarizationTokens-data.ExpandPenaltyTokens)
 
 	// Total original tokens
-	report.TotalOriginalTokens = origTokens + (data.ToolDiscoveryBytes / 4) + (data.PreemptiveSummarizationBytes / 4)
+	report.TotalOriginalTokens = origTokens + data.OrigToolDiscoveryTokens + data.PreemptiveSummarizationTokens
 	if report.TotalOriginalTokens > 0 {
 		report.TotalSavedPct = float64(report.TotalTokensSaved) / float64(report.TotalOriginalTokens) * 100
 	}
@@ -494,8 +477,7 @@ func computeReport(data *savingsData) SavingsReport {
 			usage.CacheCreationTokens, usage.CacheReadTokens, pricing)
 
 		// Savings: tokens we removed × cache-aware effective input rate
-		// Note: PreemptiveSummarization NOT included — summarization doesn't reduce cost
-		modelSavings := usage.TokensSaved + usage.ToolDiscoveryTokens
+		modelSavings := usage.TokensSaved + usage.ToolDiscoveryTokens + usage.PreemptiveSummarizationSaved
 		if modelSavings > 0 {
 			report.CostSavedUSD += float64(modelSavings) / 1_000_000 * effectiveRate
 		}
@@ -558,9 +540,7 @@ func effectiveSavingsInputRate(pricing costcontrol.ModelPricing, usage ModelUsag
 	return pricing.InputPerMTok * (totalWeighted / float64(totalInputLike))
 }
 
-// =============================================================================
 // Formatting — standalone functions used by handlers
-// =============================================================================
 
 // UnifiedReportData provides extra context for the /savings report.
 type UnifiedReportData struct {
@@ -644,9 +624,7 @@ func formatTier(tier string) string {
 	}
 }
 
-// =============================================================================
 // /savings command helpers
-// =============================================================================
 
 // IsSavingsRequest detects if a message is exactly the /savings command.
 func IsSavingsRequest(content string) bool {
@@ -657,20 +635,20 @@ func IsSavingsRequest(content string) bool {
 // When streaming is true, returns Anthropic SSE format.
 func BuildSavingsResponse(report string, model string, streaming bool) []byte {
 	msgID := fmt.Sprintf("msg_savings_%d", time.Now().UnixNano())
-	outputTokens := len(report) / 4
+	outputTokens := tokenizer.CountBytes([]byte(report))
 
 	if !streaming {
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"id":            msgID,
 			"type":          "message",
 			"role":          "assistant",
 			"model":         model,
 			"stop_reason":   "end_turn",
 			"stop_sequence": nil,
-			"content": []map[string]interface{}{
+			"content": []map[string]any{
 				{"type": "text", "text": report},
 			},
-			"usage": map[string]interface{}{
+			"usage": map[string]any{
 				"input_tokens":  0,
 				"output_tokens": outputTokens,
 			},
@@ -681,51 +659,51 @@ func BuildSavingsResponse(report string, model string, streaming bool) []byte {
 
 	var b strings.Builder
 
-	msgStart, _ := json.Marshal(map[string]interface{}{
+	msgStart, _ := json.Marshal(map[string]any{
 		"type": "message_start",
-		"message": map[string]interface{}{
+		"message": map[string]any{
 			"id": msgID, "type": "message", "role": "assistant", "model": model,
-			"stop_reason": nil, "stop_sequence": nil, "content": []interface{}{},
-			"usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0},
+			"stop_reason": nil, "stop_sequence": nil, "content": []any{},
+			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
 		},
 	})
 	b.WriteString("event: message_start\ndata: ")
 	b.Write(msgStart)
 	b.WriteString("\n\n")
 
-	blockStart, _ := json.Marshal(map[string]interface{}{
+	blockStart, _ := json.Marshal(map[string]any{
 		"type": "content_block_start", "index": 0,
-		"content_block": map[string]interface{}{"type": "text", "text": ""},
+		"content_block": map[string]any{"type": "text", "text": ""},
 	})
 	b.WriteString("event: content_block_start\ndata: ")
 	b.Write(blockStart)
 	b.WriteString("\n\n")
 
-	delta, _ := json.Marshal(map[string]interface{}{
+	delta, _ := json.Marshal(map[string]any{
 		"type": "content_block_delta", "index": 0,
-		"delta": map[string]interface{}{"type": "text_delta", "text": report},
+		"delta": map[string]any{"type": "text_delta", "text": report},
 	})
 	b.WriteString("event: content_block_delta\ndata: ")
 	b.Write(delta)
 	b.WriteString("\n\n")
 
-	blockStop, _ := json.Marshal(map[string]interface{}{
+	blockStop, _ := json.Marshal(map[string]any{
 		"type": "content_block_stop", "index": 0,
 	})
 	b.WriteString("event: content_block_stop\ndata: ")
 	b.Write(blockStop)
 	b.WriteString("\n\n")
 
-	msgDelta, _ := json.Marshal(map[string]interface{}{
+	msgDelta, _ := json.Marshal(map[string]any{
 		"type":  "message_delta",
-		"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
-		"usage": map[string]interface{}{"output_tokens": outputTokens},
+		"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
+		"usage": map[string]any{"output_tokens": outputTokens},
 	})
 	b.WriteString("event: message_delta\ndata: ")
 	b.Write(msgDelta)
 	b.WriteString("\n\n")
 
-	msgStop, _ := json.Marshal(map[string]interface{}{"type": "message_stop"})
+	msgStop, _ := json.Marshal(map[string]any{"type": "message_stop"})
 	b.WriteString("event: message_stop\ndata: ")
 	b.Write(msgStop)
 	b.WriteString("\n\n")

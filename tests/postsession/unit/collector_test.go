@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 	"github.com/compresr/context-gateway/internal/postsession"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,20 +68,23 @@ func TestSessionCollector_RecordCompaction(t *testing.T) {
 
 func TestSessionCollector_CaptureAuth(t *testing.T) {
 	c := postsession.NewSessionCollector()
-	c.CaptureAuth("sk-ant-test123", true, "https://api.anthropic.com/v1/messages")
+	c.CaptureAuth(authtypes.CapturedAuth{
+		Token:     "sk-ant-test123",
+		IsXAPIKey: true,
+		Endpoint:  "https://api.anthropic.com/v1/messages",
+	})
 
-	token, isXAPI, endpoint := c.GetAuth()
-	assert.Equal(t, "sk-ant-test123", token)
-	assert.True(t, isXAPI)
-	assert.Equal(t, "https://api.anthropic.com/v1/messages", endpoint)
+	auth := c.GetAuth()
+	assert.Equal(t, "sk-ant-test123", auth.Token)
+	assert.True(t, auth.IsXAPIKey)
+	assert.Equal(t, "https://api.anthropic.com/v1/messages", auth.Endpoint)
 }
 
 func TestSessionCollector_CaptureAuth_SkipsEmpty(t *testing.T) {
 	c := postsession.NewSessionCollector()
-	c.CaptureAuth("", false, "")
+	c.CaptureAuth(authtypes.CapturedAuth{})
 
-	token, _, _ := c.GetAuth()
-	assert.Empty(t, token)
+	assert.Empty(t, c.GetAuth().Token)
 }
 
 func TestSessionCollector_BuildSessionLog_Format(t *testing.T) {

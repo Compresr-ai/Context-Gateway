@@ -1,8 +1,4 @@
 // Terminal window focus — brings the terminal running a gateway instance to the foreground.
-//
-// DESIGN: Uses TERM_PROGRAM (captured at registration) to know which terminal app to activate.
-// For iTerm2, uses AppleScript to find the specific tab by TTY device.
-// For other terminals, activates the app (which brings the last-used window to front).
 package dashboard
 
 import (

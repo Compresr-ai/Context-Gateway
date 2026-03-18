@@ -37,8 +37,8 @@ func TestMultiTool_AllToolsCompressed(t *testing.T) {
 				Enabled:             true,
 				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    config.StrategyPassthrough,
-				MinBytes:            50,
-				MaxBytes:            1024 * 1024,
+				MinTokens:          12,
+				MaxTokens:          262144,
 				EnableExpandContext: true,
 				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",
@@ -88,8 +88,8 @@ func TestMultiTool_MixedSizes(t *testing.T) {
 				Enabled:             true,
 				Strategy:            config.StrategyCompresr,
 				FallbackStrategy:    config.StrategyPassthrough,
-				MinBytes:            100,
-				MaxBytes:            1024 * 1024,
+				MinTokens:          25,
+				MaxTokens:          262144,
 				EnableExpandContext: true,
 				Compresr: config.CompresrConfig{
 					Endpoint: "/compress",

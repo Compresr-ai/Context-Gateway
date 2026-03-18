@@ -42,6 +42,9 @@ func init() {
 }
 
 func getOpenAIKeyE2E(t *testing.T) string {
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
+	}
 	key := os.Getenv("OPENAI_API_KEY")
 	if key == "" {
 		t.Skip("OPENAI_API_KEY not set, skipping E2E test")
@@ -780,9 +783,9 @@ func passthroughConfigOpenAI() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }
@@ -799,14 +802,14 @@ func compressionConfigOpenAI() *config.Config {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr,
 				FallbackStrategy:       "passthrough",
-				MinBytes:               500,
-				MaxBytes:               65536,
+				MinTokens:              125,
+				MaxTokens:              16384,
 				TargetCompressionRatio: 0.3,
 				IncludeExpandHint:      true,
 				EnableExpandContext:    true,
 				Compresr: config.CompresrConfig{
 					Endpoint:  os.Getenv("COMPRESR_API_URL") + "/api/compress/tool-output",
-					AuthParam: os.Getenv("COMPRESR_API_KEY"),
+					APIKey: os.Getenv("COMPRESR_API_KEY"),
 					Model:     "toc_espresso_v1",
 					Timeout:   30 * time.Second,
 				},
@@ -820,9 +823,9 @@ func compressionConfigOpenAI() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "debug",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }

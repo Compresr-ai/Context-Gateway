@@ -19,20 +19,14 @@ import (
 func TestInvalidateExpandedMappings(t *testing.T) {
 	st := store.NewMemoryStore(60 * time.Second)
 	defer st.Close()
-	expander := tooloutput.NewExpander(st, nil)
 
-	// Store compressed content
 	shadowID := "shadow_toclear"
 	st.SetCompressed(shadowID, "compressed version")
 
-	// Verify it exists
 	_, found := st.GetCompressed(shadowID)
 	assert.True(t, found)
 
-	// InvalidateExpandedMappings is now a no-op to preserve KV-cache prefix matching
-	expander.InvalidateExpandedMappings([]string{shadowID})
-
-	// Verify compressed entry is PRESERVED (not deleted) for KV-cache determinism
+	// Compressed entries are preserved for KV-cache determinism (no-op since Expander removed).
 	_, found = st.GetCompressed(shadowID)
 	assert.True(t, found)
 }

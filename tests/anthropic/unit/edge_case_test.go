@@ -43,7 +43,7 @@ func TestE1_CompressionAPIFailure(t *testing.T) {
 // TestE3_ContentTooLarge verifies oversized content skips compression.
 func TestE3_ContentTooLarge(t *testing.T) {
 	cfg := fixtures.TestConfig(config.StrategyCompresr, 50, true)
-	cfg.Pipes.ToolOutput.MaxBytes = 1000 // Small max for test
+	cfg.Pipes.ToolOutput.MaxTokens = 250 // Small max for test
 	st := fixtures.TestStore()
 
 	pipe := tooloutput.New(cfg, st)
@@ -109,11 +109,12 @@ func TestE22_ContentHashDeterminism(t *testing.T) {
 // TestE24_PrefixFormat verifies prefix format constant.
 func TestE24_PrefixFormat(t *testing.T) {
 	// PrefixFormat is a constant, verify it has expected format
-	assert.Contains(t, tooloutput.PrefixFormat, "<<<SHADOW:")
-	assert.Contains(t, tooloutput.PrefixFormat, ">>>")
+	// Format: [REF:shadow_xxx]\n<compressed content>
+	assert.Contains(t, tooloutput.PrefixFormat, "[REF:")
+	assert.Contains(t, tooloutput.PrefixFormat, "]")
 }
 
-// TestBelowMinThreshold verifies content below minBytes is not compressed.
+// TestBelowMinThreshold verifies content below minTokens is not compressed.
 func TestBelowMinThreshold(t *testing.T) {
 	cfg := fixtures.TestConfig(config.StrategyCompresr, 500, true) // 500 byte min
 	pipe := tooloutput.New(cfg, fixtures.TestStore())

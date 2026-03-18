@@ -17,9 +17,7 @@ import (
 	"golang.org/x/term"
 )
 
-// =============================================================================
 // CONFIGURATION
-// =============================================================================
 
 const (
 	// RefreshInterval is the minimum time between status refreshes
@@ -38,9 +36,7 @@ const (
 	AutoRefreshInterval = 10 * time.Second
 )
 
-// =============================================================================
 // COST SOURCE INTERFACE
-// =============================================================================
 
 // CostSource provides local session cost data for the status bar.
 // Implemented by costcontrol.Tracker to avoid circular imports.
@@ -63,9 +59,7 @@ type ExpandSource interface {
 	GetExpandSummary() (total int, found int, notFound int)
 }
 
-// =============================================================================
 // STATUS BAR
-// =============================================================================
 
 // StatusBar manages and displays the gateway usage status.
 type StatusBar struct {
@@ -114,9 +108,7 @@ func NewStatusBar(client *compresr.Client) *StatusBar {
 	}
 }
 
-// =============================================================================
 // PUBLIC METHODS
-// =============================================================================
 
 // Refresh fetches the latest status from the API, bypassing the client cache.
 // Use this for explicit refresh calls (startup, exit) where fresh data is needed.
@@ -307,9 +299,7 @@ func (sb *StatusBar) SetSessionName(name string) {
 	sb.mu.Unlock()
 }
 
-// =============================================================================
 // RENDERING
-// =============================================================================
 
 // Render prints the status bar to stdout.
 func (sb *StatusBar) Render() {
@@ -382,11 +372,11 @@ func (sb *StatusBar) RenderStartup(sessionName string) {
 	}
 }
 
-// renderDashboardURL prints the dashboard URL (always on fixed port 18080).
+// renderDashboardURL prints the dashboard URL using the configured port.
 func (sb *StatusBar) renderDashboardURL() {
 	if sb.dashboardPort > 0 {
-		fmt.Printf("  %s✓%s %sDashboard:%s http://localhost:18080/dashboard/\n",
-			ColorGreen, ColorReset, ColorDim, ColorReset)
+		fmt.Printf("  %s✓%s %sDashboard:%s http://localhost:%d/dashboard/\n",
+			ColorGreen, ColorReset, ColorDim, ColorReset, sb.dashboardPort)
 	}
 }
 
@@ -609,9 +599,7 @@ func (sb *StatusBar) FormatTitleStatus(port int, session string) string {
 	return fmt.Sprintf("%s | $%.2f remaining | %s", base, st.CreditsRemainingUSD, formatTier(st.Tier))
 }
 
-// =============================================================================
 // PROGRESS BAR
-// =============================================================================
 
 // renderMiniBar returns a compact bar without brackets for inline display.
 // width is the number of bar characters.
@@ -649,9 +637,7 @@ func renderMiniBar(percent float64, width int) string {
 	return bar
 }
 
-// =============================================================================
 // HELPERS
-// =============================================================================
 
 // getBalanceColor returns the appropriate color for the given credit balance.
 func getBalanceColor(credits float64) string {

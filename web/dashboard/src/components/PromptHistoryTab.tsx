@@ -498,6 +498,19 @@ function PromptHistoryTab({ sessionNames = {} }: { sessionNames?: Record<string,
     }
   }
 
+  const handleDeletePrompt = async (id: number) => {
+    try {
+      const res = await fetch(`/api/prompts/${id}`, { method: 'DELETE' })
+      if (res.ok) {
+        // Remove from local state immediately for snappy UX
+        setPrompts((prev) => prev.filter((p) => p.id !== id))
+        setTotal((prev) => Math.max(0, prev - 1))
+      }
+    } catch {
+      // ignore network errors
+    }
+  }
+
   // Build page numbers for pagination
   const getPageNumbers = (): (number | 'ellipsis')[] => {
     if (totalPages <= 7) {
@@ -910,6 +923,7 @@ function PromptHistoryTab({ sessionNames = {} }: { sessionNames?: Record<string,
             prompt={prompt}
             expanded={expandedId === prompt.id}
             onToggle={() => setExpandedId(expandedId === prompt.id ? null : prompt.id)}
+            onDelete={handleDeletePrompt}
             sessionName={sessionNames[prompt.session_id]}
           />
         ))}

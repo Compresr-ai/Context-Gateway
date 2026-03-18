@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog/log"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -33,9 +34,7 @@ func NewGeminiAdapter() *GeminiAdapter {
 	}
 }
 
-// =============================================================================
 // TOOL OUTPUT - Extract/Apply
-// =============================================================================
 
 // ExtractToolOutput extracts tool result content from Gemini format.
 // Gemini format: contents[] with parts containing functionResponse objects.
@@ -124,9 +123,7 @@ func (a *GeminiAdapter) ApplyToolOutput(body []byte, results []CompressedResult)
 	return modified, nil
 }
 
-// =============================================================================
 // TOOL DISCOVERY - Extract/Apply (stub)
-// =============================================================================
 
 // ExtractToolDiscovery extracts tool definitions for filtering.
 func (a *GeminiAdapter) ExtractToolDiscovery(body []byte, opts *ToolDiscoveryOptions) ([]ExtractedContent, error) {
@@ -138,9 +135,7 @@ func (a *GeminiAdapter) ApplyToolDiscovery(body []byte, results []CompressedResu
 	return body, nil
 }
 
-// =============================================================================
 // LAST USER CONTENT - Structural extraction for classification
-// =============================================================================
 
 // ExtractLastUserContent extracts text blocks from the last user message.
 // Gemini uses functionResponse parts for tool results (analogous to tool_result).
@@ -191,13 +186,10 @@ func (a *GeminiAdapter) ExtractLastUserContent(body []byte) ([]string, bool) {
 	return nil, false
 }
 
-// =============================================================================
 // QUERY EXTRACTION
-// =============================================================================
 
 // ExtractUserQuery extracts the last user message content from Gemini format.
-// Looks for contents[] with role:"user" and text parts.
-// Deprecated: Use ExtractLastUserContent + gateway classification instead.
+// Looks for contents[] with role:"user" and text parts, skipping functionResponse parts.
 func (a *GeminiAdapter) ExtractUserQuery(body []byte) string {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -245,12 +237,11 @@ func (a *GeminiAdapter) ExtractUserQuery(body []byte) string {
 	return ""
 }
 
-// =============================================================================
 // USAGE EXTRACTION
-// =============================================================================
 
 // ExtractUsage extracts token usage from Gemini API response.
-// Gemini format: {"usageMetadata": {"promptTokenCount": N, "candidatesTokenCount": N, "totalTokenCount": N}}
+// Gemini format: {"usageMetadata": {"promptTokenCount": N, "candidatesTokenCount": N, "totalTokenCount": N, "cachedContentTokenCount": N}}
+// cachedContentTokenCount is a subset of promptTokenCount (tokens served from context cache).
 func (a *GeminiAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 	if len(responseBody) == 0 {
 		return UsageInfo{}
@@ -258,25 +249,33 @@ func (a *GeminiAdapter) ExtractUsage(responseBody []byte) UsageInfo {
 
 	var resp struct {
 		UsageMetadata struct {
-			PromptTokenCount     int `json:"promptTokenCount"`
-			CandidatesTokenCount int `json:"candidatesTokenCount"`
-			TotalTokenCount      int `json:"totalTokenCount"`
+			PromptTokenCount        int `json:"promptTokenCount"`
+			CandidatesTokenCount    int `json:"candidatesTokenCount"`
+			TotalTokenCount         int `json:"totalTokenCount"`
+			CachedContentTokenCount int `json:"cachedContentTokenCount"`
 		} `json:"usageMetadata"`
 	}
 	if err := json.Unmarshal(responseBody, &resp); err != nil {
 		return UsageInfo{}
 	}
 
+	// cachedContentTokenCount is a subset of promptTokenCount (served from cache).
+	// Subtract it so InputTokens represents only non-cached input, consistent with
+	// how Anthropic and OpenAI adapters normalize their cache fields.
+	nonCachedInput := resp.UsageMetadata.PromptTokenCount - resp.UsageMetadata.CachedContentTokenCount
+	if nonCachedInput < 0 {
+		nonCachedInput = 0
+	}
+
 	return UsageInfo{
-		InputTokens:  resp.UsageMetadata.PromptTokenCount,
-		OutputTokens: resp.UsageMetadata.CandidatesTokenCount,
-		TotalTokens:  resp.UsageMetadata.TotalTokenCount,
+		InputTokens:          nonCachedInput,
+		OutputTokens:         resp.UsageMetadata.CandidatesTokenCount,
+		TotalTokens:          resp.UsageMetadata.TotalTokenCount,
+		CacheReadInputTokens: resp.UsageMetadata.CachedContentTokenCount,
 	}
 }
 
-// =============================================================================
 // MODEL EXTRACTION
-// =============================================================================
 
 // ExtractModel extracts the model name from Gemini request body.
 // Gemini typically puts the model in the URL path (/models/{model}:generateContent),
@@ -300,12 +299,18 @@ func (a *GeminiAdapter) ExtractModel(requestBody []byte) string {
 	return req.Model
 }
 
-// =============================================================================
 // HELPERS
-// =============================================================================
 
 // extractResponseContent extracts a string from a Gemini functionResponse.response value.
 // The response field is typically a JSON object, so we serialize it.
+//
+// Round-trip design: ApplyToolOutput always writes back {"result": compressed}, so
+// on subsequent requests the wrapper key will be "result" regardless of the original
+// key name. This key rename ("content"→"result", "output"→"result", etc.) is intentional —
+// Gemini models read the tool response content, not the key name.
+//
+// Single-key objects with a string value are unwrapped regardless of key name.
+// Multi-key objects are serialized as-is.
 func (a *GeminiAdapter) extractResponseContent(v any) string {
 	if v == nil {
 		return ""
@@ -316,15 +321,18 @@ func (a *GeminiAdapter) extractResponseContent(v any) string {
 		return s
 	}
 
-	// Object — serialize to JSON string for compression
+	// Object — unwrap single-key string wrappers, serialize everything else
 	if m, ok := v.(map[string]any); ok {
-		// If there's a single "result" or "content" or "output" key with a string value, use it directly
-		for _, key := range []string{"result", "content", "output"} {
-			if s, ok := m[key].(string); ok && len(m) == 1 {
-				return s
+		// Single-key wrapper with a string value: unwrap regardless of key name.
+		// Common Gemini response wrappers: "result", "content", "output", etc.
+		if len(m) == 1 {
+			for _, val := range m {
+				if s, ok := val.(string); ok {
+					return s
+				}
 			}
 		}
-		// Otherwise serialize the entire object
+		// Multi-key object or non-string value — serialize the entire object
 		b, err := json.Marshal(m)
 		if err != nil {
 			return ""
@@ -340,9 +348,7 @@ func (a *GeminiAdapter) extractResponseContent(v any) string {
 	return string(b)
 }
 
-// =============================================================================
 // PARSED REQUEST ADAPTER - Stubs (tool discovery disabled for Gemini)
-// =============================================================================
 
 // ParseRequest parses the request body once for reuse.
 // Gemini tool discovery is not implemented, so this returns a minimal parsed request.
@@ -353,7 +359,8 @@ func (a *GeminiAdapter) ParseRequest(body []byte) (*ParsedRequest, error) {
 	}
 
 	parsed := &ParsedRequest{
-		Raw: req,
+		Raw:          req,
+		OriginalBody: body,
 	}
 
 	// Extract contents for potential message iteration
@@ -372,38 +379,100 @@ func (a *GeminiAdapter) ExtractToolDiscoveryFromParsed(parsed *ParsedRequest, op
 
 // ExtractUserQueryFromParsed extracts the last user message from a pre-parsed request.
 func (a *GeminiAdapter) ExtractUserQueryFromParsed(parsed *ParsedRequest) string {
-	if parsed == nil || parsed.Raw == nil {
+	if parsed == nil {
 		return ""
 	}
-	// Re-serialize and use the existing method
-	body, err := json.Marshal(parsed.Raw)
-	if err != nil {
-		return ""
+	if parsed.OriginalBody != nil {
+		return a.ExtractUserQuery(parsed.OriginalBody)
 	}
-	return a.ExtractUserQuery(body)
+	return ""
 }
 
 // ExtractToolOutputFromParsed extracts tool results from a pre-parsed request.
 func (a *GeminiAdapter) ExtractToolOutputFromParsed(parsed *ParsedRequest) ([]ExtractedContent, error) {
-	if parsed == nil || parsed.Raw == nil {
+	if parsed == nil {
 		return nil, nil
 	}
-	// Re-serialize and use the existing method
-	body, err := json.Marshal(parsed.Raw)
-	if err != nil {
-		return nil, nil
+	if parsed.OriginalBody != nil {
+		return a.ExtractToolOutput(parsed.OriginalBody)
 	}
-	return a.ExtractToolOutput(body)
+	return nil, nil
 }
 
-// ApplyToolDiscoveryToParsed filters tools and returns modified body.
-// Returns original body — tool discovery is not implemented for Gemini.
+// ApplyToolDiscoveryToParsed returns the original body unchanged.
+// Tool discovery is not implemented for Gemini; OriginalBody preserves original key order.
 func (a *GeminiAdapter) ApplyToolDiscoveryToParsed(parsed *ParsedRequest, results []CompressedResult) ([]byte, error) {
-	if parsed == nil || parsed.Raw == nil {
+	if parsed == nil {
 		return nil, nil
 	}
-	// Just re-serialize the original request unchanged
-	return json.Marshal(parsed.Raw)
+	if parsed.OriginalBody != nil {
+		return parsed.OriginalBody, nil
+	}
+	return nil, nil
+}
+
+// PHANTOM TOOL OPERATIONS - Stubs (phantom tools not supported for Gemini)
+
+// ExtractToolCallsFromResponse returns nil — phantom tools are not supported for Gemini.
+func (a *GeminiAdapter) ExtractToolCallsFromResponse(_ []byte) ([]ToolCall, error) {
+	return nil, nil
+}
+
+// FilterToolCallFromResponse returns unchanged body — phantom tools are not supported for Gemini.
+func (a *GeminiAdapter) FilterToolCallFromResponse(responseBody []byte, _ string) ([]byte, bool) {
+	return responseBody, false
+}
+
+// AppendMessages returns unchanged body — phantom tools are not supported for Gemini.
+func (a *GeminiAdapter) AppendMessages(body []byte, _ []byte, _ []map[string]any) ([]byte, error) {
+	return body, nil
+}
+
+// BuildToolResultMessages returns nil — phantom tools are not supported for Gemini.
+func (a *GeminiAdapter) BuildToolResultMessages(_ []ToolCall, _ []string, _ []byte) []map[string]any {
+	return nil
+}
+
+// ExtractTurnSignal classifies the Gemini finishReason into a normalized TurnSignal.
+//
+// Gemini always uses "STOP" even for function calls; the actual signal is determined
+// by checking whether candidates[0].content.parts contains a functionCall object.
+//
+//	STOP + no functionCall in parts → HumanTurn
+//	STOP + functionCall present      → AgentWorking
+//	MAX_TOKENS                       → Truncated
+//	SAFETY, RECITATION, OTHER, etc.  → HumanTurn (terminal states)
+//	MALFORMED_FUNCTION_CALL          → Unknown (retry recommended)
+func (a *GeminiAdapter) ExtractTurnSignal(responseBody []byte, streamStopReason string) TurnSignal {
+	reason := streamStopReason
+	if reason == "" {
+		reason = gjson.GetBytes(responseBody, "candidates.0.finishReason").String()
+	}
+	switch reason {
+	case "MAX_TOKENS":
+		return TurnSignalTruncated
+	case "MALFORMED_FUNCTION_CALL":
+		return TurnSignalUnknown
+	case "STOP":
+		// Gemini uses "STOP" even for tool calls — check parts for functionCall.
+		// Safe for streaming: if responseBody is empty or incomplete, gjson returns
+		// a non-existent result, parts.Exists() is false, and we return HumanTurn.
+		// Tool calls are always visible in the full buffered body for streaming paths.
+		parts := gjson.GetBytes(responseBody, "candidates.0.content.parts")
+		if parts.Exists() {
+			for _, part := range parts.Array() {
+				if part.Get("functionCall").Exists() {
+					return TurnSignalAgentWorking
+				}
+			}
+		}
+		return TurnSignalHumanTurn
+	case "":
+		return TurnSignalUnknown
+	default:
+		// SAFETY, RECITATION, IMAGE_SAFETY, PROHIBITED_CONTENT, OTHER → terminal
+		return TurnSignalHumanTurn
+	}
 }
 
 // Ensure GeminiAdapter implements Adapter and ParsedRequestAdapter

@@ -28,6 +28,17 @@ func compressedEvent(orig, comp int) *monitoring.RequestEvent {
 		OriginalTokens:   orig,
 		CompressedTokens: comp,
 		Model:            "claude-sonnet-4-20250514",
+		IsMainAgent:      true,
+	}
+}
+
+// compressedComparison creates a CompressionComparison with the given token counts.
+func compressedComparison(origTokens, compTokens int) monitoring.CompressionComparison {
+	return monitoring.CompressionComparison{
+		ProviderModel:    "claude-sonnet-4-20250514",
+		OriginalTokens:   origTokens,
+		CompressedTokens: compTokens,
+		Status:           "compressed",
 	}
 }
 
@@ -49,6 +60,7 @@ func TestRecordRequest_NilEvent(t *testing.T) {
 func TestRecordRequest_Global(t *testing.T) {
 	st := newTracker(t)
 	st.RecordRequest(compressedEvent(1000, 600), "")
+	st.RecordToolOutputCompression(compressedComparison(1000, 600), "", true)
 
 	report := st.GetReport()
 	assert.Equal(t, 1, report.TotalRequests)
@@ -64,6 +76,7 @@ func TestRecordRequest_NotCompressed(t *testing.T) {
 	event := &monitoring.RequestEvent{
 		CompressionUsed: false,
 		Model:           "claude-sonnet-4-20250514",
+		IsMainAgent:     true,
 	}
 	st.RecordRequest(event, "")
 
@@ -73,52 +86,22 @@ func TestRecordRequest_NotCompressed(t *testing.T) {
 	assert.Equal(t, 1, report.PassthroughRequests)
 }
 
-func TestRecordRequestWithSession(t *testing.T) {
-	st := newTracker(t)
-	st.RecordRequestWithSession(compressedEvent(2000, 1000), "session-1")
-
-	// Global report
-	report := st.GetReport()
-	assert.Equal(t, 1, report.TotalRequests)
-	assert.Equal(t, 1, report.CompressedRequests)
-
-	// Session report
-	sessionReport := st.GetReportForSession("session-1")
-	assert.Equal(t, 1, sessionReport.TotalRequests)
-	assert.Equal(t, 1, sessionReport.CompressedRequests)
-	assert.Equal(t, 2000, sessionReport.OriginalTokens)
-	assert.Equal(t, 1000, sessionReport.CompressedTokens)
-}
-
 func TestGetReportForSession_NotFound(t *testing.T) {
 	st := newTracker(t)
 	report := st.GetReportForSession("nonexistent")
 	assert.Equal(t, 0, report.TotalRequests)
 }
 
-func TestSessionIDs(t *testing.T) {
-	st := newTracker(t)
-
-	event := &monitoring.RequestEvent{Model: "claude-sonnet-4-20250514"}
-	st.RecordRequestWithSession(event, "sess-a")
-	st.RecordRequestWithSession(event, "sess-b")
-
-	ids := st.SessionIDs()
-	assert.Len(t, ids, 2)
-	assert.Contains(t, ids, "sess-a")
-	assert.Contains(t, ids, "sess-b")
-}
-
 func TestRecordToolDiscovery(t *testing.T) {
 	st := newTracker(t)
 
 	comparison := monitoring.CompressionComparison{
-		AllTools:        []string{"tool1", "tool2", "tool3"},
-		SelectedTools:   []string{"tool1"},
-		OriginalBytes:   3000,
-		CompressedBytes: 1000,
+		AllTools:         []string{"tool1", "tool2", "tool3"},
+		SelectedTools:    []string{"tool1"},
+		OriginalTokens:   750,
+		CompressedTokens: 250,
 	}
-	st.RecordToolDiscovery(comparison, "")
+	st.RecordToolDiscovery(comparison, "", true)
 
 	report := st.GetReport()
 	assert.Equal(t, 1, report.ToolDiscoveryRequests)
@@ -126,7 +109,7 @@ func TestRecordToolDiscovery(t *testing.T) {
 
 func TestRecordExpandPenalty(t *testing.T) {
 	st := newTracker(t)
-	st.RecordExpandPenalty(500, "session-1")
+	st.RecordExpandPenalty(500, "claude-sonnet-4-20250514", "session-1")
 
 	report := st.GetReport()
 	assert.Equal(t, 500, report.ExpandPenaltyTokens)
@@ -138,6 +121,7 @@ func TestRecordExpandPenalty(t *testing.T) {
 func TestGetSavingsSummary(t *testing.T) {
 	st := newTracker(t)
 	st.RecordRequest(compressedEvent(1000, 400), "")
+	st.RecordToolOutputCompression(compressedComparison(1000, 400), "", true)
 
 	tokensSaved, _, compressed, total := st.GetSavingsSummary()
 	assert.Equal(t, 600, tokensSaved)
@@ -156,6 +140,7 @@ func TestGetCostBreakdown(t *testing.T) {
 		InputTokens:      100000,
 		OutputTokens:     5000,
 		Model:            "claude-sonnet-4-20250514",
+		IsMainAgent:      true,
 	}
 	st.RecordRequest(event, "")
 
@@ -175,30 +160,12 @@ func TestGetCompressionStats(t *testing.T) {
 	assert.Equal(t, 1, total)
 }
 
-func TestGetDetailedSummary(t *testing.T) {
-	st := newTracker(t)
-	st.RecordRequest(compressedEvent(1000, 500), "")
-
-	details := st.GetDetailedSummary()
-	assert.Equal(t, 1, details.TotalRequests)
-	assert.Equal(t, 1, details.CompressedRequests)
-	assert.Equal(t, 500, details.TokensSaved)
-}
-
-func TestFormatReport(t *testing.T) {
-	st := newTracker(t)
-	st.RecordRequest(compressedEvent(10000, 5000), "")
-
-	report := st.FormatReport()
-	assert.Contains(t, report, "Savings Report")
-	assert.Contains(t, report, "10000")
-}
-
 func TestMultipleRequests_Accumulation(t *testing.T) {
 	st := newTracker(t)
 
 	for i := 0; i < 5; i++ {
 		st.RecordRequest(compressedEvent(1000, 600), "")
+		st.RecordToolOutputCompression(compressedComparison(1000, 600), "", true)
 	}
 
 	report := st.GetReport()
@@ -287,31 +254,40 @@ func TestBuildSavingsResponse_Streaming(t *testing.T) {
 	assert.Contains(t, result, report)
 }
 
-// ---------------------------------------------------------------------------
-// FormatUnifiedReport
-// ---------------------------------------------------------------------------
-
-func TestFormatUnifiedReport(t *testing.T) {
+func TestRecordPreemptiveSummarization_IncludesInCostSaved(t *testing.T) {
 	st := newTracker(t)
-	st.RecordRequest(compressedEvent(10000, 5000), "")
 
-	extra := monitoring.UnifiedReportData{
-		Tier:                "pro",
-		CreditsRemainingUSD: 42.50,
-		BalanceAvailable:    true,
+	// Record a request with token usage so cost calculation has data
+	event := &monitoring.RequestEvent{
+		CompressionUsed: false,
+		Model:           "claude-sonnet-4-20250514",
+		InputTokens:     10000,
+		OutputTokens:    500,
+		IsMainAgent:     true,
 	}
-	report := st.FormatUnifiedReport(extra)
-	assert.Contains(t, report, "Savings Report")
-	assert.Contains(t, report, "Pro")
+	st.RecordRequest(event, "sess-preemptive")
+
+	// Record preemptive summarization savings: 10000 original tokens, 5000 compressed tokens
+	st.RecordPreemptiveSummarization(10000, 5000, "claude-sonnet-4-20250514", "sess-preemptive", true)
+
+	report := st.GetReportForSession("sess-preemptive")
+	assert.Equal(t, 1, report.PreemptiveSummarizationRequests)
+	// 10000 - 5000 = 5000 tokens saved
+	assert.Equal(t, 5000, report.PreemptiveSummarizationTokens)
+	// Preemptive summarization should be included in CostSavedUSD
+	assert.Greater(t, report.CostSavedUSD, 0.0)
+	// TotalTokensSaved should include preemptive summarization
+	assert.Equal(t, 5000, report.TotalTokensSaved)
 }
 
-func TestFormatUnifiedReportForSession(t *testing.T) {
+func TestRecordExpandPenalty_SetsGlobalLastUpdated(t *testing.T) {
 	st := newTracker(t)
-	st.RecordRequestWithSession(compressedEvent(5000, 2000), "sess-test")
 
-	extra := monitoring.UnifiedReportData{}
-	report := st.FormatUnifiedReportForSession("sess-test", extra)
-	assert.NotEmpty(t, report)
+	// Record penalty without session — should still update global LastUpdated
+	st.RecordExpandPenalty(1000, "claude-opus-4-6", "")
+
+	report := st.GetReport()
+	assert.Equal(t, 1000, report.ExpandPenaltyTokens)
 }
 
 func TestFormatUnifiedReportFromReport(t *testing.T) {

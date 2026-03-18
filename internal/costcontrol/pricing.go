@@ -13,9 +13,7 @@ type ModelPricing struct {
 // modelPricingTable maps model names to their pricing.
 // Sources: platform.claude.com, developers.openai.com, ai.google.dev (Feb 2026)
 var modelPricingTable = map[string]ModelPricing{
-	// =========================================================================
 	// ANTHROPIC CLAUDE (platform.claude.com/docs/en/about-claude/pricing)
-	// =========================================================================
 
 	// Claude Opus 4.x
 	"claude-opus-4-6": {InputPerMTok: 5, OutputPerMTok: 25},
@@ -27,15 +25,11 @@ var modelPricingTable = map[string]ModelPricing{
 	"claude-sonnet-4-6": {InputPerMTok: 3, OutputPerMTok: 15},
 	"claude-sonnet-4-5": {InputPerMTok: 3, OutputPerMTok: 15},
 	"claude-sonnet-4":   {InputPerMTok: 3, OutputPerMTok: 15},
-	"claude-sonnet-3-7": {InputPerMTok: 3, OutputPerMTok: 15}, // deprecated
-
 	// Claude Haiku 4.x
 	"claude-haiku-4-5": {InputPerMTok: 1, OutputPerMTok: 5},
 	"claude-haiku-3-5": {InputPerMTok: 0.80, OutputPerMTok: 4},
 
-	// =========================================================================
 	// OPENAI (developers.openai.com/api/docs/pricing)
-	// =========================================================================
 
 	// GPT-5.x series
 	"gpt-5.2":            {InputPerMTok: 1.75, OutputPerMTok: 14},
@@ -96,9 +90,7 @@ var modelPricingTable = map[string]ModelPricing{
 	"gpt-3.5-turbo-instruct": {InputPerMTok: 1.5, OutputPerMTok: 2},
 	"gpt-3.5-turbo-16k":      {InputPerMTok: 3, OutputPerMTok: 4},
 
-	// =========================================================================
 	// GOOGLE GEMINI (ai.google.dev/gemini-api/docs/pricing)
-	// =========================================================================
 
 	// Gemini 3.x
 	"gemini-3.1-pro-preview": {InputPerMTok: 2, OutputPerMTok: 12},

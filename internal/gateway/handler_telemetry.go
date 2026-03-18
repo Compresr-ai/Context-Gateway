@@ -5,18 +5,41 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/compresr/context-gateway/internal/adapters"
+	authtypes "github.com/compresr/context-gateway/internal/auth/types"
 	"github.com/compresr/context-gateway/internal/costcontrol"
 	"github.com/compresr/context-gateway/internal/dashboard"
 	"github.com/compresr/context-gateway/internal/monitoring"
+	phantom_tools "github.com/compresr/context-gateway/internal/phantom_tools"
 	"github.com/compresr/context-gateway/internal/preemptive"
+	"github.com/compresr/context-gateway/internal/tokenizer"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 // telemetryParams holds all parameters needed for telemetry recording.
+//
+// Backward compatibility: Environment variables for is_main_agent defaults.
+// - TOOL_OUTPUT_DEFAULT_MAIN_AGENT: default "true" - assume main agent for tool output when unknown
+// - TASK_OUTPUT_DEFAULT_MAIN_AGENT: default "false" - assume subagent for task output (always subagent by definition)
+var (
+	toolOutputDefaultMainAgent = getEnvBool("TOOL_OUTPUT_DEFAULT_MAIN_AGENT", true)
+	taskOutputDefaultMainAgent = getEnvBool("TASK_OUTPUT_DEFAULT_MAIN_AGENT", false)
+)
+
+// getEnvBool reads a boolean from environment variable with a default value.
+func getEnvBool(key string, defaultVal bool) bool {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	return strings.EqualFold(val, "true") || val == "1"
+}
+
 type telemetryParams struct {
 	requestID           string
 	startTime           time.Time
@@ -37,16 +60,20 @@ type telemetryParams struct {
 	expandLoops         int
 	expandCallsFound    int
 	expandCallsNotFound int
+	expandPenaltyTokens int // Tiktoken count for savings tracker
 	pipeCtx             *PipelineContext
 	// For usage extraction from API response
-	adapter           adapters.Adapter
-	requestBody       []byte              // Original request from client
-	responseBody      []byte              // Response from LLM
-	streamUsage       *adapters.UsageInfo // Pre-extracted usage from SSE stream (streaming only)
-	forwardBody       []byte              // Compressed request sent to LLM (for proxy interaction tracking)
-	authModeInitial   string
-	authModeEffective string
-	authFallbackUsed  bool
+	adapter            adapters.Adapter
+	requestBody        []byte              // Original request from client
+	responseBody       []byte              // Response from LLM
+	streamUsage        *adapters.UsageInfo // Pre-extracted usage from SSE stream (streaming only)
+	streamStopReason   string              // stop_reason / finish_reason from SSE stream (streaming only)
+	phantomLoopUsage   *adapters.UsageInfo // Accumulated usage across all phantom loop iterations
+	forwardBody        []byte              // Compressed request sent to LLM (for proxy interaction tracking)
+	compressedBodySize int                 // Post-compression, pre-tool-injection body size (for accurate metrics)
+	authModeInitial    string
+	authModeEffective  string
+	authFallbackUsed   bool
 	// For verbose payloads logging
 	requestHeaders  http.Header // Request headers from client
 	responseHeaders http.Header // Response headers from upstream
@@ -56,11 +83,8 @@ type telemetryParams struct {
 
 // recordRequestTelemetry records a complete request event.
 func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
-	originalBodySize := params.originalBodySize
-	if originalBodySize == 0 {
-		originalBodySize = len(params.requestBody)
-	}
-	m := g.calculateMetrics(originalBodySize, len(params.forwardBody))
+	// calculateMetrics uses tiktoken on actual bodies.
+	m := g.calculateMetrics(params.requestBody, params.forwardBody, params.originalBodySize, params.compressedBodySize)
 
 	// Extract model and usage from request/response using adapter
 	var model string
@@ -68,7 +92,14 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 
 	if params.adapter != nil {
 		model = params.adapter.ExtractModel(params.requestBody)
-		usage = params.adapter.ExtractUsage(params.responseBody)
+
+		// Prefer phantom loop accumulated usage (covers ALL iterations, not just the last).
+		// Fall back to adapter extraction (single response) or SSE usage (streaming).
+		if params.phantomLoopUsage != nil && params.phantomLoopUsage.TotalTokens > 0 {
+			usage = *params.phantomLoopUsage
+		} else {
+			usage = params.adapter.ExtractUsage(params.responseBody)
+		}
 
 		// For streaming, use pre-extracted SSE usage if body-based extraction returned nothing
 		if usage.TotalTokens == 0 && params.streamUsage != nil && params.streamUsage.TotalTokens > 0 {
@@ -78,21 +109,21 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 
 	// Build the RequestEvent with base fields
 	event := &monitoring.RequestEvent{
-		RequestID:        params.requestID,
-		Timestamp:        params.startTime,
-		Method:           params.method,
-		Path:             params.path,
-		ClientIP:         params.clientIP,
-		Provider:         params.provider,
-		Model:            model,
-		RequestBodySize:  params.requestBodySize,
-		ResponseBodySize: params.responseBodySize,
-		StatusCode:       params.statusCode,
-		PipeType:         monitoring.PipeType(params.pipeType),
-		PipeStrategy:     params.pipeStrategy,
-		OriginalTokens:   m.originalTokens,
-		CompressedTokens: m.compressedTokens,
-		// TokensSaved:              m.tokensSaved,
+		RequestID:                params.requestID,
+		Timestamp:                params.startTime,
+		Method:                   params.method,
+		Path:                     params.path,
+		ClientIP:                 params.clientIP,
+		Provider:                 params.provider,
+		Model:                    model,
+		RequestBodySize:          params.requestBodySize,
+		ResponseBodySize:         params.responseBodySize,
+		StatusCode:               params.statusCode,
+		PipeType:                 monitoring.PipeType(params.pipeType),
+		PipeStrategy:             params.pipeStrategy,
+		OriginalTokens:           m.originalTokens,
+		CompressedTokens:         m.compressedTokens,
+		TokensSaved:              m.tokensSaved,
 		CompressionRatio:         m.compressionRatio,
 		CompressionUsed:          params.compressionUsed,
 		ShadowRefsCreated:        len(params.pipeCtx.ShadowRefs),
@@ -115,8 +146,11 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 		// Pipe-specific counts
 		ToolOutputCount:            len(params.pipeCtx.ToolOutputCompressions),
 		ToolDiscoveryOriginal:      params.pipeCtx.OriginalToolCount,
-		ToolDiscoveryFiltered:      params.pipeCtx.FilteredToolCount,
+		ToolDiscoveryFiltered:      params.pipeCtx.KeptToolCount,
+		TaskOutputCount:            len(params.pipeCtx.TaskOutputHandledIDs),
 		HistoryCompactionTriggered: params.pipeCtx.IsCompaction,
+		ExpandPenaltyTokens:        params.expandPenaltyTokens,
+		IsMainAgent:                g.isMainConversation(params.pipeCtx.StableFingerprint),
 	}
 
 	// Calculate cost for this request (for debugging/transparency)
@@ -161,12 +195,11 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 		// Add response body preview
 		event.ResponseBodyPreview = monitoring.PreviewBody(string(params.responseBody), 500)
 
-		// Add masked auth header
+		// Add masked auth header — use CaptureFromHeaders to cover all providers
+		// (x-api-key for Anthropic, api-key for Azure, Authorization: Bearer for OpenAI/OAuth)
 		if params.requestHeaders != nil {
-			if authHeader := params.requestHeaders.Get("Authorization"); authHeader != "" {
-				event.AuthHeaderSent = monitoring.MaskAuthHeader(authHeader)
-			} else if apiKeyHeader := params.requestHeaders.Get("X-API-Key"); apiKeyHeader != "" {
-				event.AuthHeaderSent = monitoring.MaskAuthHeader(apiKeyHeader)
+			if captured := authtypes.CaptureFromHeaders(params.requestHeaders); captured.HasAuth() {
+				event.AuthHeaderSent = monitoring.MaskAuthHeader(captured.Token)
 			}
 		}
 
@@ -188,6 +221,11 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 			sessionID = params.pipeCtx.CostSessionID
 		}
 		g.savings.RecordRequest(event, sessionID)
+
+		// Record expand penalty (tokens re-sent due to expand_context).
+		if params.expandPenaltyTokens > 0 {
+			g.savings.RecordExpandPenalty(params.expandPenaltyTokens, model, sessionID)
+		}
 	}
 
 	// Record cost tracking (only when we have actual token counts from the API response).
@@ -210,16 +248,20 @@ func (g *Gateway) recordRequestTelemetry(params telemetryParams) {
 			costForMonitor = 0
 		}
 		update := dashboard.SessionUpdate{
-			TokensIn:   usage.InputTokens,
-			TokensOut:  usage.OutputTokens,
-			CostUSD:    costForMonitor,
-			Compressed: params.compressionUsed,
+			TokensIn:          usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens,
+			TokensOut:         usage.OutputTokens,
+			TokensSaved:       m.tokensSaved,
+			CostUSD:           costForMonitor,
+			Compressed:        params.compressionUsed,
+			IsMainAgent:       event.IsMainAgent,
+			IsRequestComplete: true,
 		}
-		// if m.tokensSaved > 0 {
-		// 	update.TokensSaved = m.tokensSaved
-		// }
-		// Detect if LLM is waiting for user (tool_use response = needs approval)
-		if dashboard.DetectWaitingForHuman(params.responseBody) {
+		// Emit waiting_for_human only for clean turn boundaries (HumanTurn).
+		// AgentWorking → session stays active (mid tool-loop).
+		// Truncated     → session stays active (max_tokens hit; agent did not finish its turn).
+		// Unknown       → session status unchanged (stop reason unrecognised; safe default).
+		// Track() on the next request resets status back to active regardless.
+		if params.adapter != nil && params.adapter.ExtractTurnSignal(params.responseBody, params.streamStopReason) == adapters.TurnSignalHumanTurn {
 			update.Status = dashboard.StatusWaitingForHuman
 		}
 		g.monitorStore.Update(params.pipeCtx.MonitorSessionID, update)
@@ -352,13 +394,14 @@ func (g *Gateway) recordProxyInteraction(params telemetryParams, sessionID strin
 	var toolCompressions []monitoring.ToolCompressionEntry
 	if params.pipeCtx != nil && len(params.pipeCtx.ToolOutputCompressions) > 0 {
 		for _, tc := range params.pipeCtx.ToolOutputCompressions {
-			ratio := float64(tc.CompressedBytes) / float64(max(tc.OriginalBytes, 1))
+
+			ratio := tokenizer.CompressionRatio(tc.OriginalTokens, tc.CompressedTokens)
 			// Determine status from MappingStatus
 			status := tc.MappingStatus
 			if status == "" {
 				if tc.CacheHit {
 					status = "cache_hit"
-				} else if tc.CompressedBytes < tc.OriginalBytes {
+				} else if tc.CompressedTokens < tc.OriginalTokens {
 					status = "compressed"
 				} else {
 					status = "passthrough"
@@ -369,8 +412,8 @@ func (g *Gateway) recordProxyInteraction(params telemetryParams, sessionID strin
 				ToolCallID:        tc.ToolCallID,
 				Status:            status,
 				ShadowID:          tc.ShadowID,
-				OriginalBytes:     tc.OriginalBytes,
-				CompressedBytes:   tc.CompressedBytes,
+				OriginalTokens:    tc.OriginalTokens,
+				CompressedTokens:  tc.CompressedTokens,
 				CompressionRatio:  ratio,
 				OriginalContent:   tc.OriginalContent,
 				CompressedContent: tc.CompressedContent,
@@ -379,12 +422,9 @@ func (g *Gateway) recordProxyInteraction(params telemetryParams, sessionID strin
 		}
 	}
 
-	// Estimate token counts (rough estimate: 4 chars per token)
-	clientTokens := len(params.requestBody) / 4
-	compressedTokens := len(params.forwardBody) / 4
-	if params.originalBodySize > 0 {
-		clientTokens = params.originalBodySize / 4
-	}
+	// Count tokens using tiktoken on actual content.
+	clientTokens := tokenizer.CountBytes(params.requestBody)
+	compressedTokens := tokenizer.CountBytes(params.forwardBody)
 
 	// Count messages instead of storing them (avoids system prompt duplication)
 	clientMsgCount := countMessages(params.requestBody)
@@ -589,27 +629,46 @@ func extractLastAssistantContent(body []byte) (string, []monitoring.ToolCall) {
 
 // requestMetrics holds calculated metrics for a request.
 type requestMetrics struct {
-	originalTokens, compressedTokens int // tokensSaved commented out
-	compressionRatio                 float64
+	originalTokens, compressedTokens, tokensSaved int
+	compressionRatio                              float64
 }
 
-// calculateMetrics computes compression metrics by comparing original vs forwarded body sizes.
-// This naturally captures all savings sources: tool output compression, preemptive summarization,
-// and tool discovery filtering — since all three reduce the forwarded body size.
-func (g *Gateway) calculateMetrics(originalBodySize, forwardBodySize int) requestMetrics {
+// calculateMetrics computes token-based compression metrics using tiktoken.
+// This captures all savings sources: tool output compression, preemptive
+// summarization, and tool discovery filtering — since all reduce the forwarded body size.
+
+func (g *Gateway) calculateMetrics(requestBody, forwardBody []byte, originalBodySize, compressedBodySize int) requestMetrics {
+	// Count tokens using tiktoken on actual content.
+	originalTokens := tokenizer.CountBytes(requestBody)
+	compressedTokens := tokenizer.CountBytes(forwardBody)
+
 	m := requestMetrics{
-		originalTokens:   originalBodySize / 4,
-		compressedTokens: originalBodySize / 4,
-		compressionRatio: 1.0,
+		originalTokens:   originalTokens,
+		compressedTokens: originalTokens,
+		compressionRatio: 0.0, // no compression = 0% removed
 	}
 
-	if forwardBodySize > 0 && forwardBodySize < originalBodySize {
-		m.compressedTokens = forwardBodySize / 4
-		// m.tokensSaved = m.originalTokens - m.compressedTokens
-		m.compressionRatio = float64(forwardBodySize) / float64(originalBodySize)
+	if compressedTokens > 0 && compressedTokens < originalTokens {
+		m.compressedTokens = compressedTokens
+		m.tokensSaved = originalTokens - compressedTokens
+		m.compressionRatio = tokenizer.CompressionRatio(originalTokens, compressedTokens)
 	}
 
 	return m
+}
+
+// logSessionToolCatalog logs the tool catalog for a session.
+// The pretty-printed catalog goes to session_tools.json (via WriteSessionToolsCatalog).
+// The lazy_loading compression comparison goes to tool_discovery.jsonl.
+// session_tools events are NOT written to tool_discovery.jsonl — session_tools.json is the canonical source.
+// forwardBody is the body actually sent to the upstream (post-injection) so phantom tools are included.
+func (g *Gateway) logSessionToolCatalog(requestID, costSessionID string, forwardBody []byte, comparison monitoring.CompressionComparison) {
+	tools := extractToolsForCatalog(forwardBody)
+	if g.tracker.ToolDiscoveryLogEnabled() {
+		g.tracker.LogLazyLoading(comparison)
+	}
+	g.tracker.WriteSessionToolsCatalog(costSessionID, tools)
+	g.tracker.SetStatsSession(costSessionID)
 }
 
 // logCompressionDetails logs compression comparisons if enabled.
@@ -618,28 +677,36 @@ func (g *Gateway) logCompressionDetails(pipeCtx *PipelineContext, requestID, pip
 	if pipeCtx != nil {
 		costSessionID = pipeCtx.CostSessionID
 	}
+	// Use pre-computed classification for isMainAgent (more reliable than fingerprint matching).
+	// Fall back to environment variable defaults when classification is unavailable.
+	isMainAgent := toolOutputDefaultMainAgent // Default from TOOL_OUTPUT_DEFAULT_MAIN_AGENT
+	if pipeCtx != nil {
+		isMainAgent = pipeCtx.Classification.IsMainAgent
+	}
 
 	if pipeType == string(PipeToolDiscovery) {
 		// Check if tool discovery was skipped
 		if pipeCtx.ToolDiscoverySkipReason != "" {
+			toolCount := len(extractToolNamesFromRequest(originalBody))
+			origToolRaw := extractToolsRaw(originalBody)
+			origToolTokens := tokenizer.CountBytes(origToolRaw)
 			comparison := monitoring.CompressionComparison{
 				RequestID:        requestID,
-				ProviderModel:    pipeCtx.Model,
-				OriginalBytes:    len(originalBody),
-				CompressedBytes:  len(originalBody), // Same size - no filtering
-				CompressionRatio: 1.0,
-				AllTools:         extractToolNamesFromRequest(originalBody),
-				SelectedTools:    extractToolNamesFromRequest(originalBody),
+				EventType:        monitoring.EventTypeLazyLoading,
+				SessionID:        costSessionID,
+				IsMainAgent:      isMainAgent,
+				OriginalTokens:   origToolTokens,
+				CompressedTokens: origToolTokens,
+				CompressionRatio: 0.0,
+				ToolCount:        toolCount,
+				StubCount:        0,
+				PhantomCount:     0,
 				Status:           "skipped_" + pipeCtx.ToolDiscoverySkipReason,
 				CompressionModel: pipeCtx.ToolDiscoveryModel,
 			}
-			// Log skip to file if enabled
-			if g.tracker.ToolDiscoveryLogEnabled() {
-				g.tracker.LogToolDiscoveryComparison(comparison)
-			}
-			// Record to savings tracker
+			g.logSessionToolCatalog(requestID, costSessionID, compressedBody, comparison)
 			if g.savings != nil {
-				g.savings.RecordToolDiscovery(comparison, costSessionID)
+				g.savings.RecordToolDiscovery(comparison, costSessionID, isMainAgent)
 			}
 			return
 		}
@@ -648,29 +715,39 @@ func (g *Gateway) logCompressionDetails(pipeCtx *PipelineContext, requestID, pip
 		if !bytes.Equal(originalBody, compressedBody) {
 			status = "filtered"
 		}
-		allTools := extractToolNamesFromRequest(originalBody)
-		selectedTools := extractToolNamesFromRequest(compressedBody)
+		// Check if this was a cache hit from the tool discovery pipe
+		if pipeCtx.CacheHit {
+			status = "cache_hit"
+		}
+		allToolNames := extractToolNamesFromRequest(originalBody)
+		compToolNames := extractToolNamesFromRequest(compressedBody)
+		selectedTools := filterPhantomTools(compToolNames)
+		origToolRaw := extractToolsRaw(originalBody)
+		compToolRaw := extractToolsRaw(compressedBody)
 		comparison := monitoring.CompressionComparison{
-			RequestID:       requestID,
-			ProviderModel:   pipeCtx.Model,
-			OriginalBytes:   len(originalBody),
-			CompressedBytes: len(compressedBody),
-			CompressionRatio: float64(len(compressedBody)) /
-				float64(max(len(originalBody), 1)),
-			AllTools:         allTools,
+			RequestID:        requestID,
+			EventType:        monitoring.EventTypeLazyLoading,
+			SessionID:        costSessionID,
+			IsMainAgent:      isMainAgent,
+			OriginalTokens:   tokenizer.CountBytes(origToolRaw),
+			CompressedTokens: tokenizer.CountBytes(compToolRaw),
+			CompressionRatio: tokenizer.CompressionRatio(tokenizer.CountBytes(origToolRaw), tokenizer.CountBytes(compToolRaw)),
+			ToolCount:        len(allToolNames),
+			StubCount:        len(allToolNames) - len(selectedTools),
+			PhantomCount:     len(compToolNames) - len(selectedTools),
+			AllTools:         allToolNames,
 			SelectedTools:    selectedTools,
 			Status:           status,
+			CacheHit:         pipeCtx.CacheHit,
 			CompressionModel: pipeCtx.ToolDiscoveryModel,
 		}
 
-		// Log to file if enabled
-		if g.tracker.ToolDiscoveryLogEnabled() {
-			g.tracker.LogToolDiscoveryComparison(comparison)
-		}
+		// Log session tool catalog once per session (before the lazy_loading entry)
+		g.logSessionToolCatalog(requestID, costSessionID, compressedBody, comparison)
 
 		// Always record to savings tracker
 		if g.savings != nil {
-			g.savings.RecordToolDiscovery(comparison, costSessionID)
+			g.savings.RecordToolDiscovery(comparison, costSessionID, isMainAgent)
 		}
 		return
 	}
@@ -683,21 +760,24 @@ func (g *Gateway) logCompressionDetails(pipeCtx *PipelineContext, requestID, pip
 		if status == "" {
 			if tc.CacheHit {
 				status = "cache_hit"
-			} else if tc.CompressedBytes < tc.OriginalBytes {
+			} else if tc.CompressedTokens < tc.OriginalTokens {
 				status = "compressed"
 			} else {
 				status = "passthrough"
 			}
 		}
 
+		ratio := tokenizer.CompressionRatio(tc.OriginalTokens, tc.CompressedTokens)
+
 		comparison := monitoring.CompressionComparison{
 			RequestID:         requestID,
-			ProviderModel:     pipeCtx.Model,
+			ProviderModel:     pipeCtx.TargetModel,
+			IsMainAgent:       isMainAgent,
 			ToolName:          tc.ToolName,
 			ShadowID:          tc.ShadowID,
-			OriginalBytes:     tc.OriginalBytes,
-			CompressedBytes:   tc.CompressedBytes,
-			CompressionRatio:  float64(tc.CompressedBytes) / float64(max(tc.OriginalBytes, 1)),
+			OriginalTokens:    tc.OriginalTokens,
+			CompressedTokens:  tc.CompressedTokens,
+			CompressionRatio:  ratio,
 			OriginalContent:   tc.OriginalContent,
 			CompressedContent: tc.CompressedContent,
 			CacheHit:          tc.CacheHit,
@@ -707,31 +787,148 @@ func (g *Gateway) logCompressionDetails(pipeCtx *PipelineContext, requestID, pip
 			CompressionModel:  tc.Model,
 			Query:             tc.Query,
 			QueryAgnostic:     tc.QueryAgnostic,
+			EventType:         monitoring.EventTypeToolOutput,
 		}
 
-		// Log to file if enabled
-		if g.tracker.CompressionLogEnabled() {
-			g.tracker.LogCompressionComparison(comparison)
+		// Log to tool_output_compression.jsonl
+		// Skip passthrough statuses for historical/small outputs to avoid log explosion.
+		// These repeat on every request: passthrough_small (below min threshold),
+		// already_compressed (prior turn), passthrough_format (non-compressible format).
+		// Only log meaningful entries: compression attempts, cache hits, large passthroughs.
+		// Skip Agent/Task tools - those go to task_output_compression.jsonl only (via TaskOutputCompressions loop below).
+		if g.tracker.CompressionLogEnabled() && !isTaskOutputTool(tc.ToolName) {
+			shouldLog := status == "compressed" || status == "cache_hit" ||
+				status == "passthrough_large" || status == "ratio_exceeded" ||
+				status == "skipped_by_config"
+			if shouldLog {
+				g.tracker.LogCompressionComparison(comparison)
+			}
 		}
+
+		// NOTE: Agent/Task tools are logged via the TaskOutputCompressions loop below to avoid duplication.
+		// We removed the separate logging here because:
+		// 1. TaskOutputCompressions is populated by the task_output pipe (handles enabled/passthrough modes)
+		// 2. If task_output pipe is disabled, we still want to detect and log via isTaskOutputToolInToolOutput (see below)
 
 		// Record to savings tracker for accurate savings calculation
 		if g.savings != nil {
-			g.savings.RecordToolOutputCompression(comparison, costSessionID)
+			g.savings.RecordToolOutputCompression(comparison, costSessionID, isMainAgent)
+		}
+	}
+
+	// Record task output events to task_output_compression.jsonl (always, even passthrough).
+	// Track which tools were already logged via TaskOutputCompressions to avoid duplication
+	taskOutputLoggedToolCallIDs := make(map[string]bool)
+
+	for _, tc := range pipeCtx.TaskOutputCompressions {
+		status := tc.MappingStatus
+		if status == "" {
+			if tc.CompressedTokens < tc.OriginalTokens {
+				status = "compressed"
+			} else {
+				status = "passthrough"
+			}
+		}
+		ratio := tokenizer.CompressionRatio(tc.OriginalTokens, tc.CompressedTokens)
+		// Task output is BY DEFINITION subagent output, so is_main_agent defaults to false.
+		// Use TASK_OUTPUT_DEFAULT_MAIN_AGENT env var for backward compatibility override.
+		comparison := monitoring.CompressionComparison{
+			RequestID:         requestID,
+			ProviderModel:     pipeCtx.TargetModel,
+			IsMainAgent:       taskOutputDefaultMainAgent, // Default: false (subagent output)
+			ToolName:          tc.ToolName,
+			OriginalTokens:    tc.OriginalTokens,
+			CompressedTokens:  tc.CompressedTokens,
+			CompressionRatio:  ratio,
+			OriginalContent:   tc.OriginalContent,
+			CompressedContent: tc.CompressedContent,
+			Status:            status,
+			EventType:         monitoring.EventTypeTaskOutput,
+		}
+		if g.tracker.TaskOutputLogEnabled() {
+			g.tracker.LogTaskOutputComparison(comparison)
+			taskOutputLoggedToolCallIDs[tc.ToolCallID] = true
+		}
+	}
+
+	// Fallback: Log Agent/Task tools from ToolOutputCompressions that weren't in TaskOutputCompressions.
+	// This handles cases where task_output pipe is disabled or in passthrough mode.
+	if g.tracker.TaskOutputLogEnabled() {
+		for _, tc := range pipeCtx.ToolOutputCompressions {
+			if !isTaskOutputTool(tc.ToolName) {
+				continue // Not a task output tool
+			}
+			if taskOutputLoggedToolCallIDs[tc.ToolCallID] {
+				continue // Already logged via TaskOutputCompressions
+			}
+			status := tc.MappingStatus
+			if status == "" {
+				if tc.CompressedTokens < tc.OriginalTokens {
+					status = "compressed"
+				} else {
+					status = "passthrough"
+				}
+			}
+			ratio := tokenizer.CompressionRatio(tc.OriginalTokens, tc.CompressedTokens)
+			comparison := monitoring.CompressionComparison{
+				RequestID:         requestID,
+				ProviderModel:     pipeCtx.TargetModel,
+				IsMainAgent:       taskOutputDefaultMainAgent, // Default: false (subagent output)
+				ToolName:          tc.ToolName,
+				OriginalTokens:    tc.OriginalTokens,
+				CompressedTokens:  tc.CompressedTokens,
+				CompressionRatio:  ratio,
+				OriginalContent:   tc.OriginalContent,
+				CompressedContent: tc.CompressedContent,
+				Status:            status,
+				EventType:         monitoring.EventTypeTaskOutput,
+			}
+			g.tracker.LogTaskOutputComparison(comparison)
 		}
 	}
 
 	if len(pipeCtx.ToolOutputCompressions) == 0 && g.tracker.CompressionLogEnabled() {
+		// Preemptive summarization is already recorded in telemetry via HistoryCompactionTriggered.
+		// No per-tool passthrough entry is meaningful here — skip.
+		if pipeCtx.IsCompaction {
+			return
+		}
+
+		passOrigTokens := tokenizer.CountBytes(originalBody)
+		passCompTokens := tokenizer.CountBytes(compressedBody)
+
+		// Derive EventType from which pipe ran so the log entry is self-describing.
+		// tool_output pipe ran but no tools crossed the compression threshold → tool_output passthrough.
+		// Any other pipe (passthrough, none) → generic passthrough.
+		eventType := "passthrough"
+		if pipeType == string(PipeToolOutput) {
+			eventType = monitoring.EventTypeToolOutput
+		}
+
 		g.tracker.LogCompressionComparison(monitoring.CompressionComparison{
 			RequestID:         requestID,
 			ProviderModel:     pipeCtx.Model,
-			OriginalBytes:     len(originalBody),
-			CompressedBytes:   len(compressedBody),
-			CompressionRatio:  float64(len(compressedBody)) / float64(max(len(originalBody), 1)),
+			IsMainAgent:       isMainAgent,
+			OriginalTokens:    passOrigTokens,
+			CompressedTokens:  passCompTokens,
+			CompressionRatio:  tokenizer.CompressionRatio(passOrigTokens, passCompTokens),
 			OriginalContent:   string(originalBody),
 			CompressedContent: string(compressedBody),
 			Status:            "passthrough",
+			EventType:         eventType,
 		})
 	}
+}
+
+// ensureSessionToolsCatalog writes the session_tools.json catalog when no pipe ran.
+// Called as a fallback when both tool-output and tool-discovery conditions are false
+// (e.g., all pipes disabled). Uses forwardBody (post-injection) so phantom tools are included.
+func (g *Gateway) ensureSessionToolsCatalog(pipeCtx *PipelineContext, forwardBody []byte) {
+	if pipeCtx == nil {
+		return
+	}
+	g.tracker.WriteSessionToolsCatalog(pipeCtx.CostSessionID, extractToolsForCatalog(forwardBody))
+	g.tracker.SetStatsSession(pipeCtx.CostSessionID)
 }
 
 // extractToolNamesFromRequest extracts tool names from a request body.
@@ -768,6 +965,81 @@ func extractToolNamesFromRequest(body []byte) []string {
 	}
 
 	return names
+}
+
+// phantomToolNames lists phantom tools injected after filtering — excluded from tool discovery logs.
+var phantomToolNames = map[string]bool{
+	phantom_tools.ExpandContextToolName: true,
+	phantom_tools.SearchToolName:        true,
+}
+
+// filterPhantomTools removes gateway-injected phantom tool names from a list.
+func filterPhantomTools(names []string) []string {
+	out := names[:0:len(names)]
+	for _, n := range names {
+		if !phantomToolNames[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// taskOutputToolNames lists tool names that produce subagent task output.
+// These tools spawn subagents and return their results to the main agent.
+var taskOutputToolNames = map[string]bool{
+	// Claude Code
+	"agent": true, // Claude Code subagent delegation tool
+	"task":  true, // Alternative name for Claude Code task delegation
+	// Codex CLI
+	"wait_agent":   true, // Codex: waits for subagent and returns its output
+	"spawn_agent":  true, // Codex: spawns subagent (may include initial output)
+	"resume_agent": true, // Codex: resumes paused agent and returns output
+}
+
+// isTaskOutputTool returns true if the tool name is a subagent task output tool.
+// Used to detect Agent/Task tools and log them to task_output_compression.jsonl
+// even when the task_output pipe is disabled/passthrough.
+func isTaskOutputTool(toolName string) bool {
+	for k := range taskOutputToolNames {
+		if strings.EqualFold(toolName, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractToolsRaw returns the raw JSON bytes of the tools array from a request body.
+func extractToolsRaw(body []byte) []byte {
+	return []byte(gjson.GetBytes(body, "tools").Raw)
+}
+
+// extractToolsForCatalog returns a SessionToolEntry for every tool in body, including phantom tools.
+// Each entry holds the tool name, its full raw JSON schema, and its token count.
+func extractToolsForCatalog(body []byte) []monitoring.SessionToolEntry {
+	toolsResult := gjson.GetBytes(body, "tools")
+	if !toolsResult.Exists() {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var entries []monitoring.SessionToolEntry
+	toolsResult.ForEach(func(_, tv gjson.Result) bool {
+		raw := []byte(tv.Raw)
+		name := tv.Get("name").String()
+		if name == "" {
+			name = tv.Get("function.name").String()
+		}
+		if name == "" || seen[name] {
+			return true
+		}
+		seen[name] = true
+		entries = append(entries, monitoring.SessionToolEntry{
+			ToolName:       name,
+			OriginalTokens: tokenizer.CountBytes(raw),
+			Schema:         json.RawMessage(raw),
+		})
+		return true
+	})
+	return entries
 }
 
 // mergeCompactedWithOriginal merges compacted messages with original request fields.

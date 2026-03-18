@@ -39,64 +39,6 @@ func DetectAgent(h http.Header) string {
 	return "unknown"
 }
 
-// DetectWaitingForHuman checks if the LLM response indicates it's waiting for user input.
-// Looks for patterns like tool approval requests, questions to the user, etc.
-func DetectWaitingForHuman(responseBody []byte) bool {
-	// Check for tool_use in response (agent will need user approval)
-	if isToolUseResponse(responseBody) {
-		return true
-	}
-
-	// Check for ask-type stop reasons
-	var resp struct {
-		StopReason string `json:"stop_reason"`
-		// OpenAI format
-		Choices []struct {
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(responseBody, &resp); err != nil {
-		return false
-	}
-
-	// Anthropic: tool_use stop reason means agent will present tool call to user
-	if resp.StopReason == "tool_use" {
-		return true
-	}
-
-	// OpenAI: function_call or tool_calls finish reason
-	for _, c := range resp.Choices {
-		if c.FinishReason == "function_call" || c.FinishReason == "tool_calls" {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isToolUseResponse checks if the response contains a tool_use content block.
-func isToolUseResponse(body []byte) bool {
-	// Quick byte check before full parse
-	if !strings.Contains(string(body), "tool_use") {
-		return false
-	}
-
-	var resp struct {
-		Content []struct {
-			Type string `json:"type"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return false
-	}
-	for _, c := range resp.Content {
-		if c.Type == "tool_use" {
-			return true
-		}
-	}
-	return false
-}
-
 // injectedPrefixes are XML tag prefixes used by Claude Code / IDE integrations
 // to inject system content into user messages. Text blocks containing these are
 // not user-typed and should be skipped when extracting the user query.
@@ -106,6 +48,7 @@ var injectedPrefixes = []string{
 	"<user-prompt-submit-hook>",
 	"<fast_mode_info>",
 	"<command-name>",
+	"<local-command-caveat>",
 	"<antml_thinking>",
 	"<antml_thinking_mode>",
 	"<antml_reasoning_effort>",
@@ -132,7 +75,8 @@ func ExtractLastUserQuery(body []byte) string {
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &anthropicReq); err == nil && len(anthropicReq.Messages) > 0 {
-		// Walk backwards to find last user message
+		// Walk backwards to find last user message with real user text.
+		// Skip messages that are injected content or tool_result-only.
 		for i := len(anthropicReq.Messages) - 1; i >= 0; i-- {
 			msg := anthropicReq.Messages[i]
 			if msg.Role != "user" {
@@ -144,7 +88,7 @@ func ExtractLastUserQuery(body []byte) string {
 				if !isInjected(text) {
 					return text
 				}
-				break
+				continue // keep searching earlier messages
 			}
 			// Array of content blocks — find first non-injected text block
 			var blocks []struct {
@@ -158,7 +102,7 @@ func ExtractLastUserQuery(body []byte) string {
 					}
 				}
 			}
-			break
+			continue // keep searching earlier messages
 		}
 	}
 

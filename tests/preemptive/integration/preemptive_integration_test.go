@@ -7,6 +7,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -24,9 +25,8 @@ import (
 // The manager will be a no-op: ProcessRequest returns body unchanged.
 func disabledManagerConfig() preemptive.Config {
 	return preemptive.Config{
-		Enabled:            false,
-		TriggerThreshold:   85.0,
-		TokenEstimateRatio: 4,
+		Enabled:          false,
+		TriggerThreshold: 85.0,
 	}
 }
 
@@ -59,7 +59,7 @@ func TestIntegration_Preemptive_NotTriggeredBelowThreshold(t *testing.T) {
 	body := makeRequestBody(messages)
 
 	// ProcessRequest with disabled manager should return body unchanged
-	result, isCompaction, synthetic, _, err := mgr.ProcessRequest(nil, body, "claude-haiku-4-5", "anthropic")
+	result, isCompaction, synthetic, _, err := mgr.ProcessRequest(context.Background(), nil, body, "claude-haiku-4-5", "anthropic")
 	require.NoError(t, err)
 	assert.False(t, isCompaction, "should not be a compaction request")
 	assert.Nil(t, synthetic, "should not have synthetic response")
@@ -125,28 +125,28 @@ func TestIntegration_Preemptive_SessionTracking(t *testing.T) {
 func TestIntegration_Preemptive_TokenEstimation(t *testing.T) {
 	tests := []struct {
 		name         string
-		bodySize     int
+		inputTokens  int
 		maxTokens    int
 		expectMinPct float64
 		expectMaxPct float64
 	}{
 		{
-			name:         "small body under 1% usage",
-			bodySize:     400, // ~100 tokens at 4 bytes/token
+			name:         "small input under 1% usage",
+			inputTokens:  100,
 			maxTokens:    200000,
 			expectMinPct: 0.0,
 			expectMaxPct: 1.0,
 		},
 		{
-			name:         "medium body around 50% usage",
-			bodySize:     400000, // ~100k tokens at 4 bytes/token
+			name:         "medium input around 50% usage",
+			inputTokens:  100000,
 			maxTokens:    200000,
 			expectMinPct: 40.0,
 			expectMaxPct: 60.0,
 		},
 		{
-			name:         "large body near threshold",
-			bodySize:     680000, // ~170k tokens at 4 bytes/token
+			name:         "large input near threshold",
+			inputTokens:  170000,
 			maxTokens:    200000,
 			expectMinPct: 80.0,
 			expectMaxPct: 100.0,
@@ -155,9 +155,7 @@ func TestIntegration_Preemptive_TokenEstimation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Token estimate: bodySize / ratio (ratio=4)
-			estimatedTokens := tt.bodySize / 4
-			usage := preemptive.CalculateUsage(estimatedTokens, tt.maxTokens)
+			usage := preemptive.CalculateUsage(tt.inputTokens, tt.maxTokens)
 
 			assert.True(t, usage.UsagePercent >= tt.expectMinPct,
 				"usage %.2f%% should be >= %.2f%%", usage.UsagePercent, tt.expectMinPct)

@@ -30,9 +30,9 @@ func (p *Pipe) compressSimple(content string, maxWords int) string {
 func (p *Pipe) CompressSimpleContent(content string) string {
 	// Configurable word count - default 10
 	maxWords := 10
-	if p.minBytes > 0 {
-		// Use minBytes as word count if set (hacky but simple)
-		maxWords = p.minBytes / 100 // e.g., minBytes=500 → 5 words
+	if p.minTokens > 0 {
+		// Use minTokens as word count hint
+		maxWords = p.minTokens / 10 // e.g., minTokens=50 → 5 words
 		if maxWords < 5 {
 			maxWords = 5
 		}

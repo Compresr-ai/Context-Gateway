@@ -57,9 +57,9 @@ func passthroughConfig() *config.Config {
 			TTL:  1 * time.Hour,
 		},
 		Monitoring: config.MonitoringConfig{
-			LogLevel:  "error",
+			LogLevel:  "disabled",
 			LogFormat: "json",
-			LogOutput: "stdout",
+			LogOutput:  "discard",
 		},
 	}
 }
@@ -151,12 +151,12 @@ func TestIntegration_Monitoring_CompressionMetrics(t *testing.T) {
 	comparison := monitoring.CompressionComparison{
 		RequestID:        "req-001",
 		ProviderModel:    "claude-haiku-4-5",
-		OriginalBytes:    8000,
-		CompressedBytes:  2000,
+		OriginalTokens:   2000,
+		CompressedTokens: 500,
 		CompressionRatio: 0.25,
 		Status:           "compressed",
 	}
-	tracker.RecordToolOutputCompression(comparison, sessionID)
+	tracker.RecordToolOutputCompression(comparison, sessionID, true)
 
 	// Record a request event with token usage
 	event := &monitoring.RequestEvent{
@@ -170,6 +170,7 @@ func TestIntegration_Monitoring_CompressionMetrics(t *testing.T) {
 		OutputTokens:    100,
 		PipeType:        monitoring.PipeToolOutput,
 		Success:         true,
+		IsMainAgent:     true,
 	}
 	tracker.RecordRequest(event, sessionID)
 
@@ -278,19 +279,19 @@ func TestIntegration_Monitoring_ToolDiscoveryMetrics(t *testing.T) {
 	}
 
 	comparison := monitoring.CompressionComparison{
-		RequestID:       "req-disc-001",
-		ProviderModel:   "claude-haiku-4-5",
-		OriginalBytes:   10000,
-		CompressedBytes: 4000,
-		AllTools:        allTools,
-		SelectedTools:   selectedTools,
-		Status:          "compressed",
+		RequestID:        "req-disc-001",
+		ProviderModel:    "claude-haiku-4-5",
+		OriginalTokens:   2500,
+		CompressedTokens: 1000,
+		AllTools:         allTools,
+		SelectedTools:    selectedTools,
+		Status:           "compressed",
 	}
-	tracker.RecordToolDiscovery(comparison, "session-disc-001")
+	tracker.RecordToolDiscovery(comparison, "session-disc-001", true)
 
 	report := tracker.GetReport()
 	assert.Equal(t, 1, report.ToolDiscoveryRequests)
 	assert.Equal(t, 20, report.OriginalToolCount)
-	assert.Equal(t, 8, report.FilteredToolCount)
+	assert.Equal(t, 8, report.KeptToolCount)
 	assert.True(t, report.ToolDiscoveryTokens > 0, "expected tool discovery tokens saved > 0")
 }

@@ -60,8 +60,8 @@ func TestIntegration_CompressionPipeline_WithMockAPI(t *testing.T) {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr,
 				FallbackStrategy:       config.StrategyPassthrough,
-				MinBytes:               100,
-				MaxBytes:               1024 * 1024,
+				MinTokens:              25,
+				MaxTokens:              262144,
 				TargetCompressionRatio: 0.5,
 				IncludeExpandHint:      true,
 				EnableExpandContext:    true,
@@ -101,7 +101,7 @@ func TestIntegration_CompressionPipeline_WithMockAPI(t *testing.T) {
 func TestIntegration_CompressionPipeline_BelowThreshold(t *testing.T) {
 	pipe := tooloutput.New(fixtures.CompresrCompressionConfig(), fixtures.TestStore())
 
-	// Content below minBytes (256 by default)
+	// Content below minTokens (64 by default)
 	smallContent := "small"
 	reqBody := fixtures.RequestWithSingleToolOutput(smallContent)
 	ctx := fixtures.TestPipeContext(reqBody)
@@ -122,7 +122,7 @@ func TestIntegration_CompressionPipeline_CacheHit(t *testing.T) {
 
 	// Create pipe
 	cfg := fixtures.CompresrCompressionConfig()
-	cfg.Pipes.ToolOutput.MinBytes = 50
+	cfg.Pipes.ToolOutput.MinTokens = 12
 	pipe := tooloutput.New(cfg, st)
 
 	// First request - cache miss
@@ -160,8 +160,8 @@ func TestIntegration_CompressionPipeline_MultipleToolOutputs(t *testing.T) {
 				Enabled:                true,
 				Strategy:               config.StrategyCompresr,
 				FallbackStrategy:       config.StrategyPassthrough,
-				MinBytes:               50,
-				MaxBytes:               1024 * 1024,
+				MinTokens:              12,
+				MaxTokens:              262144,
 				TargetCompressionRatio: 0.5,
 				EnableExpandContext:    true,
 				Compresr: config.CompresrConfig{

@@ -23,6 +23,8 @@ type Handler struct {
 	cfg          types.AuthConfig
 	tokenManager *oauth.TokenManager
 	started      bool
+	// cancel func so both stopCh and ctx.Done() stop paths are functional
+	cancelFn context.CancelFunc
 }
 
 // New creates a new Anthropic auth handler.
@@ -59,9 +61,13 @@ func (h *Handler) Initialize(cfg types.AuthConfig) error {
 			h.cfg.SubscriptionOK = h.tokenManager.HasCredentials()
 		}
 
-		// Start background refresh if we have OAuth credentials
+		// Start background refresh if we have OAuth credentials.
+		// Derive a cancellable context so ctx.Done() stop path is functional.
+		// Stop() calls both cancelFn() and StopBackgroundRefresh() for belt-and-suspenders.
 		if h.tokenManager.HasCredentials() && !h.started {
-			h.tokenManager.StartBackgroundRefresh(context.Background())
+			ctx, cancel := context.WithCancel(context.Background())
+			h.cancelFn = cancel
+			h.tokenManager.StartBackgroundRefresh(ctx)
 			h.started = true
 		}
 	}
@@ -208,6 +214,11 @@ func (h *Handler) Stop() {
 	if h.tokenManager != nil && h.started {
 		h.tokenManager.StopBackgroundRefresh()
 		h.started = false
+	}
+	// cancel the derived context so ctx.Done() path in background loop also fires
+	if h.cancelFn != nil {
+		h.cancelFn()
+		h.cancelFn = nil
 	}
 }
 
