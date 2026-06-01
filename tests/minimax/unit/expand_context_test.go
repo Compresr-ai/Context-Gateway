@@ -52,7 +52,7 @@ func TestExpandContext_MiniMax_FullFlow(t *testing.T) {
 	defer gwServer.Close()
 
 	// Use MiniMax model name
-	requestBody := fixtures.OpenAIToolResultRequest("MiniMax-M2.5", fixtures.LargeToolOutput)
+	requestBody := fixtures.OpenAIToolResultRequest("MiniMax-M3", fixtures.LargeToolOutput)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/chat/completions", bytes.NewReader(requestBody))
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestExpandContext_MiniMax_NoExpansionNeeded(t *testing.T) {
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	requestBody := fixtures.OpenAIToolResultRequest("MiniMax-M2.5", fixtures.LargeToolOutput)
+	requestBody := fixtures.OpenAIToolResultRequest("MiniMax-M3", fixtures.LargeToolOutput)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/chat/completions", bytes.NewReader(requestBody))
 	require.NoError(t, err)
@@ -133,7 +133,7 @@ func TestExpandContext_MiniMax_Passthrough(t *testing.T) {
 	gwServer := httptest.NewServer(gw.Handler())
 	defer gwServer.Close()
 
-	requestBody := fixtures.OpenAIToolResultRequest("MiniMax-M2.5", fixtures.LargeToolOutput)
+	requestBody := fixtures.OpenAIToolResultRequest("MiniMax-M3", fixtures.LargeToolOutput)
 
 	req, err := http.NewRequest("POST", gwServer.URL+"/v1/chat/completions", bytes.NewReader(requestBody))
 	require.NoError(t, err)
