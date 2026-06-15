@@ -796,6 +796,42 @@ func jsonToAnthropicSSE(jsonBody []byte) []byte {
 				"type": "content_block_stop", "index": i,
 			})
 
+		case "thinking":
+			// Anthropic streaming protocol requires thinking content via delta events.
+			// content_block_start initializes with empty thinking, then deltas fill it.
+			// Without proper deltas, clients store empty thinking blocks which corrupt
+			// the conversation history (API rejects with "each thinking block must contain thinking").
+			thinking, _ := blockMap["thinking"].(string)
+			signature, _ := blockMap["signature"].(string)
+
+			writeSSEEvent(&b, "content_block_start", map[string]any{
+				"type": "content_block_start", "index": i,
+				"content_block": map[string]any{"type": "thinking", "thinking": ""},
+			})
+			writeSSEEvent(&b, "content_block_delta", map[string]any{
+				"type": "content_block_delta", "index": i,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": thinking},
+			})
+			if signature != "" {
+				writeSSEEvent(&b, "content_block_delta", map[string]any{
+					"type": "content_block_delta", "index": i,
+					"delta": map[string]any{"type": "signature_delta", "signature": signature},
+				})
+			}
+			writeSSEEvent(&b, "content_block_stop", map[string]any{
+				"type": "content_block_stop", "index": i,
+			})
+
+		case "redacted_thinking":
+			// Redacted thinking blocks are opaque — emit as-is without deltas.
+			writeSSEEvent(&b, "content_block_start", map[string]any{
+				"type": "content_block_start", "index": i,
+				"content_block": blockMap,
+			})
+			writeSSEEvent(&b, "content_block_stop", map[string]any{
+				"type": "content_block_stop", "index": i,
+			})
+
 		case "tool_use":
 			name, _ := blockMap["name"].(string)
 			id, _ := blockMap["id"].(string)
