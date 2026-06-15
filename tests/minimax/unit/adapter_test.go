@@ -32,7 +32,7 @@ func TestMiniMax_ExtractToolOutput(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
 	body := []byte(`{
-		"model": "MiniMax-M2.5",
+		"model": "MiniMax-M3",
 		"messages": [
 			{"role": "user", "content": "Read the config file"},
 			{"role": "assistant", "content": "", "tool_calls": [
@@ -60,7 +60,7 @@ func TestMiniMax_ApplyToolOutput(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
 	body := []byte(`{
-		"model": "MiniMax-M2.5",
+		"model": "MiniMax-M3",
 		"messages": [
 			{"role": "user", "content": "Read the config file"},
 			{"role": "assistant", "content": "", "tool_calls": [
@@ -94,7 +94,7 @@ func TestMiniMax_ExtractToolOutput_MultipleTools(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
 	body := []byte(`{
-		"model": "MiniMax-M2.5",
+		"model": "MiniMax-M3",
 		"messages": [
 			{"role": "user", "content": "Read both files"},
 			{"role": "assistant", "content": "", "tool_calls": [
@@ -128,7 +128,7 @@ func TestMiniMax_ExtractUsage(t *testing.T) {
 	responseBody := []byte(`{
 		"id": "chatcmpl-abc123",
 		"object": "chat.completion",
-		"model": "MiniMax-M2.5",
+		"model": "MiniMax-M3",
 		"choices": [{"message": {"role": "assistant", "content": "Hello!"}}],
 		"usage": {
 			"prompt_tokens": 150,
@@ -154,7 +154,7 @@ func TestMiniMax_ExtractUsage_Empty(t *testing.T) {
 	assert.Equal(t, 0, usage.TotalTokens)
 
 	// Missing usage fields
-	usage = adapter.ExtractUsage([]byte(`{"model": "MiniMax-M2.5", "choices": []}`))
+	usage = adapter.ExtractUsage([]byte(`{"model": "MiniMax-M3", "choices": []}`))
 	assert.Equal(t, 0, usage.InputTokens)
 	assert.Equal(t, 0, usage.OutputTokens)
 	assert.Equal(t, 0, usage.TotalTokens)
@@ -167,17 +167,17 @@ func TestMiniMax_ExtractUsage_Empty(t *testing.T) {
 func TestMiniMax_ExtractModel(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
-	body := []byte(`{"model": "MiniMax-M2.5", "messages": []}`)
+	body := []byte(`{"model": "MiniMax-M3", "messages": []}`)
 	model := adapter.ExtractModel(body)
-	assert.Equal(t, "MiniMax-M2.5", model)
+	assert.Equal(t, "MiniMax-M3", model)
 }
 
 func TestMiniMax_ExtractModel_Highspeed(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
-	body := []byte(`{"model": "MiniMax-M2.5-highspeed", "messages": []}`)
+	body := []byte(`{"model": "MiniMax-M2.7-highspeed", "messages": []}`)
 	model := adapter.ExtractModel(body)
-	assert.Equal(t, "MiniMax-M2.5-highspeed", model)
+	assert.Equal(t, "MiniMax-M2.7-highspeed", model)
 }
 
 func TestMiniMax_ExtractModel_Empty(t *testing.T) {
@@ -198,7 +198,7 @@ func TestMiniMax_ExtractUserQuery(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
 	body := []byte(`{
-		"model": "MiniMax-M2.5",
+		"model": "MiniMax-M3",
 		"messages": [
 			{"role": "user", "content": "What is the capital of France?"}
 		]
@@ -212,7 +212,7 @@ func TestMiniMax_ExtractUserQuery_MultiTurn(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
 	body := []byte(`{
-		"model": "MiniMax-M2.5",
+		"model": "MiniMax-M3",
 		"messages": [
 			{"role": "user", "content": "First question"},
 			{"role": "assistant", "content": "Answer"},
@@ -232,7 +232,7 @@ func TestMiniMax_ExtractToolDiscovery(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
 	body := []byte(`{
-		"model": "MiniMax-M2.5",
+		"model": "MiniMax-M3",
 		"messages": [{"role": "user", "content": "hello"}],
 		"tools": [
 			{"type": "function", "function": {"name": "read_file", "description": "Read a file from disk"}},
@@ -252,7 +252,7 @@ func TestMiniMax_ApplyToolDiscovery(t *testing.T) {
 	adapter := adapters.NewMiniMaxAdapter()
 
 	body := []byte(`{
-		"model": "MiniMax-M2.5",
+		"model": "MiniMax-M3",
 		"messages": [{"role": "user", "content": "hello"}],
 		"tools": [
 			{"type": "function", "function": {"name": "read_file", "description": "Read a file from disk"}},
