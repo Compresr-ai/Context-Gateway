@@ -1043,6 +1043,15 @@ func (g *Gateway) forwardPassthrough(ctx context.Context, r *http.Request, body 
 				// Codex CLI headers (required for ChatGPT subscription)
 				"Chatgpt-Account-Id", "Originator", "Session_id", "Version",
 				"X-Codex-Turn-Metadata", "Accept",
+				// Claude Code first-party identification headers — Anthropic API uses these
+				// to recognize legitimate CLI clients and grant subscription entitlements
+				// (e.g. context-1m-2025-08-07 beta). Without them, Anthropic returns 429
+				// for betas that are only available to authenticated Claude Code subscribers.
+				"User-Agent", "X-App", "Anthropic-Dangerous-Direct-Browser-Access",
+				"X-Claude-Code-Session-Id",
+				"X-Stainless-Arch", "X-Stainless-Lang", "X-Stainless-Os",
+				"X-Stainless-Package-Version", "X-Stainless-Retry-Count",
+				"X-Stainless-Runtime", "X-Stainless-Runtime-Version", "X-Stainless-Timeout",
 			} {
 				if v := r.Header.Get(h); v != "" {
 					httpReq.Header.Set(h, v)
