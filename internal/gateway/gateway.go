@@ -63,6 +63,9 @@ var allowedHosts = map[string]bool{
 	"opencode.ai":   true,
 	"openrouter.ai": true,
 
+	// Requesty gateway
+	"router.requesty.ai": true,
+
 	// Popular LLM providers
 	"api.minimax.io":        true,
 	"api.minimaxi.com":      true, // MiniMax China endpoint
