@@ -60,6 +60,12 @@ var Providers = map[string]ProviderConfig{
 		DefaultPath: "/v1/chat/completions",
 		Paths:       []string{}, // Uses OpenAI paths, detected by API key prefix
 	},
+	"requesty": {
+		Name:        "requesty",
+		BaseURL:     envOrDefault("REQUESTY_PROVIDER_URL", "https://router.requesty.ai"),
+		DefaultPath: "/v1/chat/completions",
+		Paths:       []string{}, // Uses OpenAI paths, detected by API key prefix
+	},
 	"opencode": {
 		Name:        "opencode",
 		BaseURL:     envOrDefault("OPENCODE_PROVIDER_URL", "https://opencode.ai/zen"),
@@ -106,6 +112,8 @@ func getProviderBaseURL(providerName string) string {
 		return envOrDefault("OLLAMA_PROVIDER_URL", "http://localhost:11434")
 	case "openrouter":
 		return envOrDefault("OPENROUTER_PROVIDER_URL", "https://openrouter.ai/api")
+	case "requesty":
+		return envOrDefault("REQUESTY_PROVIDER_URL", "https://router.requesty.ai")
 	case "opencode":
 		return envOrDefault("OPENCODE_PROVIDER_URL", "https://opencode.ai/zen")
 	case "minimax":

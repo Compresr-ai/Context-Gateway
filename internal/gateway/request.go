@@ -87,6 +87,11 @@ func (g *Gateway) autoDetectTargetURL(r *http.Request) string {
 			path = normalizeOpenAIPath(path)
 			return getProviderBaseURL("openrouter") + path
 		}
+		// Requesty: Bearer rqsty-sk-xxx
+		if strings.HasPrefix(auth, "Bearer rqsty-sk-") {
+			path = normalizeOpenAIPath(path)
+			return getProviderBaseURL("requesty") + path
+		}
 		// OpenAI: Bearer sk-xxx (but not sk-ant- or sk-or-)
 		// Always route API keys to api.openai.com regardless of OPENAI_PROVIDER_URL
 		if strings.HasPrefix(auth, "Bearer sk-") {
@@ -116,7 +121,7 @@ func (g *Gateway) autoDetectTargetURL(r *http.Request) string {
 		}
 		// Normalize path for OpenAI and OpenRouter (API key auth)
 		normalizedPath := path
-		if provider.Name == "openai" || provider.Name == "openrouter" {
+		if provider.Name == "openai" || provider.Name == "openrouter" || provider.Name == "requesty" {
 			normalizedPath = normalizeOpenAIPath(path)
 		}
 		return provider.BaseURL + normalizedPath
