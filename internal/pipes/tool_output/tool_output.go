@@ -321,13 +321,14 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 
 		// Queue for compression — this is genuinely new content
 		tasks = append(tasks, compressionTask{
-			index:        ext.MessageIndex,
-			msg:          message{Content: ext.Content, ToolCallID: ext.ID},
-			toolName:     ext.ToolName,
-			shadowID:     shadowID,
-			original:     ext.Content,
-			messageIndex: ext.MessageIndex,
-			blockIndex:   ext.BlockIndex,
+			index:          ext.MessageIndex,
+			msg:            message{Content: ext.Content, ToolCallID: ext.ID},
+			toolName:       ext.ToolName,
+			shadowID:       shadowID,
+			original:       ext.Content,
+			originalTokens: contentTokens,
+			messageIndex:   ext.MessageIndex,
+			blockIndex:     ext.BlockIndex,
 		})
 
 		log.Debug().
@@ -356,7 +357,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 			if result.usedFallback {
 				log.Info().
 					Str("tool_name", result.toolName).
-					Int("tokens", tokenizer.CountTokens(result.originalContent)).
+					Int("tokens", result.originalTokens).
 					Msg("tool_output: using original content (fallback)")
 				ctx.ToolOutputCompressions = append(ctx.ToolOutputCompressions, pipes.ToolOutputCompression{
 					ToolName:          result.toolName,
@@ -364,8 +365,8 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 					ShadowID:          "", // no shadow reference was created; original content was sent as-is
 					OriginalContent:   result.originalContent,
 					CompressedContent: result.compressedContent,
-					OriginalTokens:    tokenizer.CountTokens(result.originalContent),
-					CompressedTokens:  tokenizer.CountTokens(result.originalContent),
+					OriginalTokens:    result.originalTokens,
+					CompressedTokens:  result.originalTokens,
 					CacheHit:          false,
 					MappingStatus:     "passthrough",
 					Model:             p.getEffectiveModel(),
@@ -377,7 +378,7 @@ func (p *Pipe) compressAllTools(ctx *pipes.PipeContext) ([]byte, error) {
 			// compressionRatio = fraction of tokens removed (higher = more aggressive).
 			// Reject when compressionRatio < p.refusalThreshold (configurable, default DefaultRefusalThreshold).
 			// This also rejects cases where compression expanded the content (compressionRatio == 0 after clamping).
-			origTokens := tokenizer.CountTokens(result.originalContent)
+			origTokens := result.originalTokens
 			compTokens := tokenizer.CountTokens(result.compressedContent)
 			compressionRatio := tokenizer.CompressionRatio(origTokens, compTokens)
 			if compressionRatio < p.refusalThreshold {
@@ -617,6 +618,7 @@ func (p *Pipe) compressOne(reqCtx context.Context, query, provider string, auth 
 				toolName:          t.toolName,
 				toolCallID:        t.msg.ToolCallID,
 				originalContent:   t.original,
+				originalTokens:    t.originalTokens,
 				compressedContent: t.original,
 				success:           true,
 				usedFallback:      true,
@@ -638,6 +640,7 @@ func (p *Pipe) compressOne(reqCtx context.Context, query, provider string, auth 
 		toolName:          t.toolName,
 		toolCallID:        t.msg.ToolCallID,
 		originalContent:   t.original,
+		originalTokens:    t.originalTokens,
 		compressedContent: compressed,
 		success:           true,
 		messageIndex:      t.messageIndex,

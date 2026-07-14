@@ -320,13 +320,14 @@ func (p *Pipe) IsQueryAgnostic() bool {
 
 // compressionTask holds data for parallel compression.
 type compressionTask struct {
-	index        int
-	msg          message
-	toolName     string
-	shadowID     string
-	original     string
-	messageIndex int
-	blockIndex   int
+	index          int
+	msg            message
+	toolName       string
+	shadowID       string
+	original       string
+	originalTokens int
+	messageIndex   int
+	blockIndex     int
 }
 
 // message is a minimal message struct for internal use
@@ -342,6 +343,7 @@ type compressionResult struct {
 	toolName          string
 	toolCallID        string
 	originalContent   string
+	originalTokens    int
 	compressedContent string
 	success           bool
 	usedFallback      bool
